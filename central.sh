@@ -938,6 +938,7 @@ fzf_pick() {
 menu_loop_fzf() {
   require_root
   export TERM="${TERM:-xterm-256color}"
+  clear || true
   while true; do
     local category
     local choice
@@ -956,6 +957,7 @@ menu_loop_fzf() {
 menu_loop_whiptail() {
   require_root
   tui_theme
+  clear || true
   while true; do
     local choice
     local summary
@@ -1000,6 +1002,7 @@ menu_loop_whiptail() {
 
 menu_loop_plain() {
   require_root
+  clear || true
   while true; do
     print_header
     safe_source_env
