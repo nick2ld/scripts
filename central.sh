@@ -40,6 +40,11 @@ warn() { echo -e "${YELLOW}WARN:${NC} $*"; }
 fail() { echo -e "${RED}ERROR:${NC} $*" >&2; exit 1; }
 pause() { echo; read -rp "Нажми Enter для продолжения..." _ || true; }
 is_interactive() { [[ -t 0 ]]; }
+require_interactive_install() {
+  if ! is_interactive; then
+    fail "Интерактивная установка не работает через pipe. Скачай скрипт во временный файл и запусти его: tmp=\"\$(mktemp)\" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh -o \"\$tmp\" && bash \"\$tmp\"; rc=\$?; rm -f \"\$tmp\"; exit \$rc"
+  fi
+}
 prompt_default() {
   local __var_name="$1"
   local __prompt="$2"
@@ -474,6 +479,7 @@ full_install() {
   require_root
   detect_debian
   print_header
+  require_interactive_install
   echo "Установка CrowdSec Central LAPI + Web UI + меню управления."
   echo "Необязательные параметры можно пропустить и изменить позже."
   echo

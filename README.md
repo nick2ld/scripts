@@ -17,28 +17,30 @@ Production-ready Bash scripts for deploying and operating CrowdSec in a central 
 
 ### One-command install from GitHub
 
+Use the temporary-file form below. It keeps stdin attached to the terminal, so the installer can ask interactive questions correctly.
+
 Central server:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh | sudo bash
-```
-
-or
-
-```bash
-wget -qO- https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh | sudo bash
+tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
 ```
 
 VPS node:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/vps.sh | sudo bash
+tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/vps.sh -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
 ```
 
-or
+Alternative with `wget`:
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/nick2ld/scripts/main/vps.sh | sudo bash
+wget -qO /tmp/crowdsec-central.sh https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh && if [ "$(id -u)" -eq 0 ]; then bash /tmp/crowdsec-central.sh; else sudo bash /tmp/crowdsec-central.sh; fi; rc=$?; rm -f /tmp/crowdsec-central.sh; [ "$rc" -eq 0 ]
+```
+
+For VPS node with `wget`:
+
+```bash
+wget -qO /tmp/crowdsec-vps.sh https://raw.githubusercontent.com/nick2ld/scripts/main/vps.sh && if [ "$(id -u)" -eq 0 ]; then bash /tmp/crowdsec-vps.sh; else sudo bash /tmp/crowdsec-vps.sh; fi; rc=$?; rm -f /tmp/crowdsec-vps.sh; [ "$rc" -eq 0 ]
 ```
 
 ### 1) Central server
