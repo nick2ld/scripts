@@ -55,7 +55,7 @@ After installation, interactive menu:
 sudo crowdsec-central-menu
 ```
 
-The central menu uses `whiptail` TUI when available: arrow keys, Enter/Esc, colored dialog windows and action names instead of numeric input. If `whiptail` is missing, the script tries to install it automatically; otherwise it falls back to the plain text menu.
+The central menu uses `fzf` TUI when available: arrow keys, fuzzy search, colors, symbols and action names instead of numeric input. If `fzf` is missing, the script tries to install `fzf` and `whiptail` automatically. `whiptail` is used as a fallback; plain text menu is used only when no TUI is available.
 
 Update installed menu command without reinstalling the stack:
 

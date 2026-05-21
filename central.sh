@@ -205,7 +205,7 @@ install_base() {
   log "Устанавливаю базовые пакеты..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https openssl python3 python3-yaml sudo ufw nano jq iproute2 procps xz-utils whiptail
+  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https openssl python3 python3-yaml sudo ufw nano jq iproute2 procps xz-utils whiptail fzf
   ok "Базовые пакеты установлены."
 }
 
@@ -783,13 +783,15 @@ textbox=white,blue
 }
 
 ensure_tui_tools() {
+  command -v fzf >/dev/null 2>&1 && return 0
   command -v whiptail >/dev/null 2>&1 && return 0
   if command -v apt-get >/dev/null 2>&1; then
+    log "Устанавливаю TUI-зависимости меню: fzf, whiptail..."
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y >/dev/null 2>&1 || return 1
-    apt-get install -y whiptail >/dev/null 2>&1 || return 1
+    apt-get update -y || return 1
+    apt-get install -y fzf whiptail || return 1
   fi
-  command -v whiptail >/dev/null 2>&1
+  command -v fzf >/dev/null 2>&1 || command -v whiptail >/dev/null 2>&1
 }
 
 tui_summary() {
@@ -833,7 +835,64 @@ run_menu_action() {
   esac
 }
 
-menu_loop_tui() {
+menu_items() {
+  cat <<'EOF'
+status	● Статус сервисов и портов
+connect	◆ Адреса, токены и подключение VPS
+envfile	▣ Показать central.env
+add_range	+ Добавить IP/CIDR к LAPI
+remove_range	- Удалить IP/CIDR из LAPI
+replace_ranges	⇄ Заменить весь список IP/CIDR
+web_addr	▸ LAN IP и порт Web UI
+lapi_port	▸ Порт LAPI
+public_addr	▸ Внешний адрес/DDNS для VPS
+auto_token	⚿ Новый auto-registration token
+bouncer_key	⚿ Новый shared bouncer key
+restart	↻ Перезапустить CrowdSec, Docker, Web UI
+update_webui	↑ Обновить только Web UI
+logs	☰ Логи Web UI
+crowdsec_info	☷ Machines, bouncers, alerts, decisions
+firewall	▦ Firewall/UFW
+reapply	✓ Повторно применить все настройки
+update_all	↑ Обновить весь стек
+update_system	↑ Обновить системные пакеты Debian
+update_docker	↑ Обновить Docker
+update_crowdsec	↑ Обновить CrowdSec
+versions	ⓘ Версии установленного ПО
+test_lapi	◇ Проверить доступ Web UI к LAPI
+disable_autostart	✕ Отключить автозапуск меню
+enable_autostart	✓ Включить автозапуск меню
+repair_menu	⚙ Переустановить команду меню
+exit	× Выход
+EOF
+}
+
+menu_loop_fzf() {
+  require_root
+  export TERM="${TERM:-xterm-256color}"
+  while true; do
+    local choice
+    local header
+    header="$(tui_summary)"
+    choice="$(menu_items | fzf \
+      --ansi \
+      --delimiter=$'\t' \
+      --with-nth=2 \
+      --height=95% \
+      --layout=reverse \
+      --border=rounded \
+      --prompt='CrowdSec ❯ ' \
+      --pointer='▶' \
+      --marker='✓' \
+      --header="${header}" \
+      --color='fg:#d7e1ff,bg:#101827,hl:#7dd3fc,fg+:#ffffff,bg+:#26415f,hl+:#facc15,prompt:#22c55e,pointer:#f97316,marker:#facc15,header:#93c5fd,border:#38bdf8' \
+    )" || exit 0
+    choice="${choice%%$'\t'*}"
+    run_menu_action "${choice}"
+  done
+}
+
+menu_loop_whiptail() {
   require_root
   tui_theme
   while true; do
@@ -961,8 +1020,14 @@ menu_loop_plain() {
 
 menu_loop() {
   if [[ -t 0 && -t 1 ]] && ensure_tui_tools; then
-    menu_loop_tui
+    if command -v fzf >/dev/null 2>&1; then
+      menu_loop_fzf
+    else
+      menu_loop_whiptail
+    fi
   else
+    warn "TUI-меню недоступно: нет TTY или не удалось установить fzf/whiptail. Открываю простой fallback."
+    pause
     menu_loop_plain
   fi
 }
