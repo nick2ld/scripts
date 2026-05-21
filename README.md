@@ -55,6 +55,12 @@ After installation, interactive menu:
 sudo crowdsec-central-menu
 ```
 
+Update installed menu command without reinstalling the stack:
+
+```bash
+sudo curl -fsSL "https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh?$(date +%s)" -o /usr/local/sbin/crowdsec-central-menu && sudo chmod 755 /usr/local/sbin/crowdsec-central-menu
+```
+
 ### 2) VPS node
 
 ```bash

@@ -848,7 +848,7 @@ case "${1:-}" in
   --install) full_install ;;
   --menu) menu_loop ;;
   *)
-    if [[ "$(basename "$0")" == "crowdsec-central-menu" ]]; then
+    if [[ "$(basename "$0")" == "crowdsec-central-menu" || -f "${ENV_FILE}" ]]; then
       menu_loop
     else
       full_install
