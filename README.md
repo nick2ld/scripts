@@ -15,6 +15,32 @@ Production-ready Bash scripts for deploying and operating CrowdSec in a central 
 
 ## Quick Start
 
+### One-command install from GitHub
+
+Central server:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh | sudo bash
+```
+
+or
+
+```bash
+wget -qO- https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh | sudo bash
+```
+
+VPS node:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/vps.sh | sudo bash
+```
+
+or
+
+```bash
+wget -qO- https://raw.githubusercontent.com/nick2ld/scripts/main/vps.sh | sudo bash
+```
+
 ### 1) Central server
 
 ```bash
