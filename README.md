@@ -52,7 +52,7 @@ sudo bash central.sh
 After installation, interactive menu:
 
 ```bash
-sudo crowdsec-central-menu --menu
+sudo crowdsec-central-menu
 ```
 
 ### 2) VPS node

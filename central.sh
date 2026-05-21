@@ -845,6 +845,13 @@ menu_loop() {
 }
 
 case "${1:-}" in
+  --install) full_install ;;
   --menu) menu_loop ;;
-  *) full_install ;;
+  *)
+    if [[ "$(basename "$0")" == "crowdsec-central-menu" ]]; then
+      menu_loop
+    else
+      full_install
+    fi
+    ;;
 esac
