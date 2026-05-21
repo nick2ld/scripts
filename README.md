@@ -60,7 +60,13 @@ The central menu uses `fzf` TUI when available: arrow keys, fuzzy search, colors
 Update installed menu command without reinstalling the stack:
 
 ```bash
-sudo curl -fsSL "https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh?$(date +%s)" -o /usr/local/sbin/crowdsec-central-menu && sudo chmod 755 /usr/local/sbin/crowdsec-central-menu
+tmp="$(mktemp)" && curl -fsSL -H "Cache-Control: no-cache" "https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh?$(date +%s)" -o "$tmp" && bash -n "$tmp" && sudo install -m 0755 "$tmp" /usr/local/sbin/crowdsec-central-menu; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
+```
+
+Check installed menu version:
+
+```bash
+grep '^SCRIPT_VERSION=' /usr/local/sbin/crowdsec-central-menu
 ```
 
 ### 2) VPS node

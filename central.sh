@@ -33,6 +33,8 @@ PROFILE_FILE="/etc/profile.d/crowdsec-central-menu.sh"
 DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
+SCRIPT_VERSION="2026.05.22-compact-fzf"
+SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
 ok() { echo -e "${GREEN}OK:${NC} $*"; }
@@ -161,7 +163,7 @@ ENV
 print_header() {
   clear || true
   echo "============================================================"
-  echo "CrowdSec Central LAPI + Web UI"
+  echo "CrowdSec Central LAPI + Web UI (${SCRIPT_VERSION})"
   echo "============================================================"
   echo
 }
@@ -459,6 +461,19 @@ PROFILE
   ok "Автозапуск меню при входе настроен."
 }
 
+update_menu_from_github() {
+  require_root
+  log "Скачиваю актуальную версию меню из GitHub..."
+  command -v curl >/dev/null 2>&1 || fail "Не найден curl. Установи: apt-get update && apt-get install -y curl"
+  local tmp
+  tmp="$(mktemp)"
+  curl -fsSL -H "Cache-Control: no-cache" "${SCRIPT_RAW_URL}?$(date +%s)" -o "${tmp}"
+  bash -n "${tmp}"
+  install -m 0755 "${tmp}" "${INSTALLED_SCRIPT}"
+  rm -f "${tmp}"
+  ok "Меню обновлено: ${INSTALLED_SCRIPT}"
+}
+
 show_install_result() {
   safe_source_env
   echo
@@ -741,7 +756,7 @@ reapply_all_settings() {
 
 disable_login_menu() { print_header; rm -f "${PROFILE_FILE}"; ok "Автозапуск меню отключён."; pause; }
 enable_login_menu() { print_header; install_menu_files; ok "Автозапуск меню включён."; pause; }
-repair_menu_installation() { print_header; install_menu_files; ok "Команда меню установлена: sudo crowdsec-central-menu"; pause; }
+repair_menu_installation() { print_header; update_menu_from_github; ok "Команда меню обновлена: sudo crowdsec-central-menu"; pause; }
 
 show_versions() {
   print_header
