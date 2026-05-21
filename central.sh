@@ -205,7 +205,7 @@ install_base() {
   log "Устанавливаю базовые пакеты..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https openssl python3 python3-yaml sudo ufw nano jq iproute2 procps xz-utils
+  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https openssl python3 python3-yaml sudo ufw nano jq iproute2 procps xz-utils whiptail
   ok "Базовые пакеты установлены."
 }
 
@@ -763,7 +763,122 @@ test_webui_lapi() {
   pause
 }
 
-menu_loop() {
+tui_theme() {
+  export NEWT_COLORS='
+root=white,blue
+border=white,blue
+window=white,blue
+shadow=black,black
+title=yellow,blue
+button=black,cyan
+actbutton=white,red
+checkbox=white,blue
+actcheckbox=black,cyan
+entry=black,cyan
+label=yellow,blue
+listbox=white,blue
+actlistbox=black,cyan
+textbox=white,blue
+'
+}
+
+ensure_tui_tools() {
+  command -v whiptail >/dev/null 2>&1 && return 0
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >/dev/null 2>&1 || return 1
+    apt-get install -y whiptail >/dev/null 2>&1 || return 1
+  fi
+  command -v whiptail >/dev/null 2>&1
+}
+
+tui_summary() {
+  safe_source_env
+  cat <<EOF
+Web UI: ${LOCAL_WEB_UI}
+LAPI:   ${VPS_LAPI_URL}
+CIDR:   ${ALLOWED_RANGES:-не заданы}
+EOF
+}
+
+run_menu_action() {
+  case "${1}" in
+    status) show_status; pause ;;
+    connect) show_connection_info; pause ;;
+    envfile) show_tokens_file; pause ;;
+    add_range) add_allowed_range ;;
+    remove_range) remove_allowed_range ;;
+    replace_ranges) replace_allowed_ranges ;;
+    web_addr) change_lan_ip_or_web_port ;;
+    lapi_port) change_lapi_port ;;
+    public_addr) change_public_addr ;;
+    auto_token) regenerate_auto_token ;;
+    bouncer_key) regenerate_bouncer_key ;;
+    restart) restart_services ;;
+    update_webui) update_web_ui_only ;;
+    logs) show_logs ;;
+    crowdsec_info) show_crowdsec_info ;;
+    firewall) show_firewall ;;
+    reapply) reapply_all_settings ;;
+    disable_autostart) disable_login_menu ;;
+    enable_autostart) enable_login_menu ;;
+    update_all) update_installed_stack ;;
+    update_system) update_system_only ;;
+    update_docker) update_docker_only ;;
+    update_crowdsec) update_crowdsec_only ;;
+    versions) show_versions ;;
+    repair_menu) repair_menu_installation ;;
+    test_lapi) test_webui_lapi ;;
+    exit) exit 0 ;;
+  esac
+}
+
+menu_loop_tui() {
+  require_root
+  tui_theme
+  while true; do
+    local choice
+    local summary
+    summary="$(tui_summary)"
+    choice="$(whiptail \
+      --backtitle "CrowdSec Central Control Panel" \
+      --title " CrowdSec Central " \
+      --cancel-button "Выход" \
+      --ok-button "Открыть" \
+      --menu "${summary}" \
+      32 100 20 \
+      "status" "● Статус сервисов и портов" \
+      "connect" "◆ Адреса, токены и подключение VPS" \
+      "envfile" "▣ Показать central.env" \
+      "add_range" "+ Добавить IP/CIDR к LAPI" \
+      "remove_range" "- Удалить IP/CIDR из LAPI" \
+      "replace_ranges" "⇄ Заменить весь список IP/CIDR" \
+      "web_addr" "▸ LAN IP и порт Web UI" \
+      "lapi_port" "▸ Порт LAPI" \
+      "public_addr" "▸ Внешний адрес/DDNS для VPS" \
+      "auto_token" "⚿ Новый auto-registration token" \
+      "bouncer_key" "⚿ Новый shared bouncer key" \
+      "restart" "↻ Перезапустить CrowdSec, Docker, Web UI" \
+      "update_webui" "↑ Обновить только Web UI" \
+      "logs" "☰ Логи Web UI" \
+      "crowdsec_info" "☷ Machines, bouncers, alerts, decisions" \
+      "firewall" "▦ Firewall/UFW" \
+      "reapply" "✓ Повторно применить все настройки" \
+      "update_all" "↑ Обновить весь стек" \
+      "update_system" "↑ Обновить системные пакеты Debian" \
+      "update_docker" "↑ Обновить Docker" \
+      "update_crowdsec" "↑ Обновить CrowdSec" \
+      "versions" "ⓘ Версии установленного ПО" \
+      "test_lapi" "◇ Проверить доступ Web UI к LAPI" \
+      "disable_autostart" "✕ Отключить автозапуск меню" \
+      "enable_autostart" "✓ Включить автозапуск меню" \
+      "repair_menu" "⚙ Переустановить команду меню" \
+      3>&1 1>&2 2>&3)" || exit 0
+    run_menu_action "${choice}"
+  done
+}
+
+menu_loop_plain() {
   require_root
   while true; do
     print_header
@@ -842,6 +957,14 @@ menu_loop() {
       *) echo "Неизвестный пункт меню."; pause ;;
     esac
   done
+}
+
+menu_loop() {
+  if [[ -t 0 && -t 1 ]] && ensure_tui_tools; then
+    menu_loop_tui
+  else
+    menu_loop_plain
+  fi
 }
 
 case "${1:-}" in

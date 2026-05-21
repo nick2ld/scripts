@@ -55,6 +55,8 @@ After installation, interactive menu:
 sudo crowdsec-central-menu
 ```
 
+The central menu uses `whiptail` TUI when available: arrow keys, Enter/Esc, colored dialog windows and action names instead of numeric input. If `whiptail` is missing, the script tries to install it automatically; otherwise it falls back to the plain text menu.
+
 Update installed menu command without reinstalling the stack:
 
 ```bash
