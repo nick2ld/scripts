@@ -30,6 +30,12 @@ ok() { echo -e "${GREEN}OK:${NC} $*"; }
 warn() { echo -e "${YELLOW}WARN:${NC} $*"; }
 fail() { echo -e "${RED}ERROR:${NC} $*" >&2; exit 1; }
 pause() { echo; read -rp "Нажми Enter для продолжения..." _ || true; }
+on_error() {
+  local exit_code="$?"
+  local line_no="${1:-unknown}"
+  fail "Сбой на строке ${line_no}, код выхода ${exit_code}"
+}
+trap 'on_error ${LINENO}' ERR
 
 require_root() { [[ "${EUID}" -eq 0 ]] || fail "Запусти от root: sudo bash $0"; }
 
@@ -88,13 +94,18 @@ ask_settings() {
   read -rp "Central LAPI URL [${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}]: " input_lapi
   CENTRAL_LAPI_URL="${input_lapi:-${CENTRAL_LAPI_URL}}"
   [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "Central LAPI URL не может быть пустым."
+  [[ "${CENTRAL_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]] || fail "Central LAPI URL должен начинаться с http:// или https://"
 
   read -rp "AUTO_REG_TOKEN: " input_token
   AUTO_REG_TOKEN="${input_token:-${AUTO_REG_TOKEN}}"
   [[ -n "${AUTO_REG_TOKEN}" ]] || fail "AUTO_REG_TOKEN не может быть пустым."
+  [[ "${AUTO_REG_TOKEN}" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "AUTO_REG_TOKEN содержит недопустимые символы."
 
   read -rp "SHARED_BOUNCER_KEY: " input_bouncer
   SHARED_BOUNCER_KEY="${input_bouncer:-${SHARED_BOUNCER_KEY}}"
+  if [[ -n "${SHARED_BOUNCER_KEY}" ]] && [[ ! "${SHARED_BOUNCER_KEY}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+    fail "SHARED_BOUNCER_KEY содержит недопустимые символы."
+  fi
 
   read -rp "Machine name [${MACHINE_NAME}]: " input_machine
   MACHINE_NAME="${input_machine:-${MACHINE_NAME}}"
