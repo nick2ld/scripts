@@ -30,6 +30,17 @@ ok() { echo -e "${GREEN}OK:${NC} $*"; }
 warn() { echo -e "${YELLOW}WARN:${NC} $*"; }
 fail() { echo -e "${RED}ERROR:${NC} $*" >&2; exit 1; }
 pause() { echo; read -rp "Нажми Enter для продолжения..." _ || true; }
+is_interactive() { [[ -t 0 ]]; }
+prompt_default() {
+  local __var_name="$1"
+  local __prompt="$2"
+  local __default="${3:-}"
+  local __value=""
+  if is_interactive; then
+    read -rp "${__prompt}" __value || __value=""
+  fi
+  printf -v "${__var_name}" '%s' "${__value:-${__default}}"
+}
 on_error() {
   local exit_code="$?"
   local line_no="${1:-unknown}"
@@ -91,27 +102,27 @@ ask_settings() {
   echo "Пункт 2 покажет LAPI URL, AUTO_REG_TOKEN и SHARED_BOUNCER_KEY."
   echo "Перед установкой добавь внешний IP этого VPS в allowed IP/CIDR на центральном сервере."
   echo
-  read -rp "Central LAPI URL [${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}]: " input_lapi
+  prompt_default input_lapi "Central LAPI URL [${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}]: " "${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}"
   CENTRAL_LAPI_URL="${input_lapi:-${CENTRAL_LAPI_URL}}"
   [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "Central LAPI URL не может быть пустым."
   [[ "${CENTRAL_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]] || fail "Central LAPI URL должен начинаться с http:// или https://"
 
-  read -rp "AUTO_REG_TOKEN: " input_token
+  prompt_default input_token "AUTO_REG_TOKEN: " "${AUTO_REG_TOKEN:-}"
   AUTO_REG_TOKEN="${input_token:-${AUTO_REG_TOKEN}}"
   [[ -n "${AUTO_REG_TOKEN}" ]] || fail "AUTO_REG_TOKEN не может быть пустым."
   [[ "${AUTO_REG_TOKEN}" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "AUTO_REG_TOKEN содержит недопустимые символы."
 
-  read -rp "SHARED_BOUNCER_KEY: " input_bouncer
+  prompt_default input_bouncer "SHARED_BOUNCER_KEY: " "${SHARED_BOUNCER_KEY:-}"
   SHARED_BOUNCER_KEY="${input_bouncer:-${SHARED_BOUNCER_KEY}}"
   if [[ -n "${SHARED_BOUNCER_KEY}" ]] && [[ ! "${SHARED_BOUNCER_KEY}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
     fail "SHARED_BOUNCER_KEY содержит недопустимые символы."
   fi
 
-  read -rp "Machine name [${MACHINE_NAME}]: " input_machine
+  prompt_default input_machine "Machine name [${MACHINE_NAME}]: " "${MACHINE_NAME}"
   MACHINE_NAME="${input_machine:-${MACHINE_NAME}}"
 
   echo
-  read -rp "Ставить firewall-bouncer для автоматической блокировки IP? [Y/n]: " input_bouncer_install
+  prompt_default input_bouncer_install "Ставить firewall-bouncer для автоматической блокировки IP? [Y/n]: " "Y"
   if [[ "${input_bouncer_install:-Y}" =~ ^[Nn]$ ]]; then
     INSTALL_FIREWALL_BOUNCER="no"
   else
@@ -126,7 +137,7 @@ ask_settings() {
   echo "auto - включить автоматически, если найдены nginx/apache"
   echo "yes  - включить принудительно"
   echo "no   - не включать"
-  read -rp "Включать web collections? [auto]: " input_web
+  prompt_default input_web "Включать web collections? [auto]: " "auto"
   INSTALL_WEB_COLLECTIONS="${input_web:-auto}"
 
   save_env

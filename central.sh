@@ -39,6 +39,17 @@ ok() { echo -e "${GREEN}OK:${NC} $*"; }
 warn() { echo -e "${YELLOW}WARN:${NC} $*"; }
 fail() { echo -e "${RED}ERROR:${NC} $*" >&2; exit 1; }
 pause() { echo; read -rp "Нажми Enter для продолжения..." _ || true; }
+is_interactive() { [[ -t 0 ]]; }
+prompt_default() {
+  local __var_name="$1"
+  local __prompt="$2"
+  local __default="${3:-}"
+  local __value=""
+  if is_interactive; then
+    read -rp "${__prompt}" __value || __value=""
+  fi
+  printf -v "${__var_name}" '%s' "${__value:-${__default}}"
+}
 is_valid_port() {
   local p="${1:-}"
   [[ "${p}" =~ ^[0-9]+$ ]] || return 1
@@ -243,20 +254,20 @@ ask_initial_settings() {
   DETECTED_IP="$(get_lan_ip)"
   [[ -n "${DETECTED_IP}" ]] || DETECTED_IP="${LAN_IP}"
   echo "LAN IP контейнера определён как: ${DETECTED_IP}"
-  read -rp "LAN IP для веб-морды и локального LAPI [${DETECTED_IP}]: " input_lan_ip
-  LAN_IP="${input_lan_ip:-${DETECTED_IP}}"
-  read -rp "Порт веб-морды [${WEB_PORT:-3000}]: " input_web_port
-  WEB_PORT="${input_web_port:-${WEB_PORT:-3000}}"
-  read -rp "Порт центрального LAPI [${LAPI_PORT:-8080}]: " input_lapi_port
-  LAPI_PORT="${input_lapi_port:-${LAPI_PORT:-8080}}"
+  prompt_default input_lan_ip "LAN IP для веб-морды и локального LAPI [${DETECTED_IP}]: " "${DETECTED_IP}"
+  LAN_IP="${input_lan_ip}"
+  prompt_default input_web_port "Порт веб-морды [${WEB_PORT:-3000}]: " "${WEB_PORT:-3000}"
+  WEB_PORT="${input_web_port}"
+  prompt_default input_lapi_port "Порт центрального LAPI [${LAPI_PORT:-8080}]: " "${LAPI_PORT:-8080}"
+  LAPI_PORT="${input_lapi_port}"
   echo
   echo "Allowed IP/CIDR можно оставить пустым и добавить позже через меню."
   echo "Примеры: 11.22.33.44/32 или 11.22.33.44/32,192.168.1.0/24"
-  read -rp "Allowed IP/CIDR для LAPI [можно пусто]: " input_allowed
+  prompt_default input_allowed "Allowed IP/CIDR для LAPI [можно пусто]: " "${ALLOWED_RANGES:-}"
   ALLOWED_RANGES="${input_allowed:-${ALLOWED_RANGES:-}}"
   echo
   echo "Внешний адрес нужен для готовой команды подключения VPS. Можно оставить пустым."
-  read -rp "Внешний адрес для удалённых серверов [можно пусто]: " input_public
+  prompt_default input_public "Внешний адрес для удалённых серверов [можно пусто]: " "${PUBLIC_ADDR:-}"
   PUBLIC_ADDR="${input_public:-${PUBLIC_ADDR:-}}"
   [[ -n "${AUTO_REG_TOKEN:-}" ]] || AUTO_REG_TOKEN="$(openssl rand -hex 32)"
   [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || SHARED_BOUNCER_KEY="$(openssl rand -hex 32)"
@@ -466,7 +477,7 @@ full_install() {
   echo "Установка CrowdSec Central LAPI + Web UI + меню управления."
   echo "Необязательные параметры можно пропустить и изменить позже."
   echo
-  read -rp "Перед установкой обновить системные пакеты Debian? [Y/n]: " do_upgrade
+  prompt_default do_upgrade "Перед установкой обновить системные пакеты Debian? [Y/n]: " "Y"
   ask_initial_settings
   install_base
   if [[ ! "${do_upgrade:-Y}" =~ ^[Nn]$ ]]; then
