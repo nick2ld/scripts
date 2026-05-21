@@ -835,58 +835,104 @@ run_menu_action() {
   esac
 }
 
-menu_items() {
+menu_categories() {
   cat <<'EOF'
-status	● Статус сервисов и портов
-connect	◆ Адреса, токены и подключение VPS
-envfile	▣ Показать central.env
-add_range	+ Добавить IP/CIDR к LAPI
-remove_range	- Удалить IP/CIDR из LAPI
-replace_ranges	⇄ Заменить весь список IP/CIDR
-web_addr	▸ LAN IP и порт Web UI
-lapi_port	▸ Порт LAPI
-public_addr	▸ Внешний адрес/DDNS для VPS
-auto_token	⚿ Новый auto-registration token
-bouncer_key	⚿ Новый shared bouncer key
-restart	↻ Перезапустить CrowdSec, Docker, Web UI
-update_webui	↑ Обновить только Web UI
-logs	☰ Логи Web UI
-crowdsec_info	☷ Machines, bouncers, alerts, decisions
-firewall	▦ Firewall/UFW
-reapply	✓ Повторно применить все настройки
-update_all	↑ Обновить весь стек
-update_system	↑ Обновить системные пакеты Debian
-update_docker	↑ Обновить Docker
-update_crowdsec	↑ Обновить CrowdSec
-versions	ⓘ Версии установленного ПО
-test_lapi	◇ Проверить доступ Web UI к LAPI
-disable_autostart	✕ Отключить автозапуск меню
-enable_autostart	✓ Включить автозапуск меню
-repair_menu	⚙ Переустановить команду меню
-exit	× Выход
+status	●  Статус и данные
+access	◆  Доступ к LAPI
+network	▸  Сеть и ключи
+service	↻  Обслуживание
+system	↑  Обновления и диагностика
+menu	⚙  Настройки меню
+exit	×  Выход
 EOF
+}
+
+menu_items_for_category() {
+  case "${1}" in
+    status)
+      cat <<'EOF'
+status	●  Статус сервисов и портов
+connect	◆  Адреса, токены и подключение VPS
+envfile	▣  Показать central.env
+EOF
+      ;;
+    access)
+      cat <<'EOF'
+add_range	+  Добавить IP/CIDR к LAPI
+remove_range	-  Удалить IP/CIDR из LAPI
+replace_ranges	⇄  Заменить весь список IP/CIDR
+firewall	▦  Показать firewall/UFW
+EOF
+      ;;
+    network)
+      cat <<'EOF'
+web_addr	▸  LAN IP и порт Web UI
+lapi_port	▸  Порт LAPI
+public_addr	▸  Внешний адрес/DDNS для VPS
+auto_token	⚿  Новый auto-registration token
+bouncer_key	⚿  Новый shared bouncer key
+test_lapi	◇  Проверить доступ Web UI к LAPI
+EOF
+      ;;
+    service)
+      cat <<'EOF'
+restart	↻  Перезапустить CrowdSec, Docker, Web UI
+update_webui	↑  Обновить только Web UI
+logs	☰  Логи Web UI
+crowdsec_info	☷  Machines, bouncers, alerts, decisions
+reapply	✓  Повторно применить все настройки
+EOF
+      ;;
+    system)
+      cat <<'EOF'
+update_all	↑  Обновить весь стек
+update_system	↑  Обновить системные пакеты Debian
+update_docker	↑  Обновить Docker
+update_crowdsec	↑  Обновить CrowdSec
+versions	ⓘ  Версии установленного ПО
+EOF
+      ;;
+    menu)
+      cat <<'EOF'
+disable_autostart	✕  Отключить автозапуск меню
+enable_autostart	✓  Включить автозапуск меню
+repair_menu	⚙  Переустановить команду меню
+EOF
+      ;;
+  esac
+}
+
+fzf_pick() {
+  local prompt="$1"
+  local header="$2"
+  fzf \
+    --ansi \
+    --delimiter=$'\t' \
+    --with-nth=2 \
+    --height=70% \
+    --min-height=16 \
+    --layout=reverse \
+    --border=rounded \
+    --prompt="${prompt}" \
+    --pointer='▶' \
+    --marker='✓' \
+    --header="${header}" \
+    --color='fg:#d7e1ff,bg:#101827,hl:#7dd3fc,fg+:#ffffff,bg+:#26415f,hl+:#facc15,prompt:#22c55e,pointer:#f97316,marker:#facc15,header:#93c5fd,border:#38bdf8'
 }
 
 menu_loop_fzf() {
   require_root
   export TERM="${TERM:-xterm-256color}"
   while true; do
+    local category
     local choice
     local header
     header="$(tui_summary)"
-    choice="$(menu_items | fzf \
-      --ansi \
-      --delimiter=$'\t' \
-      --with-nth=2 \
-      --height=95% \
-      --layout=reverse \
-      --border=rounded \
-      --prompt='CrowdSec ❯ ' \
-      --pointer='▶' \
-      --marker='✓' \
-      --header="${header}" \
-      --color='fg:#d7e1ff,bg:#101827,hl:#7dd3fc,fg+:#ffffff,bg+:#26415f,hl+:#facc15,prompt:#22c55e,pointer:#f97316,marker:#facc15,header:#93c5fd,border:#38bdf8' \
-    )" || exit 0
+    category="$(menu_categories | fzf_pick 'Раздел ❯ ' "${header}")" || exit 0
+    category="${category%%$'\t'*}"
+    [[ "${category}" == "exit" ]] && exit 0
+
+    choice="$(menu_items_for_category "${category}" | fzf_pick 'Действие ❯ ' "Esc - назад | ${header}")" || continue
     choice="${choice%%$'\t'*}"
     run_menu_action "${choice}"
   done
