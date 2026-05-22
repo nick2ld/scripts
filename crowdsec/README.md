@@ -63,7 +63,9 @@ sh -c 'tmp="$(mktemp -t crowdsec-vps.XXXXXX)" && curl -fsSL "https://raw.githubu
 - Удаляет apt/systemd CrowdSec перед установкой режима CrowdSec Manager, сохранив backup `/etc/crowdsec` и `/var/lib/crowdsec`.
 - Запускает Dockerized CrowdSec и CrowdSec Manager.
 - Настраивает central LAPI и auto-registration token.
-- Ограничивает Web UI локальными сетями через UFW. Наружу должен быть проброшен только LAPI-порт, если VPS подключаются извне.
+- Ограничивает Web UI локальными сетями через UFW.
+- Разрешает доступ к LAPI из локальных RFC1918-сетей `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`.
+- Наружу должен быть проброшен только LAPI-порт, если VPS подключаются извне.
 - Создаёт индивидуальные bouncer keys для VPS через мастер подключения.
 - Показывает прогресс установки в TUI gauge с живым хвостом лога.
 
@@ -193,7 +195,9 @@ Created connections are stored on central in `/root/crowdsec-central/vps-connect
 - Removes apt/systemd CrowdSec before installing CrowdSec Manager mode, while backing up `/etc/crowdsec` and `/var/lib/crowdsec`.
 - Runs Dockerized CrowdSec and CrowdSec Manager.
 - Configures central LAPI and the auto-registration token.
-- Restricts Web UI to private networks through UFW. Only the LAPI port should be forwarded from the Internet when external VPS nodes need to connect.
+- Restricts Web UI to private networks through UFW.
+- Allows LAPI access from local RFC1918 networks: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`.
+- Only the LAPI port should be forwarded from the Internet when external VPS nodes need to connect.
 - Creates per-VPS bouncer keys through the onboarding wizard.
 - Shows installation progress through a TUI gauge with a live log tail.
 

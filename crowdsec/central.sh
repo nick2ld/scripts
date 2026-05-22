@@ -35,6 +35,7 @@ INSTALLED_SCRIPT="/usr/local/sbin/crowdsec-central-menu"
 PROFILE_FILE="/etc/profile.d/crowdsec-central-menu.sh"
 DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
+LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
 SCRIPT_VERSION="v0.1"
@@ -627,7 +628,7 @@ remove_all_web_ui_containers() {
 configure_docker_crowdsec_lapi() {
   local config_file="${MANAGER_COMPOSE_DIR}/crowdsec-config/config.yaml"
   [[ -f "${config_file}" ]] || fail "Не найден ${config_file}"
-  AUTO_REG_TOKEN="${AUTO_REG_TOKEN}" ALLOWED_RANGES="${ALLOWED_RANGES}" python3 - "${config_file}" <<'PY'
+  AUTO_REG_TOKEN="${AUTO_REG_TOKEN}" ALLOWED_RANGES="${ALLOWED_RANGES}" LOCAL_LAPI_ALLOWED_RANGES="${LOCAL_LAPI_ALLOWED_RANGES}" python3 - "${config_file}" <<'PY'
 import os, re, sys, yaml
 path = sys.argv[1]
 with open(path, "r", errors="replace") as f:
@@ -636,10 +637,11 @@ cfg.setdefault("api", {})
 cfg["api"].setdefault("server", {})
 cfg["api"]["server"]["listen_uri"] = "0.0.0.0:8080"
 ranges = []
-for item in os.environ.get("ALLOWED_RANGES", "").split(","):
-    item = re.sub(r"[^0-9A-Fa-f:.\/]", "", item.strip())
-    if item and item not in ranges:
-        ranges.append(item)
+for env_name in ("LOCAL_LAPI_ALLOWED_RANGES", "ALLOWED_RANGES"):
+    for item in os.environ.get(env_name, "").split(","):
+        item = re.sub(r"[^0-9A-Fa-f:.\/]", "", item.strip())
+        if item and item not in ranges:
+            ranges.append(item)
 cfg["api"]["server"]["auto_registration"] = {
     "enabled": True,
     "token": os.environ["AUTO_REG_TOKEN"],
@@ -762,6 +764,14 @@ configure_ufw_full() {
 
   # Critical fix: Docker bridge network must reach central LAPI, otherwise Web UI shows LAPI Offline.
   ufw allow from 172.16.0.0/12 to any port "${LAPI_PORT}" proto tcp
+
+  # Local LAN/VPN/private nodes may use the central LAPI by local address.
+  IFS=',' read -ra local_ranges <<< "${LOCAL_LAPI_ALLOWED_RANGES}"
+  for range in "${local_ranges[@]}"; do
+    range="$(echo "${range}" | xargs)"
+    [[ -n "${range}" ]] || continue
+    ufw allow from "${range}" to any port "${LAPI_PORT}" proto tcp
+  done
 
   # Remote VPS nodes allowed to central LAPI.
   if [[ -n "${ALLOWED_RANGES}" ]]; then
