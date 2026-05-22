@@ -90,7 +90,7 @@ For readable bouncer names in CrowdSec Manager, create an individual key on the 
 Сеть и ключи -> Создать bouncer key с именем VPS
 ```
 
-Use the generated `BOUNCER_KEY` and the same `Machine name` during VPS installation. If you reuse the shared key, CrowdSec Manager will show the shared central bouncer name instead of the VPS name.
+Use the generated `BOUNCER_KEY` and the same `Machine name` during VPS installation. CrowdSec Manager shows the bouncer name from the key created on central, not the machine name typed on the VPS. If you reuse the shared key, CrowdSec Manager will show the shared central bouncer name instead of the VPS name.
 
 ## What These Scripts Configure
 
@@ -107,7 +107,7 @@ Use the generated `BOUNCER_KEY` and the same `Machine name` during VPS installat
 - CrowdSec agent installation
 - Fail2Ban safe removal (with backup)
 - Node registration to central LAPI
-- Optional service-specific collections and log sources for Nginx, Apache, Caddy, Traefik and HAProxy
+- CrowdSec Hub collection selection from the real `cscli` list, with suggestions based on installed commands, systemd services and Docker containers/images
 - Firewall bouncer connection to central LAPI
 
 ## Security Notes

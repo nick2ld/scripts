@@ -9,7 +9,7 @@ set -Eeuo pipefail
 # - Installs CrowdSec agent.
 # - Registers this VPS to the central LAPI using auto-registration token.
 # - Does NOT delete local_api_credentials.yaml before registration; it uses --file properly.
-# - Installs SSH/Linux collections and optional service-specific collections.
+# - Lets you choose CrowdSec Hub collections from the real cscli list.
 # - Installs firewall bouncer and points it to the central LAPI with a bouncer key.
 #
 # Install:
@@ -211,8 +211,8 @@ load_env_if_exists() {
   SHARED_BOUNCER_KEY="${SHARED_BOUNCER_KEY:-}"
   MACHINE_NAME="${MACHINE_NAME:-$(hostname -f 2>/dev/null || hostname)}"
   INSTALL_FIREWALL_BOUNCER="${INSTALL_FIREWALL_BOUNCER:-yes}"
-  INSTALL_WEB_COLLECTIONS="${INSTALL_WEB_COLLECTIONS:-auto}"
-  INSTALL_EXTRA_COLLECTIONS="${INSTALL_EXTRA_COLLECTIONS:-auto}"
+  COLLECTION_SELECTION_MODE="${COLLECTION_SELECTION_MODE:-manual}"
+  SELECTED_COLLECTIONS="${SELECTED_COLLECTIONS:-}"
   FIREWALL_BOUNCER_PACKAGE="${FIREWALL_BOUNCER_PACKAGE:-}"
   FIREWALL_BOUNCER_MODE="${FIREWALL_BOUNCER_MODE:-}"
 }
@@ -226,8 +226,8 @@ AUTO_REG_TOKEN=${AUTO_REG_TOKEN}
 SHARED_BOUNCER_KEY=${SHARED_BOUNCER_KEY}
 MACHINE_NAME=${MACHINE_NAME}
 INSTALL_FIREWALL_BOUNCER=${INSTALL_FIREWALL_BOUNCER}
-INSTALL_WEB_COLLECTIONS=${INSTALL_WEB_COLLECTIONS}
-INSTALL_EXTRA_COLLECTIONS=${INSTALL_EXTRA_COLLECTIONS}
+COLLECTION_SELECTION_MODE=${COLLECTION_SELECTION_MODE}
+SELECTED_COLLECTIONS=${SELECTED_COLLECTIONS}
 FIREWALL_BOUNCER_PACKAGE=${FIREWALL_BOUNCER_PACKAGE}
 FIREWALL_BOUNCER_MODE=${FIREWALL_BOUNCER_MODE}
 ENV
@@ -248,15 +248,10 @@ ask_settings() {
     else
       INSTALL_FIREWALL_BOUNCER="no"
     fi
-    INSTALL_WEB_COLLECTIONS="$(whiptail --title " Web Collections " --cancel-button "Отмена" --ok-button "Выбрать" --notags --menu "Включать web collections?" 15 78 3 \
-      "auto" "Автоопределение Nginx/Apache" \
-      "yes" "Включить принудительно" \
-      "no" "Не включать" \
-      3>&1 1>&2 2>&3)" || exit 1
-    INSTALL_EXTRA_COLLECTIONS="$(whiptail --title " Дополнительные collections " --cancel-button "Отмена" --ok-button "Выбрать" --notags --menu "Подключать collections под найденный софт?" 16 82 3 \
-      "auto" "Автоопределение Caddy/Traefik/HAProxy" \
-      "yes" "Включить всё поддерживаемое" \
-      "no" "Не включать" \
+    COLLECTION_SELECTION_MODE="$(whiptail --title " Collections " --cancel-button "Отмена" --ok-button "Выбрать" --notags --menu "Как выбрать CrowdSec collections после установки агента?" 16 86 3 \
+      "manual" "Показать список из CrowdSec Hub и выбрать вручную" \
+      "auto" "Поставить только базовые и похожие на найденный софт" \
+      "base" "Поставить только linux + sshd" \
       3>&1 1>&2 2>&3)" || exit 1
     [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "Central LAPI URL не может быть пустым."
     [[ "${CENTRAL_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]] || fail "Central LAPI URL должен начинаться с http:// или https://"
@@ -310,20 +305,12 @@ ask_settings() {
   fi
 
   echo
-  echo "Если на VPS есть Nginx или Apache, можно включить collections для веб-логов."
-  echo "auto - включить автоматически, если найдены nginx/apache"
-  echo "yes  - включить принудительно"
-  echo "no   - не включать"
-  prompt_default input_web "Включать web collections? [auto]: " "auto"
-  INSTALL_WEB_COLLECTIONS="${input_web:-auto}"
-
-  echo
-  echo "Дополнительные collections: Caddy, Traefik, HAProxy."
-  echo "auto - включить только если найден сервис или каталог логов"
-  echo "yes  - поставить все поддерживаемые collections"
-  echo "no   - не включать"
-  prompt_default input_extra "Включать дополнительные collections? [auto]: " "auto"
-  INSTALL_EXTRA_COLLECTIONS="${input_extra:-auto}"
+  echo "CrowdSec collections будут выбраны после установки агента из реального списка CrowdSec Hub."
+  echo "manual - показать checklist и выбрать вручную"
+  echo "auto   - поставить базовые и похожие на найденный софт"
+  echo "base   - поставить только linux + sshd"
+  prompt_default input_collections "Режим выбора collections [manual]: " "manual"
+  COLLECTION_SELECTION_MODE="${input_collections:-manual}"
 
   save_env
 }
@@ -377,37 +364,124 @@ install_crowdsec_agent() {
   ok "CrowdSec установлен."
 }
 
+detected_software_text() {
+  {
+    echo "Команды:"
+    command -v nginx >/dev/null 2>&1 && echo "nginx"
+    command -v apache2 >/dev/null 2>&1 && echo "apache apache2"
+    command -v caddy >/dev/null 2>&1 && echo "caddy"
+    command -v traefik >/dev/null 2>&1 && echo "traefik"
+    command -v haproxy >/dev/null 2>&1 && echo "haproxy"
+    echo
+    echo "systemd:"
+    systemctl list-unit-files --type=service --no-pager --no-legend 2>/dev/null | awk '{print $1}' || true
+    echo
+    echo "docker:"
+    if command -v docker >/dev/null 2>&1; then
+      docker ps --format '{{.Names}} {{.Image}} {{.Command}}' 2>/dev/null || true
+    fi
+  } | tr '[:upper:]' '[:lower:]'
+}
+
+list_hub_collections() {
+  cscli hub update >/dev/null 2>&1 || true
+  if cscli collections list -o json >/tmp/crowdsec-collections.json 2>/dev/null; then
+    python3 - /tmp/crowdsec-collections.json <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8", errors="replace") as f:
+    data = json.load(f)
+if isinstance(data, dict):
+    data = data.get("collections") or data.get("items") or data.get("data") or []
+rows = []
+for item in data:
+    if not isinstance(item, dict):
+        continue
+    name = item.get("name") or item.get("path") or item.get("full_path") or item.get("fullpath")
+    if not name:
+        continue
+    if "/" not in name:
+        author = item.get("author") or item.get("source") or "crowdsecurity"
+        name = f"{author}/{name}"
+    desc = item.get("description") or item.get("status") or ""
+    rows.append((name, " ".join(str(desc).split())[:70]))
+for name, desc in sorted(set(rows)):
+    print(f"{name}\t{desc}")
+PY
+    return
+  fi
+  cscli collections list -a 2>/dev/null | awk '/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+/ {for (i=1;i<=NF;i++) if ($i ~ /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/) print $i "\t"}' | sort -u
+}
+
+collection_is_suggested() {
+  local collection="$1"
+  local detected="$2"
+  local short
+  short="${collection##*/}"
+  short="${short,,}"
+  [[ "${collection}" =~ ^crowdsecurity/(linux|sshd)$ ]] && return 0
+  grep -qiE "(^|[^a-z0-9])${short}([^a-z0-9]|$)" <<<"${detected}" && return 0
+  case "${short}" in
+    apache2) grep -qiE 'apache|apache2|httpd' <<<"${detected}" ;;
+    nginx) grep -qiE 'nginx|nginxproxymanager|npm|proxy-manager' <<<"${detected}" ;;
+    mysql) grep -qiE 'mysql|mariadb' <<<"${detected}" ;;
+    postgresql) grep -qiE 'postgres|postgresql' <<<"${detected}" ;;
+    wireguard) grep -qiE 'wireguard|wg-easy|amnezia-awg|awg' <<<"${detected}" ;;
+    *) return 1 ;;
+  esac
+}
+
+select_hub_collections() {
+  load_env_if_exists
+  local detected collections_file menu_file selected
+  detected="$(detected_software_text)"
+  collections_file="$(mktemp)"
+  menu_file="$(mktemp)"
+  list_hub_collections >"${collections_file}"
+  if [[ ! -s "${collections_file}" ]]; then
+    warn "Не удалось получить список collections из CrowdSec Hub. Будут установлены только базовые collections."
+    SELECTED_COLLECTIONS="crowdsecurity/linux crowdsecurity/sshd"
+    save_env
+    rm -f "${collections_file}" "${menu_file}"
+    return
+  fi
+  SELECTED_COLLECTIONS="crowdsecurity/linux crowdsecurity/sshd"
+  if [[ "${COLLECTION_SELECTION_MODE}" == "base" ]]; then
+    save_env
+    rm -f "${collections_file}" "${menu_file}"
+    return
+  fi
+  while IFS=$'\t' read -r collection desc; do
+    [[ -n "${collection}" ]] || continue
+    if collection_is_suggested "${collection}" "${detected}"; then
+      SELECTED_COLLECTIONS="${SELECTED_COLLECTIONS} ${collection}"
+      printf '%s\t%s\ton\n' "${collection}" "${desc:-${collection}}" >>"${menu_file}"
+    elif [[ "${COLLECTION_SELECTION_MODE}" == "manual" ]]; then
+      printf '%s\t%s\toff\n' "${collection}" "${desc:-${collection}}" >>"${menu_file}"
+    fi
+  done <"${collections_file}"
+  SELECTED_COLLECTIONS="$(tr ' ' '\n' <<<"${SELECTED_COLLECTIONS}" | awk 'NF && !seen[$0]++' | tr '\n' ' ')"
+  if [[ "${COLLECTION_SELECTION_MODE}" == "manual" && -s "${menu_file}" && tui_available ]]; then
+    local args=()
+    while IFS=$'\t' read -r tag item state; do
+      args+=("${tag}" "${item:-${tag}}" "${state:-off}")
+    done <"${menu_file}"
+    selected="$(whiptail --title " CrowdSec Hub collections " --cancel-button "Назад" --ok-button "Установить" --checklist "Выбери collections для установки.\n\nПредвыбраны базовые и похожие на найденный софт/контейнеры." 30 110 18 "${args[@]}" 3>&1 1>&2 2>&3)" || selected="${SELECTED_COLLECTIONS}"
+    SELECTED_COLLECTIONS="$(printf '%s\n' ${selected} | tr -d '"' | awk 'NF && !seen[$0]++' | tr '\n' ' ')"
+  fi
+  [[ -n "${SELECTED_COLLECTIONS// }" ]] || SELECTED_COLLECTIONS="crowdsecurity/linux crowdsecurity/sshd"
+  save_env
+  rm -f "${collections_file}" "${menu_file}" /tmp/crowdsec-collections.json
+}
+
 install_collections() {
-  log "Устанавливаю базовые collections..."
-  cscli collections install crowdsecurity/linux || true
-  cscli collections install crowdsecurity/sshd || true
-  if [[ "${INSTALL_WEB_COLLECTIONS}" == "yes" ]]; then
-    cscli collections install crowdsecurity/nginx || true
-    cscli collections install crowdsecurity/apache2 || true
-  elif [[ "${INSTALL_WEB_COLLECTIONS}" == "auto" ]]; then
-    if command -v nginx >/dev/null 2>&1 || [[ -d /var/log/nginx ]]; then
-      log "Обнаружен Nginx. Устанавливаю nginx collection."
-      cscli collections install crowdsecurity/nginx || true
-    fi
-    if command -v apache2 >/dev/null 2>&1 || [[ -d /var/log/apache2 ]]; then
-      log "Обнаружен Apache. Устанавливаю apache2 collection."
-      cscli collections install crowdsecurity/apache2 || true
-    fi
-  fi
-  if [[ "${INSTALL_EXTRA_COLLECTIONS}" == "yes" || "${INSTALL_EXTRA_COLLECTIONS}" == "auto" ]]; then
-    if [[ "${INSTALL_EXTRA_COLLECTIONS}" == "yes" ]] || command -v caddy >/dev/null 2>&1 || [[ -d /var/log/caddy ]]; then
-      log "Подключаю Caddy collection."
-      cscli collections install crowdsecurity/caddy || true
-    fi
-    if [[ "${INSTALL_EXTRA_COLLECTIONS}" == "yes" ]] || command -v traefik >/dev/null 2>&1 || [[ -d /var/log/traefik ]]; then
-      log "Подключаю Traefik collection."
-      cscli collections install crowdsecurity/traefik || true
-    fi
-    if [[ "${INSTALL_EXTRA_COLLECTIONS}" == "yes" ]] || command -v haproxy >/dev/null 2>&1 || [[ -e /var/log/haproxy.log ]] || [[ -d /var/log/haproxy ]]; then
-      log "Подключаю HAProxy collection."
-      cscli collections install crowdsecurity/haproxy || true
-    fi
-  fi
+  load_env_if_exists
+  [[ -n "${SELECTED_COLLECTIONS:-}" ]] || SELECTED_COLLECTIONS="crowdsecurity/linux crowdsecurity/sshd"
+  log "Устанавливаю выбранные collections..."
+  for collection in ${SELECTED_COLLECTIONS}; do
+    log "Collection: ${collection}"
+    cscli collections install "${collection}" || true
+  done
   ok "Collections установлены или уже были установлены."
 }
 
@@ -421,58 +495,9 @@ filenames:
 labels:
   type: syslog
 YAML
-  if [[ "${INSTALL_WEB_COLLECTIONS}" == "yes" || "${INSTALL_WEB_COLLECTIONS}" == "auto" ]]; then
-    if [[ -d /var/log/nginx ]]; then
-      cat > /etc/crowdsec/acquis.d/nginx.yaml <<'YAML'
-filenames:
-  - /var/log/nginx/access.log
-  - /var/log/nginx/error.log
-labels:
-  type: nginx
-YAML
-      ok "Добавлен мониторинг Nginx logs."
-    fi
-    if [[ -d /var/log/apache2 ]]; then
-      cat > /etc/crowdsec/acquis.d/apache2.yaml <<'YAML'
-filenames:
-  - /var/log/apache2/access.log
-  - /var/log/apache2/error.log
-labels:
-  type: apache2
-YAML
-      ok "Добавлен мониторинг Apache logs."
-    fi
-  fi
-  if [[ "${INSTALL_EXTRA_COLLECTIONS}" == "yes" || "${INSTALL_EXTRA_COLLECTIONS}" == "auto" ]]; then
-    if [[ -d /var/log/caddy ]]; then
-      cat > /etc/crowdsec/acquis.d/caddy.yaml <<'YAML'
-filenames:
-  - /var/log/caddy/*.log
-labels:
-  type: caddy
-YAML
-      ok "Добавлен мониторинг Caddy logs."
-    fi
-    if [[ -d /var/log/traefik ]]; then
-      cat > /etc/crowdsec/acquis.d/traefik.yaml <<'YAML'
-filenames:
-  - /var/log/traefik/*.log
-labels:
-  type: traefik
-YAML
-      ok "Добавлен мониторинг Traefik logs."
-    fi
-    if [[ -e /var/log/haproxy.log || -d /var/log/haproxy ]]; then
-      cat > /etc/crowdsec/acquis.d/haproxy.yaml <<'YAML'
-filenames:
-  - /var/log/haproxy.log
-  - /var/log/haproxy/*.log
-labels:
-  type: haproxy
-YAML
-      ok "Добавлен мониторинг HAProxy logs."
-    fi
-  fi
+  warn "Дополнительные sources/acquis для выбранных collections нужно проверить под конкретный сервис."
+  warn "Скрипт не прописывает фейковые пути логов: Docker-сервисы часто пишут в journald/docker logs или свои volume."
+  warn "После установки проверь рекомендации: sudo cscli collections inspect <collection>"
   ok "Источники логов настроены."
 }
 
@@ -594,15 +619,8 @@ show_status() {
   echo "  SSH monitoring: /var/log/auth.log и /var/log/secure, если они есть"
   echo "  Linux collection: базовые Linux-сценарии"
   echo "  SSHD collection: защита SSH"
-  if [[ "${INSTALL_WEB_COLLECTIONS}" != "no" ]]; then
-    [[ -d /var/log/nginx ]] && echo "  Nginx monitoring: /var/log/nginx/access.log и error.log"
-    [[ -d /var/log/apache2 ]] && echo "  Apache monitoring: /var/log/apache2/access.log и error.log"
-  fi
-  if [[ "${INSTALL_EXTRA_COLLECTIONS}" != "no" ]]; then
-    [[ -d /var/log/caddy ]] && echo "  Caddy monitoring: /var/log/caddy/*.log"
-    [[ -d /var/log/traefik ]] && echo "  Traefik monitoring: /var/log/traefik/*.log"
-    [[ -e /var/log/haproxy.log || -d /var/log/haproxy ]] && echo "  HAProxy monitoring: /var/log/haproxy.log и /var/log/haproxy/*.log"
-  fi
+  echo "  Collections: ${SELECTED_COLLECTIONS:-crowdsecurity/linux crowdsecurity/sshd}"
+  echo "  Дополнительные источники логов: проверь через sudo cscli collections inspect <collection>"
   if [[ "${INSTALL_FIREWALL_BOUNCER}" == "yes" ]]; then
     echo "  Firewall bouncer: активная блокировка IP через ${FIREWALL_BOUNCER_MODE}"
   else
@@ -645,6 +663,7 @@ main() {
     run_install_step "Удаляю Fail2Ban при наличии" remove_fail2ban_if_installed
     run_install_step "Подключаю репозиторий CrowdSec" install_crowdsec_repo
     run_install_step "Устанавливаю CrowdSec agent" install_crowdsec_agent
+    select_hub_collections
     run_install_step "Устанавливаю collections" install_collections
     run_install_step "Настраиваю источники логов" configure_acquisition
     run_install_step "Регистрирую VPS на центральном LAPI" register_to_central_lapi
@@ -657,6 +676,7 @@ main() {
     remove_fail2ban_if_installed
     install_crowdsec_repo
     install_crowdsec_agent
+    select_hub_collections
     install_collections
     configure_acquisition
     register_to_central_lapi

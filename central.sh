@@ -533,9 +533,9 @@ create_named_vps_bouncer_key() {
   safe_source_env
   local node_name bouncer_key tmp
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
-    node_name="$(whiptail --title " Индивидуальный bouncer для VPS " --inputbox "Введите имя VPS.\n\nИменно это имя будет видно в CrowdSec Manager в разделе Registered Bouncers." 12 86 "$(hostname -f 2>/dev/null || hostname)-vps" 3>&1 1>&2 2>&3)" || return
+    node_name="$(whiptail --title " Индивидуальный bouncer для VPS " --inputbox "Введите ТО ЖЕ имя, которое потом укажешь в VPS-скрипте как Machine name.\n\nИменно это имя будет видно в CrowdSec Manager в разделе Registered Bouncers." 13 92 "" 3>&1 1>&2 2>&3)" || return
   else
-    read -rp "Имя VPS/bouncer: " node_name
+    read -rp "Имя VPS/bouncer, такое же как Machine name в VPS-скрипте: " node_name
   fi
   node_name="$(printf '%s' "${node_name:-}" | tr -cd 'A-Za-z0-9._:-')"
   [[ -n "${node_name}" ]] || fail "Имя bouncer не может быть пустым."
