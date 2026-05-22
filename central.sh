@@ -36,7 +36,7 @@ DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="2026.05.22-manager-full"
+SCRIPT_VERSION="2026.05.22-manager-full-uvar-fix"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -204,6 +204,17 @@ safe_source_env() {
 }
 
 save_env() {
+  LAN_IP="${LAN_IP:-$(get_lan_ip)}"
+  [[ -n "${LAN_IP:-}" ]] || LAN_IP="127.0.0.1"
+  WEB_PORT="${WEB_PORT:-${DEFAULT_WEB_PORT}}"
+  LAPI_PORT="${LAPI_PORT:-${DEFAULT_LAPI_PORT}}"
+  PUBLIC_ADDR="${PUBLIC_ADDR:-}"
+  ALLOWED_RANGES="${ALLOWED_RANGES:-}"
+  AUTO_REG_TOKEN="${AUTO_REG_TOKEN:-}"
+  SHARED_BOUNCER_KEY="${SHARED_BOUNCER_KEY:-}"
+  WEBUI_PASSWORD="${WEBUI_PASSWORD:-}"
+  WEB_UI_TYPE="${WEB_UI_TYPE:-simple}"
+
   mkdir -p "${CONFIG_DIR}"
   chmod 700 "${CONFIG_DIR}"
 
@@ -1543,6 +1554,7 @@ EOF
 }
 
 run_menu_action() {
+  safe_source_env
   case "${1}" in
     status) show_status; pause ;;
     connect) show_connection_info; pause ;;
