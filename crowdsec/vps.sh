@@ -223,11 +223,32 @@ detect_debian() {
 }
 
 load_env_if_exists() {
+  local had_env="no"
   if [[ -f "${ENV_FILE}" ]]; then
-    set +u
-    # shellcheck disable=SC1090
-    source "${ENV_FILE}"
-    set -u
+    had_env="yes"
+    local line key value parsed
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      [[ "${line}" =~ ^[[:space:]]*$ || "${line}" =~ ^[[:space:]]*# ]] && continue
+      key="${line%%=*}"
+      value="${line#*=}"
+      key="$(printf '%s' "${key}" | tr -cd 'A-Za-z0-9_')"
+      case "${key}" in
+        CENTRAL_LAPI_URL|AUTO_REG_TOKEN|SHARED_BOUNCER_KEY|MACHINE_NAME|INSTALL_FIREWALL_BOUNCER|COLLECTION_SELECTION_MODE|SELECTED_COLLECTIONS|HUB_ITEM_SELECTION_MODE|SELECTED_HUB_ITEMS|FIREWALL_BOUNCER_PACKAGE|FIREWALL_BOUNCER_MODE) ;;
+        *) continue ;;
+      esac
+      parsed="${value}"
+      if [[ "${value}" == \'*\' && "${value}" == *\' ]]; then
+        parsed="${value:1:${#value}-2}"
+      elif [[ "${value}" == \"*\" && "${value}" == *\" ]]; then
+        parsed="${value:1:${#value}-2}"
+        parsed="${parsed//\\\"/\"}"
+        parsed="${parsed//\\\\/\\}"
+      elif [[ "${value}" == *\\* ]]; then
+        parsed="${parsed//\\ / }"
+        parsed="${parsed//\\\\/\\}"
+      fi
+      printf -v "${key}" '%s' "${parsed}"
+    done < "${ENV_FILE}"
   fi
   CENTRAL_LAPI_URL="${CENTRAL_LAPI_URL:-}"
   AUTO_REG_TOKEN="${AUTO_REG_TOKEN:-}"
@@ -240,6 +261,9 @@ load_env_if_exists() {
   SELECTED_HUB_ITEMS="${SELECTED_HUB_ITEMS:-}"
   FIREWALL_BOUNCER_PACKAGE="${FIREWALL_BOUNCER_PACKAGE:-}"
   FIREWALL_BOUNCER_MODE="${FIREWALL_BOUNCER_MODE:-}"
+  if [[ "${had_env}" == "yes" ]]; then
+    save_env
+  fi
 }
 
 save_env() {
