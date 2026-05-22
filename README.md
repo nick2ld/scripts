@@ -55,9 +55,9 @@ After installation, interactive menu:
 sudo crowdsec-central-menu
 ```
 
-The central menu uses `fzf` TUI when available: arrow keys, fuzzy search, colors, symbols and action names instead of numeric input. The menu is split into sections first, then actions, so the screen stays compact. If `fzf` is missing, the script tries to install `fzf` and `whiptail` automatically. `whiptail` is used as a fallback; plain text menu is used only when no TUI is available.
+The central menu uses `whiptail`/newt dialogs in the same style as Proxmox VE Helper Scripts: blue background, gray windows, red active item, Select/Exit buttons, arrow-key navigation and no numeric input. The menu is split into sections first, then actions, so the screen stays compact. Plain text mode is used only if `whiptail` cannot be installed.
 
-The central installer also uses TUI dialogs for first-time setup. Install steps run behind clean status screens, and failed steps open their log in a scrollable window.
+The central and VPS installers also use TUI dialogs for first-time setup. Install steps run behind clean status screens, and failed steps open their log in a scrollable window.
 
 Update installed menu command without reinstalling the stack:
 

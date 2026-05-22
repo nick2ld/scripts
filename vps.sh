@@ -46,6 +46,63 @@ prompt_default() {
   fi
   printf -v "${__var_name}" '%s' "${__value:-${__default}}"
 }
+tui_theme() {
+  export NEWT_COLORS='
+root=white,blue
+border=black,lightgray
+window=black,lightgray
+shadow=black,black
+title=red,lightgray
+button=black,lightgray
+actbutton=white,red
+entry=black,white
+label=black,lightgray
+textbox=black,lightgray
+'
+}
+bootstrap_installer_tui() {
+  command -v whiptail >/dev/null 2>&1 && return 0
+  command -v apt-get >/dev/null 2>&1 || return 1
+  clear || true
+  echo "Preparing interactive installer..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y >/tmp/crowdsec-vps-bootstrap.log 2>&1 || return 1
+  apt-get install -y whiptail >>/tmp/crowdsec-vps-bootstrap.log 2>&1 || return 1
+  command -v whiptail >/dev/null 2>&1
+}
+tui_input() {
+  local title="$1"
+  local text="$2"
+  local default="${3:-}"
+  whiptail --title " ${title} " --inputbox "${text}" 10 78 "${default}" 3>&1 1>&2 2>&3
+}
+tui_yesno() {
+  local title="$1"
+  local text="$2"
+  whiptail --title " ${title} " --yes-button "Да" --no-button "Нет" --yesno "${text}" 10 78
+}
+run_install_step() {
+  local title="$1"
+  shift
+  local log_file
+  log_file="$(mktemp)"
+  if command -v whiptail >/dev/null 2>&1; then
+    whiptail --title " CrowdSec VPS Node " --infobox "${title}\n\nПодробный лог пишется во временный файл." 9 72 || true
+  else
+    log "${title}"
+  fi
+  if "$@" >"${log_file}" 2>&1; then
+    rm -f "${log_file}"
+    return 0
+  fi
+  if command -v whiptail >/dev/null 2>&1; then
+    whiptail --title " Ошибка: ${title} " --textbox "${log_file}" 30 110 || true
+  else
+    cat "${log_file}"
+  fi
+  rm -f "${log_file}"
+  fail "Этап установки завершился ошибкой: ${title}"
+}
 on_error() {
   local exit_code="$?"
   local line_no="${1:-unknown}"
@@ -99,6 +156,36 @@ ENV
 
 ask_settings() {
   load_env_if_exists
+  if command -v whiptail >/dev/null 2>&1; then
+    tui_theme
+    whiptail --title " CrowdSec VPS Node " --msgbox "Подключение VPS к центральному CrowdSec LAPI.\n\nДанные возьми в меню центрального сервера: sudo crowdsec-central-menu" 12 78
+    CENTRAL_LAPI_URL="$(tui_input "Central LAPI" "Central LAPI URL" "${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}")" || exit 1
+    AUTO_REG_TOKEN="$(tui_input "Central LAPI" "AUTO_REG_TOKEN" "${AUTO_REG_TOKEN:-}")" || exit 1
+    SHARED_BOUNCER_KEY="$(tui_input "Firewall Bouncer" "SHARED_BOUNCER_KEY" "${SHARED_BOUNCER_KEY:-}")" || exit 1
+    MACHINE_NAME="$(tui_input "Machine" "Machine name" "${MACHINE_NAME}")" || exit 1
+    if tui_yesno "Firewall Bouncer" "Ставить firewall-bouncer для автоматической блокировки IP?"; then
+      INSTALL_FIREWALL_BOUNCER="yes"
+    else
+      INSTALL_FIREWALL_BOUNCER="no"
+    fi
+    INSTALL_WEB_COLLECTIONS="$(whiptail --title " Web Collections " --cancel-button "Отмена" --ok-button "Select" --notags --menu "Включать web collections?" 15 78 3 \
+      "auto" "Auto-detect Nginx/Apache" \
+      "yes" "Enable forcibly" \
+      "no" "Disable" \
+      3>&1 1>&2 2>&3)" || exit 1
+    [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "Central LAPI URL не может быть пустым."
+    [[ "${CENTRAL_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]] || fail "Central LAPI URL должен начинаться с http:// или https://"
+    [[ -n "${AUTO_REG_TOKEN}" ]] || fail "AUTO_REG_TOKEN не может быть пустым."
+    [[ "${AUTO_REG_TOKEN}" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "AUTO_REG_TOKEN содержит недопустимые символы."
+    if [[ -n "${SHARED_BOUNCER_KEY}" ]] && [[ ! "${SHARED_BOUNCER_KEY}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+      fail "SHARED_BOUNCER_KEY содержит недопустимые символы."
+    fi
+    if [[ "${INSTALL_FIREWALL_BOUNCER}" == "yes" && -z "${SHARED_BOUNCER_KEY}" ]]; then
+      fail "Для firewall-bouncer нужен SHARED_BOUNCER_KEY."
+    fi
+    save_env
+    return
+  fi
   echo
   echo "Настройка подключения VPS к центральному CrowdSec LAPI."
   echo
@@ -152,7 +239,7 @@ install_base() {
   log "Устанавливаю базовые пакеты..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https python3 python3-yaml jq sudo iproute2 procps nano rsync iptables nftables
+  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https python3 python3-yaml jq sudo iproute2 procps nano rsync iptables nftables whiptail less
   ok "Базовые пакеты установлены."
 }
 
@@ -408,19 +495,43 @@ main() {
   require_root
   detect_debian
   require_interactive_install
+  bootstrap_installer_tui || true
   ask_settings
-  install_base
-  remove_fail2ban_if_installed
-  install_crowdsec_repo
-  install_crowdsec_agent
-  install_collections
-  configure_acquisition
-  register_to_central_lapi
-  configure_agent_as_node
-  install_firewall_bouncer
-  test_config
-  restart_services
-  show_status
+  if command -v whiptail >/dev/null 2>&1; then
+    tui_theme
+    run_install_step "Устанавливаю базовые пакеты" install_base
+    run_install_step "Удаляю Fail2Ban при наличии" remove_fail2ban_if_installed
+    run_install_step "Подключаю репозиторий CrowdSec" install_crowdsec_repo
+    run_install_step "Устанавливаю CrowdSec agent" install_crowdsec_agent
+    run_install_step "Устанавливаю collections" install_collections
+    run_install_step "Настраиваю источники логов" configure_acquisition
+    run_install_step "Регистрирую VPS на центральном LAPI" register_to_central_lapi
+    run_install_step "Настраиваю CrowdSec node" configure_agent_as_node
+    run_install_step "Устанавливаю firewall bouncer" install_firewall_bouncer
+    run_install_step "Проверяю конфигурацию" test_config
+    run_install_step "Перезапускаю сервисы" restart_services
+  else
+    install_base
+    remove_fail2ban_if_installed
+    install_crowdsec_repo
+    install_crowdsec_agent
+    install_collections
+    configure_acquisition
+    register_to_central_lapi
+    configure_agent_as_node
+    install_firewall_bouncer
+    test_config
+    restart_services
+  fi
+  if command -v whiptail >/dev/null 2>&1; then
+    local tmp
+    tmp="$(mktemp)"
+    show_status >"${tmp}"
+    whiptail --title " Установка завершена " --textbox "${tmp}" 30 110 || true
+    rm -f "${tmp}"
+  else
+    show_status
+  fi
 }
 
 main "$@"

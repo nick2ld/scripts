@@ -33,7 +33,7 @@ PROFILE_FILE="/etc/profile.d/crowdsec-central-menu.sh"
 DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
-SCRIPT_VERSION="2026.05.22-tui-output-v2"
+SCRIPT_VERSION="2026.05.22-whiptail-proxmox-style"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -80,20 +80,6 @@ show_file() {
   if is_tui_session; then
     if [[ "${CROWDSEC_TUI_MODE}" =~ ^(whiptail|installer)$ ]] && command -v whiptail >/dev/null 2>&1; then
       whiptail --title " ${title} " --textbox "${tmp}" 30 110 </dev/tty >/dev/tty 2>&1 || true
-    elif [[ "${CROWDSEC_TUI_MODE}" == "fzf" ]] && command -v fzf >/dev/null 2>&1; then
-      clear || true
-      fzf \
-        --ansi \
-        --disabled \
-        --no-sort \
-        --height=90% \
-        --layout=reverse \
-        --border=rounded \
-        --prompt='' \
-        --pointer=' ' \
-        --header="${title} | Esc - назад" \
-        --color='fg:#d7e1ff,bg:#101827,hl:#7dd3fc,fg+:#ffffff,bg+:#26415f,hl+:#facc15,header:#93c5fd,border:#38bdf8' \
-        <"${tmp}" >/dev/tty || true
     elif command -v less >/dev/null 2>&1; then
       clear || true
       LESS='-R' less "${tmp}" </dev/tty >/dev/tty || true
@@ -261,7 +247,7 @@ install_base() {
   log "Устанавливаю базовые пакеты..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https openssl python3 python3-yaml sudo ufw nano jq iproute2 procps xz-utils whiptail fzf less
+  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https openssl python3 python3-yaml sudo ufw nano jq iproute2 procps xz-utils whiptail less
   ok "Базовые пакеты установлены."
 }
 
@@ -982,32 +968,31 @@ test_webui_lapi() {
 tui_theme() {
   export NEWT_COLORS='
 root=white,blue
-border=white,blue
-window=white,blue
+border=black,lightgray
+window=black,lightgray
 shadow=black,black
-title=yellow,blue
-button=black,cyan
+title=red,lightgray
+button=black,lightgray
 actbutton=white,red
-checkbox=white,blue
-actcheckbox=black,cyan
-entry=black,cyan
-label=yellow,blue
-listbox=white,blue
-actlistbox=black,cyan
-textbox=white,blue
+checkbox=black,lightgray
+actcheckbox=white,red
+entry=black,white
+label=black,lightgray
+listbox=black,lightgray
+actlistbox=white,red
+textbox=black,lightgray
 '
 }
 
 ensure_tui_tools() {
-  command -v fzf >/dev/null 2>&1 && return 0
   command -v whiptail >/dev/null 2>&1 && return 0
   if command -v apt-get >/dev/null 2>&1; then
-    log "Устанавливаю TUI-зависимости меню: fzf, whiptail, less..."
+    log "Устанавливаю TUI-зависимости меню: whiptail, less..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y || return 1
-    apt-get install -y fzf whiptail less || return 1
+    apt-get install -y whiptail less || return 1
   fi
-  command -v fzf >/dev/null 2>&1 || command -v whiptail >/dev/null 2>&1
+  command -v whiptail >/dev/null 2>&1
 }
 
 tui_summary() {
@@ -1051,154 +1036,84 @@ run_menu_action() {
   esac
 }
 
-menu_categories() {
-  cat <<'EOF'
-status	●  Статус и данные
-access	◆  Доступ к LAPI
-network	▸  Сеть и ключи
-service	↻  Обслуживание
-system	↑  Обновления и диагностика
-menu	⚙  Настройки меню
-exit	×  Выход
-EOF
-}
-
-menu_items_for_category() {
-  case "${1}" in
-    status)
-      cat <<'EOF'
-status	●  Статус сервисов и портов
-connect	◆  Адреса, токены и подключение VPS
-envfile	▣  Показать central.env
-EOF
-      ;;
-    access)
-      cat <<'EOF'
-add_range	+  Добавить IP/CIDR к LAPI
-remove_range	-  Удалить IP/CIDR из LAPI
-replace_ranges	⇄  Заменить весь список IP/CIDR
-firewall	▦  Показать firewall/UFW
-EOF
-      ;;
-    network)
-      cat <<'EOF'
-web_addr	▸  LAN IP и порт Web UI
-lapi_port	▸  Порт LAPI
-public_addr	▸  Внешний адрес/DDNS для VPS
-auto_token	⚿  Новый auto-registration token
-bouncer_key	⚿  Новый shared bouncer key
-test_lapi	◇  Проверить доступ Web UI к LAPI
-EOF
-      ;;
-    service)
-      cat <<'EOF'
-restart	↻  Перезапустить CrowdSec, Docker, Web UI
-update_webui	↑  Обновить только Web UI
-logs	☰  Логи Web UI
-crowdsec_info	☷  Machines, bouncers, alerts, decisions
-reapply	✓  Повторно применить все настройки
-EOF
-      ;;
-    system)
-      cat <<'EOF'
-update_all	↑  Обновить весь стек
-update_system	↑  Обновить системные пакеты Debian
-update_docker	↑  Обновить Docker
-update_crowdsec	↑  Обновить CrowdSec
-versions	ⓘ  Версии установленного ПО
-EOF
-      ;;
-    menu)
-      cat <<'EOF'
-disable_autostart	✕  Отключить автозапуск меню
-enable_autostart	✓  Включить автозапуск меню
-repair_menu	⚙  Переустановить команду меню
-EOF
-      ;;
-  esac
-}
-
-fzf_pick() {
-  local prompt="$1"
-  local header="$2"
-  fzf \
-    --ansi \
-    --delimiter=$'\t' \
-    --with-nth=2 \
-    --height=70% \
-    --min-height=16 \
-    --layout=reverse \
-    --border=rounded \
-    --prompt="${prompt}" \
-    --pointer='▶' \
-    --marker='✓' \
-    --header="${header}" \
-    --color='fg:#d7e1ff,bg:#101827,hl:#7dd3fc,fg+:#ffffff,bg+:#26415f,hl+:#facc15,prompt:#22c55e,pointer:#f97316,marker:#facc15,header:#93c5fd,border:#38bdf8'
-}
-
-menu_loop_fzf() {
-  require_root
-  export TERM="${TERM:-xterm-256color}"
-  export CROWDSEC_TUI_MODE="fzf"
-  clear || true
-  while true; do
-    local category
-    local choice
-    local header
-    header="$(tui_summary)"
-    category="$(menu_categories | fzf_pick 'Раздел ❯ ' "${header}")" || exit 0
-    category="${category%%$'\t'*}"
-    [[ "${category}" == "exit" ]] && exit 0
-
-    choice="$(menu_items_for_category "${category}" | fzf_pick 'Действие ❯ ' "Esc - назад | ${header}")" || continue
-    choice="${choice%%$'\t'*}"
-    run_menu_action "${choice}"
-  done
-}
-
 menu_loop_whiptail() {
   require_root
   tui_theme
   export CROWDSEC_TUI_MODE="whiptail"
   clear || true
   while true; do
-    local choice
-    local summary
+    local category choice summary
     summary="$(tui_summary)"
-    choice="$(whiptail \
+    category="$(whiptail \
       --backtitle "CrowdSec Central Control Panel" \
       --title " CrowdSec Central " \
       --cancel-button "Выход" \
-      --ok-button "Открыть" \
-      --menu "${summary}" \
-      32 100 20 \
-      "status" "● Статус сервисов и портов" \
-      "connect" "◆ Адреса, токены и подключение VPS" \
-      "envfile" "▣ Показать central.env" \
-      "add_range" "+ Добавить IP/CIDR к LAPI" \
-      "remove_range" "- Удалить IP/CIDR из LAPI" \
-      "replace_ranges" "⇄ Заменить весь список IP/CIDR" \
-      "web_addr" "▸ LAN IP и порт Web UI" \
-      "lapi_port" "▸ Порт LAPI" \
-      "public_addr" "▸ Внешний адрес/DDNS для VPS" \
-      "auto_token" "⚿ Новый auto-registration token" \
-      "bouncer_key" "⚿ Новый shared bouncer key" \
-      "restart" "↻ Перезапустить CrowdSec, Docker, Web UI" \
-      "update_webui" "↑ Обновить только Web UI" \
-      "logs" "☰ Логи Web UI" \
-      "crowdsec_info" "☷ Machines, bouncers, alerts, decisions" \
-      "firewall" "▦ Firewall/UFW" \
-      "reapply" "✓ Повторно применить все настройки" \
-      "update_all" "↑ Обновить весь стек" \
-      "update_system" "↑ Обновить системные пакеты Debian" \
-      "update_docker" "↑ Обновить Docker" \
-      "update_crowdsec" "↑ Обновить CrowdSec" \
-      "versions" "ⓘ Версии установленного ПО" \
-      "test_lapi" "◇ Проверить доступ Web UI к LAPI" \
-      "disable_autostart" "✕ Отключить автозапуск меню" \
-      "enable_autostart" "✓ Включить автозапуск меню" \
-      "repair_menu" "⚙ Переустановить команду меню" \
+      --ok-button "Select" \
+      --notags \
+      --menu "Choose an option:\nUse TAB or Arrow keys to navigate, ENTER to select.\n\n${summary}" \
+      22 76 7 \
+      "status" "Status & Info" \
+      "access" "LAPI Access" \
+      "network" "Network & Keys" \
+      "service" "Service Actions" \
+      "system" "Updates & Diagnostics" \
+      "menu" "Menu Settings" \
+      "exit" "Exit" \
       3>&1 1>&2 2>&3)" || exit 0
+    [[ "${category}" == "exit" ]] && exit 0
+
+    case "${category}" in
+      status)
+        choice="$(whiptail --backtitle "CrowdSec Central Control Panel" --title " Status & Info " --cancel-button "Back" --ok-button "Select" --notags --menu "Choose an action:" 18 76 5 \
+          "status" "Status, services and ports" \
+          "connect" "Connection data for VPS nodes" \
+          "envfile" "Show central.env" \
+          3>&1 1>&2 2>&3)" || continue
+        ;;
+      access)
+        choice="$(whiptail --backtitle "CrowdSec Central Control Panel" --title " LAPI Access " --cancel-button "Back" --ok-button "Select" --notags --menu "Choose an action:" 18 76 6 \
+          "add_range" "Add IP/CIDR to LAPI access" \
+          "remove_range" "Remove IP/CIDR from LAPI access" \
+          "replace_ranges" "Replace full IP/CIDR list" \
+          "firewall" "Show firewall/UFW" \
+          3>&1 1>&2 2>&3)" || continue
+        ;;
+      network)
+        choice="$(whiptail --backtitle "CrowdSec Central Control Panel" --title " Network & Keys " --cancel-button "Back" --ok-button "Select" --notags --menu "Choose an action:" 20 76 8 \
+          "web_addr" "Change LAN IP or Web UI port" \
+          "lapi_port" "Change LAPI port" \
+          "public_addr" "Change public IP/DDNS for VPS" \
+          "auto_token" "Regenerate auto-registration token" \
+          "bouncer_key" "Regenerate shared bouncer key" \
+          "test_lapi" "Test Web UI access to LAPI" \
+          3>&1 1>&2 2>&3)" || continue
+        ;;
+      service)
+        choice="$(whiptail --backtitle "CrowdSec Central Control Panel" --title " Service Actions " --cancel-button "Back" --ok-button "Select" --notags --menu "Choose an action:" 20 76 7 \
+          "restart" "Restart CrowdSec, Docker and Web UI" \
+          "update_webui" "Update Web UI container only" \
+          "logs" "Show Web UI logs" \
+          "crowdsec_info" "Machines, bouncers, alerts, decisions" \
+          "reapply" "Re-apply all settings" \
+          3>&1 1>&2 2>&3)" || continue
+        ;;
+      system)
+        choice="$(whiptail --backtitle "CrowdSec Central Control Panel" --title " Updates & Diagnostics " --cancel-button "Back" --ok-button "Select" --notags --menu "Choose an action:" 20 76 7 \
+          "update_all" "Update entire stack" \
+          "update_system" "Update Debian packages" \
+          "update_docker" "Update Docker" \
+          "update_crowdsec" "Update CrowdSec" \
+          "versions" "Show installed versions" \
+          3>&1 1>&2 2>&3)" || continue
+        ;;
+      menu)
+        choice="$(whiptail --backtitle "CrowdSec Central Control Panel" --title " Menu Settings " --cancel-button "Back" --ok-button "Select" --notags --menu "Choose an action:" 18 76 5 \
+          "disable_autostart" "Disable login menu autostart" \
+          "enable_autostart" "Enable login menu autostart" \
+          "repair_menu" "Update/reinstall menu command" \
+          3>&1 1>&2 2>&3)" || continue
+        ;;
+    esac
     run_menu_action "${choice}"
   done
 }
@@ -1287,13 +1202,9 @@ menu_loop_plain() {
 
 menu_loop() {
   if [[ -t 0 && -t 1 ]] && ensure_tui_tools; then
-    if command -v fzf >/dev/null 2>&1; then
-      menu_loop_fzf
-    else
-      menu_loop_whiptail
-    fi
+    menu_loop_whiptail
   else
-    warn "TUI-меню недоступно: нет TTY или не удалось установить fzf/whiptail. Открываю простой fallback."
+    warn "TUI-меню недоступно: нет TTY или не удалось установить whiptail. Открываю простой fallback."
     pause
     menu_loop_plain
   fi
