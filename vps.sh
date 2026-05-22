@@ -43,14 +43,16 @@ whiptail() {
   local bin
   if bin="$(type -P dialog 2>/dev/null)"; then
     local args=()
+    local nl arg
+    printf -v nl '\n'
     while (($#)); do
       case "$1" in
         --notags) args+=(--no-tags) ;;
-        --cancel-button) shift; args+=(--cancel-label "${1:-}") ;;
-        --ok-button) shift; args+=(--ok-label "${1:-}") ;;
-        --yes-button) shift; args+=(--yes-label "${1:-}") ;;
-        --no-button) shift; args+=(--no-label "${1:-}") ;;
-        *) args+=("$1") ;;
+        --cancel-button) shift; arg="${1:-}"; args+=(--cancel-label "${arg//\\n/${nl}}") ;;
+        --ok-button) shift; arg="${1:-}"; args+=(--ok-label "${arg//\\n/${nl}}") ;;
+        --yes-button) shift; arg="${1:-}"; args+=(--yes-label "${arg//\\n/${nl}}") ;;
+        --no-button) shift; arg="${1:-}"; args+=(--no-label "${arg//\\n/${nl}}") ;;
+        *) arg="$1"; args+=("${arg//\\n/${nl}}") ;;
       esac
       shift || true
     done

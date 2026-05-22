@@ -36,7 +36,7 @@ DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="2026.05.22-manager-full-dialog-buttons"
+SCRIPT_VERSION="2026.05.22-manager-full-dialog-format"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -64,14 +64,16 @@ whiptail() {
   local bin
   if bin="$(type -P dialog 2>/dev/null)"; then
     local args=()
+    local nl arg
+    printf -v nl '\n'
     while (($#)); do
       case "$1" in
         --notags) args+=(--no-tags) ;;
-        --cancel-button) shift; args+=(--cancel-label "${1:-}") ;;
-        --ok-button) shift; args+=(--ok-label "${1:-}") ;;
-        --yes-button) shift; args+=(--yes-label "${1:-}") ;;
-        --no-button) shift; args+=(--no-label "${1:-}") ;;
-        *) args+=("$1") ;;
+        --cancel-button) shift; arg="${1:-}"; args+=(--cancel-label "${arg//\\n/${nl}}") ;;
+        --ok-button) shift; arg="${1:-}"; args+=(--ok-label "${arg//\\n/${nl}}") ;;
+        --yes-button) shift; arg="${1:-}"; args+=(--yes-label "${arg//\\n/${nl}}") ;;
+        --no-button) shift; arg="${1:-}"; args+=(--no-label "${arg//\\n/${nl}}") ;;
+        *) arg="$1"; args+=("${arg//\\n/${nl}}") ;;
       esac
       shift || true
     done
@@ -1581,7 +1583,6 @@ tui_summary() {
   cat <<EOF
 Web UI: ${LOCAL_WEB_UI}
 LAPI:   ${VPS_LAPI_URL}
-CIDR:   ${ALLOWED_RANGES:-не заданы}
 EOF
 }
 
@@ -1637,8 +1638,8 @@ menu_loop_whiptail() {
       --cancel-button "Выход" \
       --ok-button "Выбрать" \
       --notags \
-      --menu "Выберите раздел:\nИспользуйте TAB или стрелки для навигации, ENTER для выбора.\n\n${summary}" \
-      23 76 8 \
+      --menu "Выберите раздел:\nСтрелки - навигация, ENTER - выбрать, ESC/Отмена - выход.\n\n${summary}" \
+      22 88 8 \
       "status" "Статус и данные" \
       "access" "Доступ к LAPI" \
       "network" "Сеть и ключи" \
