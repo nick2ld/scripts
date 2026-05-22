@@ -27,10 +27,10 @@ FAIL2BAN_BACKUP_DIR="${CONFIG_DIR}/fail2ban-backup"
 SCRIPT_VERSION="v0.1"
 SCRIPT_RELEASE_DATE="2026-05-22"
 
-log() { echo -e "${BLUE}==>${NC} $*"; }
-ok() { echo -e "${GREEN}OK:${NC} $*"; }
-warn() { echo -e "${YELLOW}WARN:${NC} $*"; }
-fail() { echo -e "${RED}ERROR:${NC} $*" >&2; exit 1; }
+log() { echo "==> $*"; }
+ok() { echo "OK: $*"; }
+warn() { echo "WARN: $*"; }
+fail() { echo "ERROR: $*" >&2; exit 1; }
 pause() { echo; read -rp "Нажми Enter для продолжения..." _ || true; }
 is_interactive() { [[ -t 0 ]]; }
 safe_clear() {
@@ -170,15 +170,18 @@ strip_ansi() {
 run_install_step() {
   local title="$1"
   shift
-  local log_file clean_log
+  local log_file clean_log rc_file
   log_file="$(mktemp)"
   clean_log="$(mktemp)"
+  rc_file="$(mktemp)"
   if tui_available; then
     set +e
     (
-      set +eE
+      set +e
+      set +E
+      trap - ERR
       "$@" >"${log_file}" 2>&1 &
-      local pid=$! pct=3 tail_text
+      local pid=$! pct=3 tail_text step_rc
       while kill -0 "${pid}" 2>/dev/null; do
         tail_text="$(tail -n 8 "${log_file}" 2>/dev/null | strip_ansi | sed 's/"/'\''/g')"
         pct=$((pct + 3)); (( pct > 95 )) && pct=15
@@ -186,22 +189,26 @@ run_install_step() {
         sleep 1
       done
       wait "${pid}"
+      step_rc=$?
+      printf '%s' "${step_rc}" >"${rc_file}"
+      exit 0
     ) | whiptail --title " CrowdSec VPS Node " --gauge "${title}" 18 90 0
-    local rc=${PIPESTATUS[0]}
+    local rc
+    rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
     set -e
     if [[ "${rc}" -eq 0 ]]; then
-      rm -f "${log_file}" "${clean_log}"
+      rm -f "${log_file}" "${clean_log}" "${rc_file}"
       return 0
     fi
     strip_ansi <"${log_file}" >"${clean_log}" || cp "${log_file}" "${clean_log}"
     whiptail --title " Ошибка: ${title} " --textbox "${clean_log}" 30 110 || true
-    rm -f "${log_file}" "${clean_log}"
+    rm -f "${log_file}" "${clean_log}" "${rc_file}"
     fail "Этап установки завершился ошибкой: ${title}"
   else
     log "${title}"
   fi
   if "$@" >"${log_file}" 2>&1; then
-    rm -f "${log_file}" "${clean_log}"
+    rm -f "${log_file}" "${clean_log}" "${rc_file}"
     return 0
   fi
   if tui_available; then
@@ -210,7 +217,7 @@ run_install_step() {
   else
     strip_ansi <"${log_file}" || cat "${log_file}"
   fi
-  rm -f "${log_file}" "${clean_log}"
+  rm -f "${log_file}" "${clean_log}" "${rc_file}"
   fail "Этап установки завершился ошибкой: ${title}"
 }
 on_error() {

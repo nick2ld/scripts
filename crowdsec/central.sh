@@ -41,10 +41,10 @@ SCRIPT_VERSION="v0.1"
 SCRIPT_RELEASE_DATE="2026-05-22"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 
-log() { echo -e "${BLUE}==>${NC} $*"; }
-ok() { echo -e "${GREEN}OK:${NC} $*"; }
-warn() { echo -e "${YELLOW}WARN:${NC} $*"; }
-fail() { echo -e "${RED}ERROR:${NC} $*" >&2; exit 1; }
+log() { echo "==> $*"; }
+ok() { echo "OK: $*"; }
+warn() { echo "WARN: $*"; }
+fail() { echo "ERROR: $*" >&2; exit 1; }
 pause() {
   if [[ "${CROWDSEC_TUI_MODE:-}" != "whiptail" && "${CROWDSEC_TUI_MODE:-}" != "installer" ]]; then
     echo
@@ -844,14 +844,17 @@ update_menu_from_github() {
 run_install_step() {
   local title="$1"
   shift
-  local log_file
+  local log_file rc_file
   log_file="$(mktemp)"
+  rc_file="$(mktemp)"
   if [[ "${CROWDSEC_TUI_MODE:-}" == "installer" ]] && tui_available; then
     set +e
     (
-      set +eE
+      set +e
+      set +E
+      trap - ERR
       "$@" >"${log_file}" 2>&1 &
-      local pid=$! pct=3 tail_text
+      local pid=$! pct=3 tail_text step_rc
       while kill -0 "${pid}" 2>/dev/null; do
         tail_text="$(tail -n 8 "${log_file}" 2>/dev/null | sed 's/"/'\''/g')"
         pct=$((pct + 3)); (( pct > 95 )) && pct=15
@@ -859,15 +862,19 @@ run_install_step() {
         sleep 1
       done
       wait "${pid}"
+      step_rc=$?
+      printf '%s' "${step_rc}" >"${rc_file}"
+      exit 0
     ) | whiptail --title " Установка " --gauge "${title}" 18 90 0
-    local rc=${PIPESTATUS[0]}
+    local rc
+    rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
     set -e
     if [[ "${rc}" -eq 0 ]]; then
-      rm -f "${log_file}"
+      rm -f "${log_file}" "${rc_file}"
       return 0
     fi
     whiptail --title " Ошибка: ${title} " --textbox "${log_file}" 30 110 || true
-    rm -f "${log_file}"
+    rm -f "${log_file}" "${rc_file}"
     fail "Этап установки завершился ошибкой: ${title}"
   else
     print_header
@@ -875,7 +882,7 @@ run_install_step() {
   fi
 
   if "$@" >"${log_file}" 2>&1; then
-    rm -f "${log_file}"
+    rm -f "${log_file}" "${rc_file}"
     return 0
   fi
 
@@ -884,7 +891,7 @@ run_install_step() {
   else
     cat "${log_file}"
   fi
-  rm -f "${log_file}"
+  rm -f "${log_file}" "${rc_file}"
   fail "Этап установки завершился ошибкой: ${title}"
 }
 
