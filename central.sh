@@ -35,7 +35,8 @@ PROFILE_FILE="/etc/profile.d/crowdsec-central-menu.sh"
 DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
-SCRIPT_VERSION="2026.05.22-webui-lifecycle"
+MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
+SCRIPT_VERSION="2026.05.22-manager-full"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -152,6 +153,7 @@ safe_source_env() {
   AUTO_REG_TOKEN="${AUTO_REG_TOKEN:-}"
   SHARED_BOUNCER_KEY="${SHARED_BOUNCER_KEY:-}"
   WEBUI_PASSWORD="${WEBUI_PASSWORD:-}"
+  WEB_UI_TYPE="${WEB_UI_TYPE:-simple}"
 
   if [[ -z "${LAN_IP}" ]]; then
     LAN_IP="127.0.0.1"
@@ -198,6 +200,7 @@ AUTO_REG_TOKEN=${AUTO_REG_TOKEN}
 SHARED_BOUNCER_KEY=${SHARED_BOUNCER_KEY}
 ALLOWED_RANGES=${ALLOWED_RANGES}
 WEBUI_PASSWORD=${WEBUI_PASSWORD}
+WEB_UI_TYPE=${WEB_UI_TYPE}
 ENV
   chmod 600 "${ENV_FILE}"
 }
@@ -318,6 +321,8 @@ ask_initial_settings() {
   echo "Внешний адрес нужен для готовой команды подключения VPS. Можно оставить пустым."
   prompt_default input_public "Внешний адрес для удалённых серверов [можно пусто]: " "${PUBLIC_ADDR:-}"
   PUBLIC_ADDR="${input_public:-${PUBLIC_ADDR:-}}"
+  prompt_default input_webui_type "Веб-морда: simple, manager или none [${WEB_UI_TYPE:-simple}]: " "${WEB_UI_TYPE:-simple}"
+  WEB_UI_TYPE="${input_webui_type:-simple}"
   [[ -n "${AUTO_REG_TOKEN:-}" ]] || AUTO_REG_TOKEN="$(openssl rand -hex 32)"
   [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || SHARED_BOUNCER_KEY="$(openssl rand -hex 32)"
   [[ -n "${WEBUI_PASSWORD:-}" ]] || WEBUI_PASSWORD="$(openssl rand -hex 24)"
@@ -358,6 +363,11 @@ ask_initial_settings_tui() {
   LAPI_PORT="$(tui_input "Начальная настройка" "Порт центрального LAPI" "${LAPI_PORT:-8080}")" || exit 1
   ALLOWED_RANGES="$(tui_input "Доступ к LAPI" "Allowed IP/CIDR для LAPI. Можно оставить пустым." "${ALLOWED_RANGES:-}")" || exit 1
   PUBLIC_ADDR="$(tui_input "Внешний адрес" "Внешний IP или DDNS для готовой команды подключения VPS. Можно оставить пустым." "${PUBLIC_ADDR:-}")" || exit 1
+  WEB_UI_TYPE="$(whiptail --title " Веб-морда " --cancel-button "Отмена" --ok-button "Выбрать" --notags --menu "Что установить на central-сервер?" 16 78 4 \
+    "simple" "Simple Web UI (лёгкая локальная веб-морда)" \
+    "manager" "CrowdSec Manager (Dockerized CrowdSec + Manager)" \
+    "none" "Без веб-морды" \
+    3>&1 1>&2 2>&3)" || exit 1
 
   [[ -n "${AUTO_REG_TOKEN:-}" ]] || AUTO_REG_TOKEN="$(openssl rand -hex 32)"
   [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || SHARED_BOUNCER_KEY="$(openssl rand -hex 32)"
@@ -430,6 +440,131 @@ create_or_update_shared_bouncer_key() {
   log "Создаю общий bouncer key для удалённых серверов..."
   cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
   ok "Bouncer key готов."
+}
+
+backup_and_remove_apt_crowdsec() {
+  local backup_dir="${CONFIG_DIR}/backup-before-docker-crowdsec-$(date +%F-%H%M%S)"
+  mkdir -p "${backup_dir}"
+  chmod 700 "${backup_dir}"
+  log "Создаю backup текущего apt/systemd CrowdSec в ${backup_dir}"
+  [[ -d /etc/crowdsec ]] && cp -a /etc/crowdsec "${backup_dir}/etc-crowdsec" || true
+  [[ -d /var/lib/crowdsec ]] && cp -a /var/lib/crowdsec "${backup_dir}/var-lib-crowdsec" || true
+  systemctl stop crowdsec 2>/dev/null || true
+  systemctl disable crowdsec 2>/dev/null || true
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get purge -y crowdsec || true
+  apt-get autoremove -y || true
+  ok "apt/systemd CrowdSec остановлен, удалён, backup сохранён."
+}
+
+remove_crowdsec_manager() {
+  if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
+    (cd "${MANAGER_COMPOSE_DIR}" && docker compose down --remove-orphans) || true
+  else
+    docker rm -f crowdsec-manager crowdsec >/dev/null 2>&1 || true
+  fi
+}
+
+remove_all_web_ui_containers() {
+  if [[ -f "${COMPOSE_FILE}" ]]; then
+    (cd "${COMPOSE_DIR}" && docker compose down --remove-orphans) || true
+  else
+    docker rm -f crowdsec-web-ui >/dev/null 2>&1 || true
+  fi
+  rm -rf "${COMPOSE_DIR}"
+  remove_crowdsec_manager
+}
+
+configure_docker_crowdsec_lapi() {
+  local config_file="${MANAGER_COMPOSE_DIR}/crowdsec-config/config.yaml"
+  [[ -f "${config_file}" ]] || fail "Не найден ${config_file}"
+  AUTO_REG_TOKEN="${AUTO_REG_TOKEN}" ALLOWED_RANGES="${ALLOWED_RANGES}" python3 - "${config_file}" <<'PY'
+import os, re, sys, yaml
+path = sys.argv[1]
+with open(path, "r", errors="replace") as f:
+    cfg = yaml.safe_load(f) or {}
+cfg.setdefault("api", {})
+cfg["api"].setdefault("server", {})
+cfg["api"]["server"]["listen_uri"] = "0.0.0.0:8080"
+ranges = []
+for item in os.environ.get("ALLOWED_RANGES", "").split(","):
+    item = re.sub(r"[^0-9A-Fa-f:.\/]", "", item.strip())
+    if item and item not in ranges:
+        ranges.append(item)
+cfg["api"]["server"]["auto_registration"] = {
+    "enabled": True,
+    "token": os.environ["AUTO_REG_TOKEN"],
+    "allowed_ranges": ranges,
+}
+with open(path, "w") as f:
+    yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+PY
+}
+
+install_or_update_crowdsec_manager() {
+  safe_source_env
+  [[ "${WEB_PORT}" != "${LAPI_PORT}" ]] || fail "Для CrowdSec Manager WEB_PORT и LAPI_PORT должны быть разными."
+  log "Устанавливаю CrowdSec Manager + Dockerized CrowdSec..."
+  remove_all_web_ui_containers
+  backup_and_remove_apt_crowdsec
+  mkdir -p "${MANAGER_COMPOSE_DIR}/config" "${MANAGER_COMPOSE_DIR}/logs/app" "${MANAGER_COMPOSE_DIR}/data" "${MANAGER_COMPOSE_DIR}/backups" "${MANAGER_COMPOSE_DIR}/crowdsec-config" "${MANAGER_COMPOSE_DIR}/crowdsec-db" "${MANAGER_COMPOSE_DIR}/logs/host"
+  chmod 700 "${MANAGER_COMPOSE_DIR}"
+  cat > "${MANAGER_COMPOSE_FILE}" <<COMPOSE
+services:
+  crowdsec-manager:
+    image: ${MANAGER_IMAGE}
+    container_name: crowdsec-manager
+    restart: unless-stopped
+    ports:
+      - "${LAN_IP}:${WEB_PORT}:8080"
+    environment:
+      - PORT=8080
+      - ENVIRONMENT=production
+      - CONFIG_DIR=/app/config
+      - DATABASE_PATH=/app/data/settings.db
+      - BACKUP_DIR=/app/backups
+      - INCLUDE_CROWDSEC=true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config:/app/config
+      - ./logs/app:/app/logs
+      - ./data:/app/data
+      - ./backups:/app/backups
+    networks:
+      - crowdsec-network
+    depends_on:
+      - crowdsec
+
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    restart: unless-stopped
+    environment:
+      - COLLECTIONS=crowdsecurity/linux crowdsecurity/sshd
+      - GID=1000
+    ports:
+      - "0.0.0.0:${LAPI_PORT}:8080"
+    volumes:
+      - ./crowdsec-db:/var/lib/crowdsec/data
+      - ./crowdsec-config:/etc/crowdsec
+      - /var/log:/var/log:ro
+    networks:
+      - crowdsec-network
+
+networks:
+  crowdsec-network:
+    driver: bridge
+COMPOSE
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose pull && docker compose up -d)
+  sleep 8
+  configure_docker_crowdsec_lapi
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
+  sleep 5
+  docker exec crowdsec cscli bouncers delete shared-firewall-bouncer >/dev/null 2>&1 || true
+  docker exec crowdsec cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
+  WEB_UI_TYPE="manager"
+  save_env
+  ok "CrowdSec Manager установлен. UI: http://${LAN_IP}:${WEB_PORT}, LAPI: ${VPS_LAPI_URL}"
 }
 
 install_or_update_web_ui() {
@@ -624,11 +759,17 @@ full_install() {
       run_install_step "Обновляю системные пакеты Debian" upgrade_system_packages
     fi
     run_install_step "Устанавливаю или обновляю Docker" install_or_update_docker
-    run_install_step "Устанавливаю или обновляю CrowdSec" install_or_update_crowdsec
-    run_install_step "Настраиваю CrowdSec LAPI" configure_crowdsec_lapi
-    run_install_step "Создаю machine account для Web UI" create_or_update_webui_machine
-    run_install_step "Создаю shared bouncer key" create_or_update_shared_bouncer_key
-    run_install_step "Запускаю Web UI" install_or_update_web_ui
+    if [[ "${WEB_UI_TYPE}" == "manager" ]]; then
+      run_install_step "Устанавливаю CrowdSec Manager + Dockerized CrowdSec" install_or_update_crowdsec_manager
+    else
+      run_install_step "Устанавливаю или обновляю CrowdSec" install_or_update_crowdsec
+      run_install_step "Настраиваю CrowdSec LAPI" configure_crowdsec_lapi
+      run_install_step "Создаю machine account для Web UI" create_or_update_webui_machine
+      run_install_step "Создаю shared bouncer key" create_or_update_shared_bouncer_key
+      if [[ "${WEB_UI_TYPE}" == "simple" ]]; then
+        run_install_step "Запускаю Web UI" install_or_update_web_ui
+      fi
+    fi
     run_install_step "Настраиваю UFW firewall" configure_ufw_full
     run_install_step "Устанавливаю команду меню" install_menu_files
     show_install_result_tui
@@ -646,11 +787,15 @@ full_install() {
     upgrade_system_packages
   fi
   install_or_update_docker
-  install_or_update_crowdsec
-  configure_crowdsec_lapi
-  create_or_update_webui_machine
-  create_or_update_shared_bouncer_key
-  install_or_update_web_ui
+  if [[ "${WEB_UI_TYPE}" == "manager" ]]; then
+    install_or_update_crowdsec_manager
+  else
+    install_or_update_crowdsec
+    configure_crowdsec_lapi
+    create_or_update_webui_machine
+    create_or_update_shared_bouncer_key
+    [[ "${WEB_UI_TYPE}" == "simple" ]] && install_or_update_web_ui
+  fi
   configure_ufw_full
   install_menu_files
   show_install_result
@@ -664,12 +809,19 @@ show_status() {
     safe_source_env
     print_current_settings
     echo "Статус сервисов:"
-    systemctl is-active --quiet crowdsec && echo "  CrowdSec: работает" || echo "  CrowdSec: не работает"
-    command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker && echo "  Docker: работает" || echo "  Docker: не работает или не установлен"
-    if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -q '^crowdsec-web-ui$'; then
-      echo "  Web UI контейнер: работает"
+    if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+      docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^crowdsec$' && echo "  CrowdSec Docker: работает" || echo "  CrowdSec Docker: не работает"
+      docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^crowdsec-manager$' && echo "  CrowdSec Manager: работает" || echo "  CrowdSec Manager: не работает"
     else
-      echo "  Web UI контейнер: не работает"
+      systemctl is-active --quiet crowdsec && echo "  CrowdSec: работает" || echo "  CrowdSec: не работает"
+    fi
+    command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker && echo "  Docker: работает" || echo "  Docker: не работает или не установлен"
+    if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+      docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^crowdsec-manager$' && echo "  Веб-морда: CrowdSec Manager работает" || echo "  Веб-морда: CrowdSec Manager не работает"
+    elif command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -q '^crowdsec-web-ui$'; then
+      echo "  Веб-морда: Simple Web UI работает"
+    else
+      echo "  Веб-морда: не работает"
     fi
     echo
     echo "Порты:"
@@ -853,15 +1005,29 @@ regenerate_bouncer_key() {
 
 restart_services() {
   print_header
-  systemctl restart crowdsec || true
+  if [[ "${WEB_UI_TYPE:-simple}" == "manager" && -f "${MANAGER_COMPOSE_FILE}" ]]; then
+    (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d) || true
+  else
+    systemctl restart crowdsec || true
+  fi
   systemctl restart docker || true
   if [[ -d "${COMPOSE_DIR}" ]]; then cd "${COMPOSE_DIR}" && docker compose up -d || true; fi
+  if [[ -d "${MANAGER_COMPOSE_DIR}" ]]; then cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d || true; fi
   ok "Сервисы перезапущены."
   pause
 }
 
 update_web_ui_only() {
   print_header
+  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+    [[ -f "${MANAGER_COMPOSE_FILE}" ]] || { install_or_update_crowdsec_manager; pause; return; }
+    cd "${MANAGER_COMPOSE_DIR}"
+    docker compose pull
+    docker compose up -d
+    ok "CrowdSec Manager обновлён."
+    pause
+    return
+  fi
   if [[ ! -f "${COMPOSE_FILE}" ]]; then install_or_update_web_ui; pause; return; fi
   cd "${COMPOSE_DIR}"
   docker compose pull
@@ -896,7 +1062,17 @@ update_crowdsec_only() { print_header; install_or_update_crowdsec; configure_cro
 show_logs() {
   local tmp
   tmp="$(mktemp)"
-  { print_header; docker logs crowdsec-web-ui --tail 150 2>&1 || echo "Контейнер crowdsec-web-ui не найден."; } >"${tmp}"
+  {
+    print_header
+    if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+      docker logs crowdsec-manager --tail 150 2>&1 || echo "Контейнер crowdsec-manager не найден."
+      echo
+      echo "---- CrowdSec container ----"
+      docker logs crowdsec --tail 80 2>&1 || true
+    else
+      docker logs crowdsec-web-ui --tail 150 2>&1 || echo "Контейнер crowdsec-web-ui не найден."
+    fi
+  } >"${tmp}"
   show_file "Логи Web UI" "${tmp}"
   rm -f "${tmp}"
 }
@@ -989,20 +1165,35 @@ show_crowdsec_manager_note() {
   tmp="$(mktemp)"
   {
     print_header
-    echo "CrowdSec Manager пока не устанавливается автоматически этим скриптом."
+    echo "CrowdSec Manager устанавливается как отдельный режим central-сервера."
     echo
-    echo "Причина:"
-    echo "  текущий central использует CrowdSec как apt/systemd-сервис;"
-    echo "  типовой CrowdSec Manager standalone-compose поднимает свой CrowdSec-контейнер;"
-    echo "  автоматическая замена engine на Docker может сломать существующий central LAPI для VPS."
+    echo "Что будет сделано при миграции:"
+    echo "  - backup /etc/crowdsec и /var/lib/crowdsec;"
+    echo "  - остановка и удаление apt/systemd CrowdSec;"
+    echo "  - удаление текущих веб-морд;"
+    echo "  - установка Dockerized CrowdSec + CrowdSec Manager;"
+    echo "  - сохранение текущего LAPI-порта ${LAPI_PORT} для VPS."
     echo
-    echo "Безопасный путь:"
-    echo "  1. оставить apt/systemd CrowdSec как стабильный central LAPI;"
-    echo "  2. добавить CrowdSec Manager только после отдельной проверки режима INCLUDE_CROWDSEC=false;"
-    echo "  3. не менять порт LAPI 8080 и bouncer keys без явного подтверждения."
+    echo "Важно:"
+    echo "  подключённые VPS могут потребовать повторной регистрации/валидации,"
+    echo "  потому что engine и база CrowdSec будут заменены на Dockerized CrowdSec."
   } >"${tmp}"
   show_file "CrowdSec Manager" "${tmp}"
   rm -f "${tmp}"
+}
+
+migrate_to_crowdsec_manager() {
+  print_header
+  if ! tui_yesno "Миграция на CrowdSec Manager" "Будет выполнено:\n\n- backup /etc/crowdsec и /var/lib/crowdsec;\n- удаление apt/systemd CrowdSec;\n- удаление текущих веб-морд;\n- установка Dockerized CrowdSec + CrowdSec Manager;\n- сохранение текущего LAPI-порта ${LAPI_PORT}.\n\nПродолжить?"; then
+    echo "Отменено."
+    pause
+    return
+  fi
+  install_or_update_docker
+  install_or_update_crowdsec_manager
+  configure_ufw_full
+  ok "Миграция на CrowdSec Manager завершена."
+  pause
 }
 
 reapply_all_settings() {
@@ -1124,6 +1315,7 @@ run_menu_action() {
     webui_reinstall) reinstall_simple_web_ui ;;
     webui_remove) remove_simple_web_ui ;;
     manager_note) show_crowdsec_manager_note ;;
+    manager_install) migrate_to_crowdsec_manager ;;
     repair_menu) repair_menu_installation ;;
     test_lapi) test_webui_lapi ;;
     exit) exit 0 ;;
@@ -1188,7 +1380,8 @@ menu_loop_whiptail() {
           "webui_detect" "Показать установленные веб-морды" \
           "webui_reinstall" "Переустановить Simple Web UI" \
           "webui_remove" "Удалить Simple Web UI" \
-          "manager_note" "CrowdSec Manager: статус интеграции" \
+          "manager_install" "Установить CrowdSec Manager (миграция)" \
+          "manager_note" "CrowdSec Manager: что будет изменено" \
           3>&1 1>&2 2>&3)" || continue
         ;;
       service)

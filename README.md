@@ -59,7 +59,7 @@ The central menu uses `whiptail`/newt dialogs in the same style as Proxmox VE He
 
 The central and VPS installers also use TUI dialogs for first-time setup. Install steps run behind clean status screens, and failed steps open their log in a scrollable window.
 
-The central menu includes Web UI lifecycle actions: detect installed Web UIs, remove or reinstall the current Simple Web UI, and show a CrowdSec Manager integration note. CrowdSec Manager is not installed automatically yet because its common standalone deployment includes a Dockerized CrowdSec engine, while this project currently keeps the central LAPI as a stable apt/systemd service for already connected VPS nodes.
+The central menu includes Web UI lifecycle actions: detect installed Web UIs, remove or reinstall the current Simple Web UI, and migrate to CrowdSec Manager. CrowdSec Manager mode backs up and removes apt/systemd CrowdSec, removes existing Web UI containers, then deploys Dockerized CrowdSec + CrowdSec Manager while preserving the configured external LAPI port for VPS nodes.
 
 Обновить установленную команду меню без переустановки всего стека:
 
