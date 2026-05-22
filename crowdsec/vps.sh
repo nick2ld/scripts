@@ -164,17 +164,22 @@ tui_yesno() {
   local text="$2"
   whiptail --title " ${title} " --yes-button "Да" --no-button "Нет" --yesno "${text}" 10 78
 }
+strip_ansi() {
+  sed -r 's/\x1B\[[0-9;?]*[ -/]*[@-~]//g'
+}
 run_install_step() {
   local title="$1"
   shift
-  local log_file
+  local log_file clean_log
   log_file="$(mktemp)"
+  clean_log="$(mktemp)"
   if tui_available; then
     (
+      set +eE
       "$@" >"${log_file}" 2>&1 &
       local pid=$! pct=3 tail_text
       while kill -0 "${pid}" 2>/dev/null; do
-        tail_text="$(tail -n 8 "${log_file}" 2>/dev/null | sed 's/"/'\''/g')"
+        tail_text="$(tail -n 8 "${log_file}" 2>/dev/null | strip_ansi | sed 's/"/'\''/g')"
         pct=$((pct + 3)); (( pct > 95 )) && pct=15
         printf 'XXX\n%s\n%s\n\n%s\nXXX\n' "${pct}" "${title}" "${tail_text:-ожидание вывода...}"
         sleep 1
@@ -183,25 +188,27 @@ run_install_step() {
     ) | whiptail --title " CrowdSec VPS Node " --gauge "${title}" 18 90 0
     local rc=${PIPESTATUS[0]}
     if [[ "${rc}" -eq 0 ]]; then
-      rm -f "${log_file}"
+      rm -f "${log_file}" "${clean_log}"
       return 0
     fi
-    whiptail --title " Ошибка: ${title} " --textbox "${log_file}" 30 110 || true
-    rm -f "${log_file}"
+    strip_ansi <"${log_file}" >"${clean_log}" || cp "${log_file}" "${clean_log}"
+    whiptail --title " Ошибка: ${title} " --textbox "${clean_log}" 30 110 || true
+    rm -f "${log_file}" "${clean_log}"
     fail "Этап установки завершился ошибкой: ${title}"
   else
     log "${title}"
   fi
   if "$@" >"${log_file}" 2>&1; then
-    rm -f "${log_file}"
+    rm -f "${log_file}" "${clean_log}"
     return 0
   fi
   if tui_available; then
-    whiptail --title " Ошибка: ${title} " --textbox "${log_file}" 30 110 || true
+    strip_ansi <"${log_file}" >"${clean_log}" || cp "${log_file}" "${clean_log}"
+    whiptail --title " Ошибка: ${title} " --textbox "${clean_log}" 30 110 || true
   else
-    cat "${log_file}"
+    strip_ansi <"${log_file}" || cat "${log_file}"
   fi
-  rm -f "${log_file}"
+  rm -f "${log_file}" "${clean_log}"
   fail "Этап установки завершился ошибкой: ${title}"
 }
 on_error() {
@@ -643,11 +650,23 @@ YAML
 
 register_to_central_lapi() {
   load_env_if_exists
+  local reg_log reg_rc
   log "Регистрирую VPS на центральном LAPI..."
-  systemctl stop crowdsec || true
   mkdir -p /etc/crowdsec
 
-  # Critical fix: do not delete local_api_credentials.yaml before registration.
+  if [[ -f /etc/crowdsec/local_api_credentials.yaml ]] \
+    && grep -q "url: ${CENTRAL_LAPI_URL}" /etc/crowdsec/local_api_credentials.yaml \
+    && ! grep -q 'temporary' /etc/crowdsec/local_api_credentials.yaml; then
+    if cscli lapi status >/tmp/crowdsec-lapi-status.log 2>&1; then
+      ok "VPS уже зарегистрирован на central LAPI, повторная регистрация не нужна."
+      return 0
+    fi
+    warn "Локальные credentials есть, но cscli lapi status не прошёл. Пробую зарегистрировать заново."
+  fi
+
+  systemctl stop crowdsec || true
+
+  # Do not delete local_api_credentials.yaml before registration.
   # Some CrowdSec versions try to read it before writing new credentials.
   if [[ ! -f /etc/crowdsec/local_api_credentials.yaml ]]; then
     cat > /etc/crowdsec/local_api_credentials.yaml <<'YAML'
@@ -659,11 +678,23 @@ YAML
 
   cp -a /etc/crowdsec/local_api_credentials.yaml "/etc/crowdsec/local_api_credentials.yaml.backup.before-register.$(date +%F-%H%M%S)" || true
 
+  reg_log="$(mktemp)"
+  set +e
   cscli lapi register \
     --machine "${MACHINE_NAME}" \
     --url "${CENTRAL_LAPI_URL}" \
     --token "${AUTO_REG_TOKEN}" \
-    --file /etc/crowdsec/local_api_credentials.yaml
+    --file /etc/crowdsec/local_api_credentials.yaml >"${reg_log}" 2>&1
+  reg_rc=$?
+  set -e
+
+  if [[ "${reg_rc}" -ne 0 ]]; then
+    cat "${reg_log}"
+    rm -f "${reg_log}"
+    fail "Не удалось зарегистрировать VPS на central LAPI. Проверь URL, AUTO_REG_TOKEN, доступ к порту LAPI и создай/проверь подключение в меню central."
+  fi
+  cat "${reg_log}" || true
+  rm -f "${reg_log}"
 
   [[ -f /etc/crowdsec/local_api_credentials.yaml ]] || fail "Регистрация не создала /etc/crowdsec/local_api_credentials.yaml"
   ok "VPS зарегистрирован на центральном LAPI."
