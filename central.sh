@@ -36,7 +36,7 @@ DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="2026.05.22-manager-full-mc-vps"
+SCRIPT_VERSION="2026.05.22-manager-full-mc-flat"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -1598,6 +1598,7 @@ tui_theme() {
 use_shadow = OFF
 use_colors = ON
 screen_color = (WHITE,BLUE,ON)
+shadow_color = (BLUE,BLUE,OFF)
 dialog_color = (WHITE,BLUE,OFF)
 title_color = (YELLOW,BLUE,ON)
 border_color = (CYAN,BLUE,ON)
@@ -1610,12 +1611,15 @@ button_label_active_color = (BLACK,CYAN,ON)
 button_label_inactive_color = (WHITE,BLUE,OFF)
 inputbox_color = (WHITE,BLUE,OFF)
 inputbox_border_color = (CYAN,BLUE,ON)
+inputbox_border2_color = (CYAN,BLUE,ON)
 searchbox_color = (WHITE,BLUE,OFF)
 searchbox_title_color = (YELLOW,BLUE,ON)
 searchbox_border_color = (CYAN,BLUE,ON)
+searchbox_border2_color = (CYAN,BLUE,ON)
 position_indicator_color = (YELLOW,BLUE,ON)
 menubox_color = (WHITE,BLUE,OFF)
 menubox_border_color = (CYAN,BLUE,ON)
+menubox_border2_color = (CYAN,BLUE,ON)
 item_color = (WHITE,BLUE,OFF)
 item_selected_color = (BLACK,CYAN,ON)
 tag_color = (YELLOW,BLUE,ON)
@@ -1624,6 +1628,11 @@ tag_key_color = (YELLOW,BLUE,ON)
 tag_key_selected_color = (BLACK,CYAN,ON)
 check_color = (WHITE,BLUE,OFF)
 check_selected_color = (BLACK,CYAN,ON)
+itemhelp_color = (WHITE,BLUE,OFF)
+form_active_text_color = (BLACK,CYAN,ON)
+form_text_color = (WHITE,BLUE,OFF)
+form_item_readonly_color = (CYAN,BLUE,ON)
+gauge_color = (YELLOW,BLUE,ON)
 uarrow_color = (YELLOW,BLUE,ON)
 darrow_color = (YELLOW,BLUE,ON)
 EOF
