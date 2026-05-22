@@ -26,6 +26,7 @@ NC='\033[0m'
 
 CONFIG_DIR="/root/crowdsec-central"
 ENV_FILE="${CONFIG_DIR}/central.env"
+CONNECTIONS_FILE="${CONFIG_DIR}/vps-connections.tsv"
 COMPOSE_DIR="/opt/crowdsec-web-ui"
 COMPOSE_FILE="${COMPOSE_DIR}/docker-compose.yml"
 MANAGER_COMPOSE_DIR="/opt/crowdsec-manager"
@@ -221,7 +222,7 @@ safe_source_env() {
   AUTO_REG_TOKEN="${AUTO_REG_TOKEN:-}"
   SHARED_BOUNCER_KEY="${SHARED_BOUNCER_KEY:-}"
   WEBUI_PASSWORD="${WEBUI_PASSWORD:-}"
-  WEB_UI_TYPE="${WEB_UI_TYPE:-simple}"
+  WEB_UI_TYPE="manager"
 
   if [[ -z "${LAN_IP}" ]]; then
     LAN_IP="127.0.0.1"
@@ -248,7 +249,7 @@ save_env() {
   AUTO_REG_TOKEN="${AUTO_REG_TOKEN:-}"
   SHARED_BOUNCER_KEY="${SHARED_BOUNCER_KEY:-}"
   WEBUI_PASSWORD="${WEBUI_PASSWORD:-}"
-  WEB_UI_TYPE="${WEB_UI_TYPE:-simple}"
+  WEB_UI_TYPE="manager"
 
   mkdir -p "${CONFIG_DIR}"
   chmod 700 "${CONFIG_DIR}"
@@ -304,13 +305,6 @@ print_current_settings() {
   echo
   echo "LAPI для удалённых серверов:"
   echo "  ${VPS_LAPI_URL}"
-  echo
-  echo "Allowed IP/CIDR для доступа к LAPI:"
-  if [[ -n "${ALLOWED_RANGES}" ]]; then
-    echo "  ${ALLOWED_RANGES}"
-  else
-    echo "  пока не заданы"
-  fi
   echo
   echo "Файл настроек:"
   echo "  ${ENV_FILE}"
@@ -392,16 +386,10 @@ ask_initial_settings() {
   prompt_default input_lapi_port "Порт центрального LAPI [${LAPI_PORT:-8080}]: " "${LAPI_PORT:-8080}"
   LAPI_PORT="${input_lapi_port}"
   echo
-  echo "Allowed IP/CIDR можно оставить пустым и добавить позже через меню."
-  echo "Примеры: 11.22.33.44/32 или 11.22.33.44/32,192.168.1.0/24"
-  prompt_default input_allowed "Allowed IP/CIDR для LAPI [можно пусто]: " "${ALLOWED_RANGES:-}"
-  ALLOWED_RANGES="${input_allowed:-${ALLOWED_RANGES:-}}"
-  echo
   echo "Внешний адрес нужен для готовой команды подключения VPS. Можно оставить пустым."
   prompt_default input_public "Внешний адрес для удалённых серверов [можно пусто]: " "${PUBLIC_ADDR:-}"
   PUBLIC_ADDR="${input_public:-${PUBLIC_ADDR:-}}"
-  prompt_default input_webui_type "Веб-морда: simple, manager или none [${WEB_UI_TYPE:-simple}]: " "${WEB_UI_TYPE:-simple}"
-  WEB_UI_TYPE="${input_webui_type:-simple}"
+  WEB_UI_TYPE="manager"
   [[ -n "${AUTO_REG_TOKEN:-}" ]] || AUTO_REG_TOKEN="$(openssl rand -hex 32)"
   [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || SHARED_BOUNCER_KEY="$(openssl rand -hex 32)"
   [[ -n "${WEBUI_PASSWORD:-}" ]] || WEBUI_PASSWORD="$(openssl rand -hex 24)"
@@ -440,13 +428,8 @@ ask_initial_settings_tui() {
   LAN_IP="$(tui_input "Начальная настройка" "LAN IP для Web UI и локального LAPI" "${DETECTED_IP}")" || exit 1
   WEB_PORT="$(tui_input "Начальная настройка" "Порт Web UI" "${WEB_PORT:-3000}")" || exit 1
   LAPI_PORT="$(tui_input "Начальная настройка" "Порт центрального LAPI" "${LAPI_PORT:-8080}")" || exit 1
-  ALLOWED_RANGES="$(tui_input "Доступ к LAPI" "Allowed IP/CIDR для LAPI. Можно оставить пустым." "${ALLOWED_RANGES:-}")" || exit 1
   PUBLIC_ADDR="$(tui_input "Внешний адрес" "Внешний IP или DDNS для готовой команды подключения VPS. Можно оставить пустым." "${PUBLIC_ADDR:-}")" || exit 1
-  WEB_UI_TYPE="$(whiptail --title " Веб-морда " --cancel-button "Отмена" --ok-button "Выбрать" --notags --menu "Что установить на central-сервер?" 16 78 4 \
-    "simple" "Simple Web UI (лёгкая локальная веб-морда)" \
-    "manager" "CrowdSec Manager (Dockerized CrowdSec + Manager)" \
-    "none" "Без веб-морды" \
-    3>&1 1>&2 2>&3)" || exit 1
+  WEB_UI_TYPE="manager"
 
   [[ -n "${AUTO_REG_TOKEN:-}" ]] || AUTO_REG_TOKEN="$(openssl rand -hex 32)"
   [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || SHARED_BOUNCER_KEY="$(openssl rand -hex 32)"
@@ -532,14 +515,36 @@ create_or_update_shared_bouncer_key() {
 
 create_named_vps_bouncer_key() {
   safe_source_env
-  local node_name bouncer_key tmp
+  local node_name vps_ip vps_cidr bouncer_key tmp rc
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
-    node_name="$(whiptail --title " Индивидуальный bouncer для VPS " --inputbox "Введите ТО ЖЕ имя, которое потом укажешь в VPS-скрипте как Machine name.\n\nИменно это имя будет видно в CrowdSec Manager в разделе Registered Bouncers." 13 92 "" 3>&1 1>&2 2>&3)" || return
+    set +e
+    node_name="$(whiptail --title " Мастер подключения VPS " --inputbox "Имя VPS.\n\nЭто же имя укажи в VPS-скрипте как Machine name. Оно будет видно в CrowdSec Manager." 13 92 "" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+    set +e
+    vps_ip="$(whiptail --title " Мастер подключения VPS " --inputbox "Внешний IP VPS, которому разрешить доступ к LAPI.\n\nСкрипт сам добавит его как /32 в LAPI и UFW. CIDR вручную вводить не нужно." 13 92 "" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
   else
     read -rp "Имя VPS/bouncer, такое же как Machine name в VPS-скрипте: " node_name
+    read -rp "Внешний IP VPS для доступа к LAPI: " vps_ip
   fi
   node_name="$(printf '%s' "${node_name:-}" | tr -cd 'A-Za-z0-9._:-')"
   [[ -n "${node_name}" ]] || fail "Имя bouncer не может быть пустым."
+  vps_ip="$(printf '%s' "${vps_ip:-}" | tr -cd '0-9A-Fa-f:.')"
+  [[ -n "${vps_ip}" ]] || fail "IP VPS не может быть пустым."
+  if [[ "${vps_ip}" == *:* ]]; then
+    vps_cidr="${vps_ip}/128"
+  else
+    vps_cidr="${vps_ip}/32"
+  fi
+  if [[ -z "${ALLOWED_RANGES}" ]]; then
+    ALLOWED_RANGES="${vps_cidr}"
+  elif ! echo ",${ALLOWED_RANGES}," | grep -q ",${vps_cidr},"; then
+    ALLOWED_RANGES="${ALLOWED_RANGES},${vps_cidr}"
+  fi
   bouncer_key="$(openssl rand -hex 32)"
   if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
     docker exec crowdsec cscli bouncers delete "${node_name}" >/dev/null 2>&1 || true
@@ -548,9 +553,25 @@ create_named_vps_bouncer_key() {
     cscli bouncers delete "${node_name}" >/dev/null 2>&1 || true
     cscli bouncers add "${node_name}" --key "${bouncer_key}" >/dev/null
   fi
+  save_env
+  configure_docker_crowdsec_lapi
+  configure_ufw_full
+  mkdir -p "${CONFIG_DIR}"
+  chmod 700 "${CONFIG_DIR}"
+  touch "${CONNECTIONS_FILE}"
+  chmod 600 "${CONNECTIONS_FILE}"
+  awk -F'\t' -v name="${node_name}" '($2 != name)' "${CONNECTIONS_FILE}" >"${CONNECTIONS_FILE}.tmp" || true
+  mv "${CONNECTIONS_FILE}.tmp" "${CONNECTIONS_FILE}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -Is)" "${node_name}" "${vps_ip}" "${VPS_LAPI_URL}" "${AUTO_REG_TOKEN}" "${bouncer_key}" >>"${CONNECTIONS_FILE}"
   tmp="$(mktemp)"
   {
     echo "Данные для установки VPS:"
+    echo
+    echo "VPS name / Machine name:"
+    echo "${node_name}"
+    echo
+    echo "Разрешённый IP VPS:"
+    echo "${vps_ip} (${vps_cidr})"
     echo
     echo "Central LAPI URL:"
     echo "${VPS_LAPI_URL}"
@@ -561,12 +582,10 @@ create_named_vps_bouncer_key() {
     echo "BOUNCER_KEY:"
     echo "${bouncer_key}"
     echo
-    echo "Machine name:"
-    echo "${node_name}"
-    echo
     echo "Важно:"
     echo "- Используй этот bouncer key только на VPS '${node_name}'."
     echo "- В CrowdSec Manager bouncer будет отображаться как '${node_name}', а не shared-firewall-bouncer."
+    echo "- Запись сохранена в ${CONNECTIONS_FILE}."
   } >"${tmp}"
   show_file "Индивидуальный bouncer key VPS" "${tmp}"
   rm -f "${tmp}"
@@ -828,7 +847,25 @@ run_install_step() {
   local log_file
   log_file="$(mktemp)"
   if [[ "${CROWDSEC_TUI_MODE:-}" == "installer" ]] && tui_available; then
-    whiptail --title " Установка " --infobox "${title}\n\nПодробный лог пишется во временный файл." 9 72 || true
+    (
+      "$@" >"${log_file}" 2>&1 &
+      local pid=$! pct=3 tail_text
+      while kill -0 "${pid}" 2>/dev/null; do
+        tail_text="$(tail -n 8 "${log_file}" 2>/dev/null | sed 's/"/'\''/g')"
+        pct=$((pct + 3)); (( pct > 95 )) && pct=15
+        printf 'XXX\n%s\n%s\n\n%s\nXXX\n' "${pct}" "${title}" "${tail_text:-ожидание вывода...}"
+        sleep 1
+      done
+      wait "${pid}"
+    ) | whiptail --title " Установка " --gauge "${title}" 18 90 0
+    local rc=${PIPESTATUS[0]}
+    if [[ "${rc}" -eq 0 ]]; then
+      rm -f "${log_file}"
+      return 0
+    fi
+    whiptail --title " Ошибка: ${title} " --textbox "${log_file}" 30 110 || true
+    rm -f "${log_file}"
+    fail "Этап установки завершился ошибкой: ${title}"
   else
     print_header
     log "${title}"
@@ -889,17 +926,8 @@ full_install() {
       run_install_step "Обновляю системные пакеты Debian" upgrade_system_packages
     fi
     run_install_step "Устанавливаю или обновляю Docker" install_or_update_docker
-    if [[ "${WEB_UI_TYPE}" == "manager" ]]; then
-      run_install_step "Устанавливаю CrowdSec Manager + Dockerized CrowdSec" install_or_update_crowdsec_manager
-    else
-      run_install_step "Устанавливаю или обновляю CrowdSec" install_or_update_crowdsec
-      run_install_step "Настраиваю CrowdSec LAPI" configure_crowdsec_lapi
-      run_install_step "Создаю machine account для Web UI" create_or_update_webui_machine
-      run_install_step "Создаю shared bouncer key" create_or_update_shared_bouncer_key
-      if [[ "${WEB_UI_TYPE}" == "simple" ]]; then
-        run_install_step "Запускаю Web UI" install_or_update_web_ui
-      fi
-    fi
+    WEB_UI_TYPE="manager"
+    run_install_step "Устанавливаю CrowdSec Manager + Dockerized CrowdSec" install_or_update_crowdsec_manager
     run_install_step "Настраиваю UFW firewall" configure_ufw_full
     run_install_step "Устанавливаю команду меню" install_menu_files
     show_install_result_tui
@@ -917,15 +945,8 @@ full_install() {
     upgrade_system_packages
   fi
   install_or_update_docker
-  if [[ "${WEB_UI_TYPE}" == "manager" ]]; then
-    install_or_update_crowdsec_manager
-  else
-    install_or_update_crowdsec
-    configure_crowdsec_lapi
-    create_or_update_webui_machine
-    create_or_update_shared_bouncer_key
-    [[ "${WEB_UI_TYPE}" == "simple" ]] && install_or_update_web_ui
-  fi
+  WEB_UI_TYPE="manager"
+  install_or_update_crowdsec_manager
   configure_ufw_full
   install_menu_files
   show_install_result
@@ -943,15 +964,13 @@ show_status() {
       docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^crowdsec$' && echo "  CrowdSec Docker: работает" || echo "  CrowdSec Docker: не работает"
       docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^crowdsec-manager$' && echo "  CrowdSec Manager: работает" || echo "  CrowdSec Manager: не работает"
     else
-      systemctl is-active --quiet crowdsec && echo "  CrowdSec: работает" || echo "  CrowdSec: не работает"
+      echo "  CrowdSec Manager: режим не настроен, запусти повторную установку/переустановку."
     fi
     command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker && echo "  Docker: работает" || echo "  Docker: не работает или не установлен"
     if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
       docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^crowdsec-manager$' && echo "  Веб-морда: CrowdSec Manager работает" || echo "  Веб-морда: CrowdSec Manager не работает"
-    elif command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -q '^crowdsec-web-ui$'; then
-      echo "  Веб-морда: Simple Web UI работает"
     else
-      echo "  Веб-морда: не работает"
+      echo "  Веб-морда: CrowdSec Manager не настроен"
     fi
     echo
     echo "Порты:"
@@ -967,16 +986,40 @@ show_connection_info() {
   {
     print_header
     safe_source_env
-    echo "Данные для подключения удалённых серверов:"
-    echo "LAPI URL: ${VPS_LAPI_URL}"
-    echo "Auto-registration token: ${AUTO_REG_TOKEN}"
-    echo "Shared bouncer key: ${SHARED_BOUNCER_KEY}"
-    echo "Для красивого имени bouncer в CrowdSec Manager создай индивидуальный ключ:"
-    echo "Сеть и ключи -> Создать bouncer key с именем VPS"
-    echo "Allowed IP/CIDR: ${ALLOWED_RANGES:-не заданы}"
-    echo "Веб-морду наружу не пробрасывать: ${LOCAL_WEB_UI}"
+    echo "Созданные подключения VPS:"
+    echo
+    if [[ ! -s "${CONNECTIONS_FILE}" ]]; then
+      echo "Пока нет сохранённых подключений."
+      echo
+      echo "Создай подключение через:"
+      echo "  Доступ к LAPI -> Создать подключение VPS"
+      echo
+      echo "Мастер спросит имя VPS и его внешний IP, сам добавит доступ к LAPI и создаст bouncer key."
+    else
+      printf '%-22s  %-24s  %-40s  %s\n' "Дата" "VPS" "IP" "LAPI"
+      printf '%-22s  %-24s  %-40s  %s\n' "----" "---" "--" "----"
+      while IFS=$'\t' read -r created name ip lapi token key; do
+        [[ -n "${name:-}" ]] || continue
+        printf '%-22s  %-24s  %-40s  %s\n' "${created}" "${name}" "${ip}" "${lapi}"
+      done <"${CONNECTIONS_FILE}"
+      echo
+      echo "Подробные данные для повторного копирования:"
+      echo
+      while IFS=$'\t' read -r created name ip lapi token key; do
+        [[ -n "${name:-}" ]] || continue
+        echo "=== ${name} ==="
+        echo "created: ${created}"
+        echo "ip: ${ip}"
+        echo "CENTRAL_LAPI_URL=${lapi}"
+        echo "AUTO_REG_TOKEN=${token}"
+        echo "BOUNCER_KEY=${key}"
+        echo "MACHINE_NAME=${name}"
+        echo
+      done <"${CONNECTIONS_FILE}"
+    fi
+    echo "Веб-морда доступна только из локальной сети: ${LOCAL_WEB_UI}"
   } >"${tmp}"
-  show_file "Данные подключения" "${tmp}"
+  show_file "Подключения VPS" "${tmp}"
   rm -f "${tmp}"
 }
 
@@ -1039,7 +1082,7 @@ add_allowed_range() {
   fi
 
   save_env
-  configure_crowdsec_lapi
+  configure_docker_crowdsec_lapi
   configure_ufw_full
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
@@ -1096,7 +1139,7 @@ remove_allowed_range() {
   done
   ALLOWED_RANGES="${new_list}"
   save_env
-  configure_crowdsec_lapi
+  configure_docker_crowdsec_lapi
   configure_ufw_full
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
@@ -1121,7 +1164,7 @@ replace_allowed_ranges() {
 
   ALLOWED_RANGES="${new_ranges:-}"
   save_env
-  configure_crowdsec_lapi
+  configure_docker_crowdsec_lapi
   configure_ufw_full
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
@@ -1158,7 +1201,7 @@ change_lan_ip_or_web_port() {
   LAN_IP="${new_lan_ip:-${LAN_IP}}"
   WEB_PORT="${new_web_port:-${WEB_PORT}}"
   save_env
-  install_or_update_web_ui
+  install_or_update_crowdsec_manager
   configure_ufw_full
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
@@ -1192,8 +1235,7 @@ change_lapi_port() {
 
   LAPI_PORT="${new_lapi_port}"
   save_env
-  configure_crowdsec_lapi
-  install_or_update_web_ui
+  install_or_update_crowdsec_manager
   configure_ufw_full
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
@@ -1238,7 +1280,7 @@ regenerate_auto_token() {
 
   AUTO_REG_TOKEN="$(openssl rand -hex 32)"
   save_env
-  configure_crowdsec_lapi
+  configure_docker_crowdsec_lapi
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
     whiptail --title " Успех " --msgbox "Auto-registration token обновлён." 8 78
@@ -1366,7 +1408,7 @@ reinstall_simple_web_ui_cmd() {
   fi
   rm -rf "${COMPOSE_DIR}"
   create_or_update_webui_machine
-  install_or_update_web_ui
+  install_or_update_crowdsec_manager
   configure_ufw_full
 }
 reinstall_simple_web_ui() {
@@ -1442,16 +1484,10 @@ migrate_to_crowdsec_manager() {
 }
 
 reapply_all_settings_cmd() {
-  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
-    configure_docker_crowdsec_lapi
-    create_or_update_shared_bouncer_key
-    (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
-  else
-    configure_crowdsec_lapi
-    create_or_update_webui_machine
-    create_or_update_shared_bouncer_key
-    install_or_update_web_ui
-  fi
+  WEB_UI_TYPE="manager"
+  configure_docker_crowdsec_lapi
+  create_or_update_shared_bouncer_key
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
   configure_ufw_full
   install_menu_files
 }
@@ -1484,30 +1520,16 @@ update_docker_only() {
 }
 
 update_crowdsec_only() {
-  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
-    run_menu_step "Обновление CrowdSec в Docker" install_or_update_crowdsec_manager
-  else
-    run_menu_step "Обновление CrowdSec" install_or_update_crowdsec
-  fi
+  run_menu_step "Обновление CrowdSec в Docker" install_or_update_crowdsec_manager
 }
 
 update_web_ui_only() {
-  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
-    run_menu_step "Обновление CrowdSec Manager" install_or_update_crowdsec_manager
-  else
-    run_menu_step "Обновление Simple Web UI" install_or_update_web_ui
-  fi
+  run_menu_step "Обновление CrowdSec Manager" install_or_update_crowdsec_manager
 }
 
 update_installed_stack() {
-  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
-    run_menu_step "Обновление Docker" install_or_update_docker
-    run_menu_step "Обновление CrowdSec + Manager" install_or_update_crowdsec_manager
-  else
-    run_menu_step "Обновление Docker" install_or_update_docker
-    run_menu_step "Обновление CrowdSec" install_or_update_crowdsec
-    run_menu_step "Обновление Simple Web UI" install_or_update_web_ui
-  fi
+  run_menu_step "Обновление Docker" install_or_update_docker
+  run_menu_step "Обновление CrowdSec + Manager" install_or_update_crowdsec_manager
   run_menu_step "Настройка Firewall" configure_ufw_full
 }
 
@@ -1516,18 +1538,11 @@ show_logs() {
   tmp="$(mktemp)"
   {
     print_header
-    if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
-      echo "Логи CrowdSec Manager (последние 100 строк):"
-      docker logs --tail 100 crowdsec-manager 2>&1 || true
-      echo
-      echo "Логи CrowdSec Docker (последние 100 строк):"
-      docker logs --tail 100 crowdsec 2>&1 || true
-    elif command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' | grep -q '^crowdsec-web-ui$'; then
-      echo "Логи Simple Web UI (последние 100 строк):"
-      docker logs --tail 100 crowdsec-web-ui 2>&1 || true
-    else
-      echo "Веб-морда не установлена или не запущена в Docker."
-    fi
+    echo "Логи CrowdSec Manager (последние 100 строк):"
+    docker logs --tail 100 crowdsec-manager 2>&1 || true
+    echo
+    echo "Логи CrowdSec Docker (последние 100 строк):"
+    docker logs --tail 100 crowdsec 2>&1 || true
   } >"${tmp}"
   show_file "Логи" "${tmp}"
   rm -f "${tmp}"
@@ -1539,9 +1554,7 @@ show_crowdsec_info() {
   {
     print_header
     local cmd="cscli"
-    if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
-      cmd="docker exec crowdsec cscli"
-    fi
+    cmd="docker exec crowdsec cscli"
     echo "=== Машины (machines) ==="
     $cmd machines list 2>&1 || true
     echo
@@ -1571,7 +1584,7 @@ show_versions() {
     [[ -f /etc/os-release ]] && grep PRETTY_NAME /etc/os-release | cut -d= -f2- | tr -d '"' || true
     echo; echo "CrowdSec:"; command -v cscli >/dev/null 2>&1 && cscli version || echo "не установлен"
     echo; echo "Docker:"; command -v docker >/dev/null 2>&1 && { docker --version; docker compose version; } || echo "не установлен"
-    echo; echo "Web UI image:"; command -v docker >/dev/null 2>&1 && docker images "${WEBUI_IMAGE}" || true
+    echo; echo "CrowdSec Manager image:"; command -v docker >/dev/null 2>&1 && docker images "${MANAGER_IMAGE}" || true
   } >"${tmp}"
   show_file "Версии" "${tmp}"
   rm -f "${tmp}"
@@ -1586,8 +1599,8 @@ test_webui_lapi() {
     echo "Проверяю LAPI с хоста:"
     curl -i "http://127.0.0.1:${LAPI_PORT}/health" || true
     echo
-    echo "Проверяю LAPI из контейнера Web UI через node fetch:"
-    docker exec crowdsec-web-ui sh -lc "node -e 'fetch(\"http://host.docker.internal:${LAPI_PORT}/health\").then(r=>r.text()).then(console.log).catch(e=>{console.error(e); process.exit(1)})'" || true
+    echo "Проверяю LAPI из контейнера CrowdSec Manager:"
+    docker exec crowdsec-manager sh -lc "wget -qO- http://crowdsec:8080/health || curl -fsS http://crowdsec:8080/health" 2>&1 || true
   } >"${tmp}"
   show_file "Проверка LAPI" "${tmp}"
   rm -f "${tmp}"
@@ -1703,11 +1716,6 @@ run_menu_action() {
     update_docker) update_docker_only ;;
     update_crowdsec) update_crowdsec_only ;;
     versions) show_versions ;;
-    webui_detect) show_web_ui_installations ;;
-    webui_reinstall) reinstall_simple_web_ui ;;
-    webui_remove) remove_simple_web_ui ;;
-    manager_note) show_crowdsec_manager_note ;;
-    manager_install) migrate_to_crowdsec_manager ;;
     repair_menu) repair_menu_installation ;;
     test_lapi) test_webui_lapi ;;
     exit) exit 0 ;;
@@ -1729,11 +1737,10 @@ menu_loop_whiptail() {
       --ok-button "Выбрать" \
       --notags \
       --menu "Выберите раздел:\nСтрелки - навигация, ENTER - выбрать, ESC/Отмена - выход.\n\n${summary}" \
-      22 88 8 \
+      22 88 7 \
       "status" "Статус и данные" \
-      "access" "Доступ к LAPI" \
+      "access" "Подключения VPS и LAPI" \
       "network" "Сеть и ключи" \
-      "webui" "Веб-морда" \
       "service" "Обслуживание" \
       "system" "Обновления и диагностика" \
       "menu" "Настройки меню" \
@@ -1751,8 +1758,10 @@ menu_loop_whiptail() {
             3>&1 1>&2 2>&3)" || break
           ;;
         access)
-          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" --title " Доступ к LAPI " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 6 \
-            "add_range" "Добавить IP/CIDR к LAPI" \
+          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" --title " Подключения VPS и LAPI " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 80 6 \
+            "node_bouncer" "Создать подключение VPS" \
+            "connect" "Показать созданные подключения" \
+            "add_range" "Добавить IP/CIDR вручную" \
             "remove_range" "Удалить IP/CIDR из LAPI" \
             "replace_ranges" "Заменить весь список IP/CIDR" \
             "firewall" "Показать firewall/UFW" \
@@ -1765,24 +1774,14 @@ menu_loop_whiptail() {
             "public_addr" "Изменить внешний IP/DDNS для VPS" \
             "auto_token" "Перегенерировать auto-registration token" \
             "bouncer_key" "Перегенерировать shared bouncer key" \
-            "node_bouncer" "Создать bouncer key с именем VPS" \
             "test_lapi" "Проверить доступ Web UI к LAPI" \
-            3>&1 1>&2 2>&3)" || break
-          ;;
-        webui)
-          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" --title " Веб-морда " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 19 76 6 \
-            "webui_detect" "Показать установленные веб-морды" \
-            "webui_reinstall" "Переустановить Simple Web UI" \
-            "webui_remove" "Удалить Simple Web UI" \
-            "manager_install" "Установить CrowdSec Manager (миграция)" \
-            "manager_note" "CrowdSec Manager: что будет изменено" \
             3>&1 1>&2 2>&3)" || break
           ;;
         service)
           choice="$(whiptail --backtitle "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" --title " Обслуживание " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 7 \
             "restart" "Перезапустить CrowdSec, Docker и Web UI" \
-            "update_webui" "Обновить только контейнер Web UI" \
-            "logs" "Показать логи Web UI" \
+            "update_webui" "Обновить CrowdSec Manager" \
+            "logs" "Показать логи Manager и CrowdSec" \
             "crowdsec_info" "Машины, баунсеры, алерты и решения" \
             "reapply" "Повторно применить все настройки" \
             3>&1 1>&2 2>&3)" || break
@@ -1822,11 +1821,11 @@ menu_loop_plain() {
     echo
     echo "[ СТАТУС И ДАННЫЕ ]"
     echo "  1) Показать статус"
-    echo "  2) Показать адреса, токены и данные подключения"
+    echo "  2) Показать созданные подключения VPS"
     echo "  3) Показать файл настроек central.env"
     echo
-    echo "[ ДОСТУП К LAPI ]"
-    echo "  4) Добавить IP/CIDR для доступа к LAPI"
+    echo "[ ПОДКЛЮЧЕНИЯ VPS И LAPI ]"
+    echo "  4) Создать подключение VPS"
     echo "  5) Удалить IP/CIDR из доступа к LAPI по номеру"
     echo "  6) Полностью заменить список IP/CIDR"
     echo
@@ -1836,12 +1835,12 @@ menu_loop_plain() {
     echo "  9) Изменить внешний адрес или DDNS для VPS"
     echo " 10) Перегенерировать auto-registration token"
     echo " 11) Создать новый shared bouncer key"
-    echo " 12) Создать bouncer key с именем VPS"
+    echo " 12) Добавить IP/CIDR вручную"
     echo
     echo "[ ОБСЛУЖИВАНИЕ ]"
     echo " 13) Перезапустить CrowdSec, Docker и Web UI"
-    echo " 14) Обновить только контейнер веб-морды"
-    echo " 15) Показать логи веб-морды"
+    echo " 14) Обновить CrowdSec Manager"
+    echo " 15) Показать логи Manager и CrowdSec"
     echo " 16) Показать machines, bouncers, alerts и decisions"
     echo " 17) Показать firewall"
     echo " 18) Повторно применить все настройки"
@@ -1865,7 +1864,7 @@ menu_loop_plain() {
       1) show_status; pause ;;
       2) show_connection_info; pause ;;
       3) show_tokens_file; pause ;;
-      4) add_allowed_range ;;
+      4) create_named_vps_bouncer_key ;;
       5) remove_allowed_range ;;
       6) replace_allowed_ranges ;;
       7) change_lan_ip_or_web_port ;;
@@ -1873,7 +1872,7 @@ menu_loop_plain() {
       9) change_public_addr ;;
       10) regenerate_auto_token ;;
       11) regenerate_bouncer_key ;;
-      12) create_named_vps_bouncer_key ;;
+      12) add_allowed_range ;;
       13) restart_services ;;
       14) update_web_ui_only ;;
       15) show_logs ;;

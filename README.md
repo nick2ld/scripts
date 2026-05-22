@@ -13,10 +13,12 @@
 
 Каталог: [`crowdsec/`](./crowdsec/)
 
+Версия: `v0.1.0` от `2026-05-22`.
+
 Скрипты:
 
-- [`crowdsec/central.sh`](./crowdsec/central.sh) - установка и управление central-сервером CrowdSec: LAPI, Dockerized CrowdSec, CrowdSec Manager, bouncer keys, доступ VPS.
-- [`crowdsec/vps.sh`](./crowdsec/vps.sh) - подключение VPS/node к central LAPI, установка firewall bouncer, выбор CrowdSec Hub elements.
+- [`crowdsec/central.sh`](./crowdsec/central.sh) - установка и управление central-сервером CrowdSec: LAPI, Dockerized CrowdSec, CrowdSec Manager, мастер подключения VPS.
+- [`crowdsec/vps.sh`](./crowdsec/vps.sh) - подключение VPS/node к central LAPI, firewall bouncer, выбор и управление CrowdSec Hub collections/scenarios/parsers/appsec/context.
 
 Документация:
 
@@ -47,10 +49,12 @@ A collection of useful server administration scripts.
 
 Directory: [`crowdsec/`](./crowdsec/)
 
+Version: `v0.1.0`, released on `2026-05-22`.
+
 Scripts:
 
-- [`crowdsec/central.sh`](./crowdsec/central.sh) - install and manage a CrowdSec central server: LAPI, Dockerized CrowdSec, CrowdSec Manager, bouncer keys, VPS access.
-- [`crowdsec/vps.sh`](./crowdsec/vps.sh) - connect a VPS/node to central LAPI, install firewall bouncer, select CrowdSec Hub elements.
+- [`crowdsec/central.sh`](./crowdsec/central.sh) - install and manage a CrowdSec central server: LAPI, Dockerized CrowdSec, CrowdSec Manager, VPS onboarding wizard.
+- [`crowdsec/vps.sh`](./crowdsec/vps.sh) - connect a VPS/node to central LAPI, firewall bouncer, select/manage CrowdSec Hub collections/scenarios/parsers/appsec/context.
 
 Documentation:
 

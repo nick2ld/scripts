@@ -170,7 +170,25 @@ run_install_step() {
   local log_file
   log_file="$(mktemp)"
   if tui_available; then
-    whiptail --title " CrowdSec VPS Node " --infobox "${title}\n\nПодробный лог пишется во временный файл." 9 72 || true
+    (
+      "$@" >"${log_file}" 2>&1 &
+      local pid=$! pct=3 tail_text
+      while kill -0 "${pid}" 2>/dev/null; do
+        tail_text="$(tail -n 8 "${log_file}" 2>/dev/null | sed 's/"/'\''/g')"
+        pct=$((pct + 3)); (( pct > 95 )) && pct=15
+        printf 'XXX\n%s\n%s\n\n%s\nXXX\n' "${pct}" "${title}" "${tail_text:-ожидание вывода...}"
+        sleep 1
+      done
+      wait "${pid}"
+    ) | whiptail --title " CrowdSec VPS Node " --gauge "${title}" 18 90 0
+    local rc=${PIPESTATUS[0]}
+    if [[ "${rc}" -eq 0 ]]; then
+      rm -f "${log_file}"
+      return 0
+    fi
+    whiptail --title " Ошибка: ${title} " --textbox "${log_file}" 30 110 || true
+    rm -f "${log_file}"
+    fail "Этап установки завершился ошибкой: ${title}"
   else
     log "${title}"
   fi
@@ -388,9 +406,15 @@ detected_software_text() {
     command -v caddy >/dev/null 2>&1 && echo "caddy"
     command -v traefik >/dev/null 2>&1 && echo "traefik"
     command -v haproxy >/dev/null 2>&1 && echo "haproxy"
+    command -v pveversion >/dev/null 2>&1 && echo "proxmox pve pveproxy pvedaemon proxmox-logs"
+    [[ -d /etc/pve ]] && echo "proxmox pve pveproxy pvedaemon proxmox-logs"
     echo
     echo "systemd:"
     systemctl list-unit-files --type=service --no-pager --no-legend 2>/dev/null | awk '{print $1}' || true
+    echo
+    echo "paths:"
+    [[ -d /var/log/pve ]] && echo "/var/log/pve proxmox pve"
+    [[ -f /var/log/pveproxy/access.log ]] && echo "/var/log/pveproxy/access.log pveproxy proxmox"
     echo
     echo "docker:"
     if command -v docker >/dev/null 2>&1; then
@@ -474,6 +498,7 @@ collection_is_suggested() {
     mysql) grep -qiE 'mysql|mariadb' <<<"${detected}" ;;
     postgresql) grep -qiE 'postgres|postgresql' <<<"${detected}" ;;
     wireguard) grep -qiE 'wireguard|wg-easy|amnezia-awg|awg' <<<"${detected}" ;;
+    proxmox|proxmox-logs|pve|pveproxy|pvedaemon) grep -qiE 'proxmox|pve|pveproxy|pvedaemon|/etc/pve|/var/log/pve' <<<"${detected}" ;;
     *) return 1 ;;
   esac
 }
@@ -700,6 +725,7 @@ restart_services() {
 }
 
 show_status() {
+  load_env_if_exists
   echo
   echo "============================================================"
   echo "ГОТОВО"
@@ -742,12 +768,70 @@ show_status() {
   echo "============================================================"
 }
 
-main() {
-  require_root
-  detect_debian
-  require_interactive_install
-  bootstrap_installer_tui || true
-  ask_settings
+show_runtime_checks() {
+  load_env_if_exists
+  local tmp
+  tmp="$(mktemp)"
+  {
+    echo "============================================================"
+    echo "Проверка CrowdSec VPS node"
+    echo "============================================================"
+    echo
+    echo "Сервисы:"
+    systemctl is-active crowdsec 2>/dev/null && echo "  crowdsec: active" || echo "  crowdsec: not active"
+    if [[ "${INSTALL_FIREWALL_BOUNCER:-no}" == "yes" ]]; then
+      systemctl is-active crowdsec-firewall-bouncer 2>/dev/null && echo "  firewall bouncer: active" || echo "  firewall bouncer: not active"
+    fi
+    echo
+    echo "Конфигурация:"
+    crowdsec -c /etc/crowdsec/config.yaml -t 2>&1 || true
+    echo
+    echo "LAPI:"
+    cscli lapi status 2>&1 || true
+    echo
+    echo "Hub: installed collections"
+    cscli collections list 2>&1 || true
+    echo
+    echo "Hub: installed scenarios / attack scenarios"
+    cscli scenarios list 2>&1 || true
+    echo
+    echo "Hub: installed parsers"
+    cscli parsers list 2>&1 || true
+    echo
+    echo "Hub: installed postoverflows"
+    cscli postoverflows list 2>&1 || true
+    echo
+    echo "Hub: appsec configs"
+    cscli appsec-configs list 2>&1 || true
+    echo
+    echo "Hub: appsec rules"
+    cscli appsec-rules list 2>&1 || true
+    echo
+    echo "Метрики:"
+    cscli metrics 2>&1 || true
+    echo
+    echo "Последние алерты:"
+    cscli alerts list -l 20 2>&1 || true
+    echo
+    echo "Важно: наличие сценария проверяется через cscli scenarios list/metrics."
+    echo "Боевой триггер зависит от реальных логов конкретного сервиса и его acquisition."
+  } >"${tmp}"
+  if tui_available; then
+    whiptail --title " Проверка VPS node " --textbox "${tmp}" 34 118 || true
+  else
+    cat "${tmp}"
+    pause
+  fi
+  rm -f "${tmp}"
+}
+
+full_install() {
+  local skip_settings="${1:-no}"
+  if [[ "${skip_settings}" != "yes" ]]; then
+    ask_settings
+  else
+    load_env_if_exists
+  fi
   if tui_available; then
     tui_theme
     run_install_step "Устанавливаю базовые пакеты" install_base
@@ -779,6 +863,113 @@ main() {
     install_firewall_bouncer
     test_config
     restart_services
+  fi
+}
+
+manage_existing_installation() {
+  load_env_if_exists
+  while true; do
+    local choice
+    if tui_available; then
+      tui_theme
+      choice="$(whiptail --title " CrowdSec VPS Node " --cancel-button "Выход" --ok-button "Выбрать" --notags --menu "Узел уже установлен. Выберите действие:" 20 92 9 \
+        "status" "Показать текущую сводку" \
+        "collections" "Выбрать и установить CrowdSec Hub collections" \
+        "hub" "Выбрать и установить scenarios/parsers/appsec/context" \
+        "check" "Проверить сервисы, Hub items, метрики и алерты" \
+        "restart" "Перезапустить CrowdSec и bouncer" \
+        "reinstall" "Переустановить/перенастроить узел полностью" \
+        "exit" "Выход" \
+        3>&1 1>&2 2>&3)" || return 0
+    else
+      safe_clear
+      echo "CrowdSec VPS Node (${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE})"
+      echo "1) Показать текущую сводку"
+      echo "2) Выбрать и установить CrowdSec Hub collections"
+      echo "3) Выбрать и установить scenarios/parsers/appsec/context"
+      echo "4) Проверить сервисы, Hub items, метрики и алерты"
+      echo "5) Перезапустить CrowdSec и bouncer"
+      echo "6) Переустановить/перенастроить узел полностью"
+      echo "0) Выход"
+      read -rp "Выбор: " plain_choice || return 0
+      case "${plain_choice}" in
+        1) choice="status" ;;
+        2) choice="collections" ;;
+        3) choice="hub" ;;
+        4) choice="check" ;;
+        5) choice="restart" ;;
+        6) choice="reinstall" ;;
+        0) choice="exit" ;;
+        *) choice="" ;;
+      esac
+    fi
+    case "${choice}" in
+      status)
+        if tui_available; then
+          local tmp
+          tmp="$(mktemp)"
+          show_status >"${tmp}"
+          whiptail --title " Статус VPS node " --textbox "${tmp}" 30 110 || true
+          rm -f "${tmp}"
+        else
+          show_status
+          pause
+        fi
+        ;;
+      collections)
+        COLLECTION_SELECTION_MODE="manual"
+        select_hub_collections
+        run_install_step "Устанавливаю collections" install_collections
+        run_install_step "Проверяю конфигурацию" test_config
+        run_install_step "Перезапускаю сервисы" restart_services
+        ;;
+      hub)
+        HUB_ITEM_SELECTION_MODE="manual"
+        select_extra_hub_items
+        run_install_step "Устанавливаю дополнительные Hub elements" install_extra_hub_items
+        run_install_step "Проверяю конфигурацию" test_config
+        run_install_step "Перезапускаю сервисы" restart_services
+        ;;
+      check) show_runtime_checks ;;
+      restart) run_install_step "Перезапускаю сервисы" restart_services ;;
+      reinstall)
+        if [[ ! "$(tui_available && echo yes || echo no)" == "yes" ]] || tui_yesno " Переустановка " "Перезапустить мастер и полностью переустановить/перенастроить VPS node?"; then
+          full_install no
+          return 0
+        fi
+        ;;
+      exit) return 0 ;;
+      *) warn "Неизвестный пункт."; pause ;;
+    esac
+  done
+}
+
+main() {
+  require_root
+  detect_debian
+  require_interactive_install
+  bootstrap_installer_tui || true
+  if [[ -f "${ENV_FILE}" || -x "$(command -v cscli 2>/dev/null || true)" ]]; then
+    load_env_if_exists
+    if tui_available; then
+      tui_theme
+      local mode
+      mode="$(whiptail --title " CrowdSec VPS Node " --cancel-button "Выход" --ok-button "Выбрать" --notags --menu "Найдена существующая установка или настройки VPS node." 16 88 4 \
+        "manage" "Открыть меню управления" \
+        "reinstall" "Переустановить/перенастроить полностью" \
+        "install" "Продолжить обычную установку" \
+        3>&1 1>&2 2>&3)" || exit 0
+      case "${mode}" in
+        manage) manage_existing_installation; exit 0 ;;
+        reinstall) full_install no ;;
+        install) full_install no ;;
+      esac
+    else
+      manage_existing_installation
+      exit 0
+    fi
+  else
+    full_install no
   fi
   if tui_available; then
     local tmp
