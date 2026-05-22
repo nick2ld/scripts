@@ -69,7 +69,7 @@ whiptail() {
 }
 require_interactive_install() {
   if ! is_interactive; then
-    fail "Интерактивная установка не работает через pipe. Скачай скрипт во временный файл и запусти его: tmp=\"\$(mktemp)\" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/crowdsec/vps.sh -o \"\$tmp\" && bash \"\$tmp\"; rc=\$?; rm -f \"\$tmp\"; exit \$rc"
+    fail "Интерактивная установка не работает через pipe. Запусти так: sh -c 'tmp=\"\$(mktemp -t crowdsec-vps.XXXXXX)\" && curl -fsSL \"https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/vps.sh\" -o \"\$tmp\" && if [ \"\$(id -u)\" -eq 0 ]; then bash \"\$tmp\"; else sudo bash \"\$tmp\"; fi; rc=\$?; rm -f \"\$tmp\"; exit \"\$rc\"'"
   fi
 }
 prompt_default() {

@@ -39,7 +39,7 @@ WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
 SCRIPT_VERSION="v0.1"
 SCRIPT_RELEASE_DATE="2026-05-22"
-SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/crowdsec/central.sh"
+SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
 ok() { echo -e "${GREEN}OK:${NC} $*"; }
@@ -90,7 +90,7 @@ whiptail() {
 }
 require_interactive_install() {
   if ! is_interactive; then
-    fail "Интерактивная установка не работает через pipe. Скачай скрипт во временный файл и запусти его: tmp=\"\$(mktemp)\" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/crowdsec/central.sh -o \"\$tmp\" && bash \"\$tmp\"; rc=\$?; rm -f \"\$tmp\"; exit \$rc"
+    fail "Интерактивная установка не работает через pipe. Запусти так: sh -c 'tmp=\"\$(mktemp -t crowdsec-central.XXXXXX)\" && curl -fsSL \"https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh\" -o \"\$tmp\" && if [ \"\$(id -u)\" -eq 0 ]; then bash \"\$tmp\"; else sudo bash \"\$tmp\"; fi; rc=\$?; rm -f \"\$tmp\"; exit \"\$rc\"'"
   fi
 }
 prompt_default() {
