@@ -36,7 +36,7 @@ DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="2026.05.22-manager-full-uvar-term-fix"
+SCRIPT_VERSION="2026.05.22-manager-full-tui-nav-fix"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -53,6 +53,7 @@ is_interactive() { [[ -t 0 ]]; }
 has_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
 is_tui_session() { [[ -n "${CROWDSEC_TUI_MODE:-}" && -t 1 && -r /dev/tty ]]; }
 safe_clear() {
+  [[ -t 1 ]] || return 0
   [[ -n "${TERM:-}" && "${TERM}" != "dumb" ]] || return 0
   clear || true
 }
@@ -1622,68 +1623,70 @@ menu_loop_whiptail() {
       3>&1 1>&2 2>&3)" || exit 0
     [[ "${category}" == "exit" ]] && exit 0
 
-    case "${category}" in
-      status)
-        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Статус и данные " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 5 \
-          "status" "Статус сервисов и портов" \
-          "connect" "Данные подключения VPS" \
-          "envfile" "Показать central.env" \
-          3>&1 1>&2 2>&3)" || continue
-        ;;
-      access)
-        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Доступ к LAPI " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 6 \
-          "add_range" "Добавить IP/CIDR к LAPI" \
-          "remove_range" "Удалить IP/CIDR из LAPI" \
-          "replace_ranges" "Заменить весь список IP/CIDR" \
-          "firewall" "Показать firewall/UFW" \
-          3>&1 1>&2 2>&3)" || continue
-        ;;
-      network)
-        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Сеть и ключи " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 8 \
-          "web_addr" "Изменить LAN IP или порт Web UI" \
-          "lapi_port" "Изменить порт LAPI" \
-          "public_addr" "Изменить внешний IP/DDNS для VPS" \
-          "auto_token" "Перегенерировать auto-registration token" \
-          "bouncer_key" "Перегенерировать shared bouncer key" \
-          "test_lapi" "Проверить доступ Web UI к LAPI" \
-          3>&1 1>&2 2>&3)" || continue
-        ;;
-      webui)
-        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Веб-морда " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 19 76 6 \
-          "webui_detect" "Показать установленные веб-морды" \
-          "webui_reinstall" "Переустановить Simple Web UI" \
-          "webui_remove" "Удалить Simple Web UI" \
-          "manager_install" "Установить CrowdSec Manager (миграция)" \
-          "manager_note" "CrowdSec Manager: что будет изменено" \
-          3>&1 1>&2 2>&3)" || continue
-        ;;
-      service)
-        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Обслуживание " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 7 \
-          "restart" "Перезапустить CrowdSec, Docker и Web UI" \
-          "update_webui" "Обновить только контейнер Web UI" \
-          "logs" "Показать логи Web UI" \
-          "crowdsec_info" "Машины, баунсеры, алерты и решения" \
-          "reapply" "Повторно применить все настройки" \
-          3>&1 1>&2 2>&3)" || continue
-        ;;
-      system)
-        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Обновления и диагностика " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 7 \
-          "update_all" "Обновить весь стек" \
-          "update_system" "Обновить пакеты Debian" \
-          "update_docker" "Обновить Docker" \
-          "update_crowdsec" "Обновить CrowdSec" \
-          "versions" "Показать версии ПО" \
-          3>&1 1>&2 2>&3)" || continue
-        ;;
-      menu)
-        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Настройки меню " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 5 \
-          "disable_autostart" "Отключить автозапуск меню при входе" \
-          "enable_autostart" "Включить автозапуск меню при входе" \
-          "repair_menu" "Обновить или переустановить команду меню" \
-          3>&1 1>&2 2>&3)" || continue
-        ;;
-    esac
-    run_menu_action "${choice}"
+    while true; do
+      case "${category}" in
+        status)
+          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Статус и данные " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 5 \
+            "status" "Статус сервисов и портов" \
+            "connect" "Данные подключения VPS" \
+            "envfile" "Показать central.env" \
+            3>&1 1>&2 2>&3)" || break
+          ;;
+        access)
+          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Доступ к LAPI " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 6 \
+            "add_range" "Добавить IP/CIDR к LAPI" \
+            "remove_range" "Удалить IP/CIDR из LAPI" \
+            "replace_ranges" "Заменить весь список IP/CIDR" \
+            "firewall" "Показать firewall/UFW" \
+            3>&1 1>&2 2>&3)" || break
+          ;;
+        network)
+          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Сеть и ключи " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 8 \
+            "web_addr" "Изменить LAN IP или порт Web UI" \
+            "lapi_port" "Изменить порт LAPI" \
+            "public_addr" "Изменить внешний IP/DDNS для VPS" \
+            "auto_token" "Перегенерировать auto-registration token" \
+            "bouncer_key" "Перегенерировать shared bouncer key" \
+            "test_lapi" "Проверить доступ Web UI к LAPI" \
+            3>&1 1>&2 2>&3)" || break
+          ;;
+        webui)
+          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Веб-морда " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 19 76 6 \
+            "webui_detect" "Показать установленные веб-морды" \
+            "webui_reinstall" "Переустановить Simple Web UI" \
+            "webui_remove" "Удалить Simple Web UI" \
+            "manager_install" "Установить CrowdSec Manager (миграция)" \
+            "manager_note" "CrowdSec Manager: что будет изменено" \
+            3>&1 1>&2 2>&3)" || break
+          ;;
+        service)
+          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Обслуживание " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 7 \
+            "restart" "Перезапустить CrowdSec, Docker и Web UI" \
+            "update_webui" "Обновить только контейнер Web UI" \
+            "logs" "Показать логи Web UI" \
+            "crowdsec_info" "Машины, баунсеры, алерты и решения" \
+            "reapply" "Повторно применить все настройки" \
+            3>&1 1>&2 2>&3)" || break
+          ;;
+        system)
+          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Обновления и диагностика " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 7 \
+            "update_all" "Обновить весь стек" \
+            "update_system" "Обновить пакеты Debian" \
+            "update_docker" "Обновить Docker" \
+            "update_crowdsec" "Обновить CrowdSec" \
+            "versions" "Показать версии ПО" \
+            3>&1 1>&2 2>&3)" || break
+          ;;
+        menu)
+          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Настройки меню " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 5 \
+            "disable_autostart" "Отключить автозапуск меню при входе" \
+            "enable_autostart" "Включить автозапуск меню при входе" \
+            "repair_menu" "Обновить или переустановить команду меню" \
+            3>&1 1>&2 2>&3)" || break
+          ;;
+      esac
+      run_menu_action "${choice}"
+    done
   done
 }
 
