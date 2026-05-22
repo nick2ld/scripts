@@ -55,7 +55,7 @@ After installation, interactive menu:
 sudo crowdsec-central-menu
 ```
 
-The central menu uses `whiptail`/newt dialogs in the same style as Proxmox VE Helper Scripts: blue background, gray windows, red active item, Russian buttons, arrow-key navigation and no numeric input. The menu is split into sections first, then actions, so the screen stays compact. Plain text mode is used only if `whiptail` cannot be installed.
+The central menu prefers `dialog` for real focusable buttons and falls back to `whiptail` only if `dialog` is unavailable. The UI follows the Proxmox VE Helper Scripts style: blue background, gray windows, highlighted active item, Russian buttons, arrow-key navigation and no numeric input. The menu is split into sections first, then actions, so the screen stays compact. Plain text mode is used only if neither TUI backend can be installed.
 
 The central and VPS installers also use TUI dialogs for first-time setup. Install steps run behind clean status screens, and failed steps open their log in a scrollable window.
 

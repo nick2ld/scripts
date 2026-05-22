@@ -36,7 +36,7 @@ DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="2026.05.22-manager-full-tui-nav-fix"
+SCRIPT_VERSION="2026.05.22-manager-full-dialog-buttons"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -56,6 +56,33 @@ safe_clear() {
   [[ -t 1 ]] || return 0
   [[ -n "${TERM:-}" && "${TERM}" != "dumb" ]] || return 0
   clear || true
+}
+tui_available() {
+  type -P dialog >/dev/null 2>&1 || type -P whiptail >/dev/null 2>&1
+}
+whiptail() {
+  local bin
+  if bin="$(type -P dialog 2>/dev/null)"; then
+    local args=()
+    while (($#)); do
+      case "$1" in
+        --notags) args+=(--no-tags) ;;
+        --cancel-button) shift; args+=(--cancel-label "${1:-}") ;;
+        --ok-button) shift; args+=(--ok-label "${1:-}") ;;
+        --yes-button) shift; args+=(--yes-label "${1:-}") ;;
+        --no-button) shift; args+=(--no-label "${1:-}") ;;
+        *) args+=("$1") ;;
+      esac
+      shift || true
+    done
+    command "${bin}" "${args[@]}"
+    return
+  fi
+  if bin="$(type -P whiptail 2>/dev/null)"; then
+    command "${bin}" "$@"
+    return
+  fi
+  return 127
 }
 require_interactive_install() {
   if ! is_interactive; then
@@ -119,7 +146,7 @@ show_file() {
   local title="$1"
   local tmp="$2"
   if is_tui_session; then
-    if [[ "${CROWDSEC_TUI_MODE}" =~ ^(whiptail|installer)$ ]] && command -v whiptail >/dev/null 2>&1; then
+    if [[ "${CROWDSEC_TUI_MODE}" =~ ^(whiptail|installer)$ ]] && tui_available; then
       whiptail --title " ${title} " --textbox "${tmp}" 30 110 </dev/tty >/dev/tty 2>&1 || true
     elif command -v less >/dev/null 2>&1; then
       safe_clear
@@ -301,7 +328,7 @@ install_base() {
   log "Устанавливаю базовые пакеты..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https openssl python3 python3-yaml sudo ufw nano jq iproute2 procps xz-utils whiptail less
+  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https openssl python3 python3-yaml sudo ufw nano jq iproute2 procps xz-utils dialog whiptail less
   ok "Базовые пакеты установлены."
 }
 
@@ -379,14 +406,14 @@ ask_initial_settings() {
 }
 
 bootstrap_installer_tui() {
-  command -v whiptail >/dev/null 2>&1 && return 0
+  type -P dialog >/dev/null 2>&1 && return 0
   command -v apt-get >/dev/null 2>&1 || return 1
   safe_clear
   echo "Подготовка интерактивного установщика..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y >/tmp/crowdsec-menu-bootstrap.log 2>&1 || return 1
-  apt-get install -y whiptail >>/tmp/crowdsec-menu-bootstrap.log 2>&1 || return 1
-  command -v whiptail >/dev/null 2>&1
+  apt-get install -y dialog whiptail >>/tmp/crowdsec-menu-bootstrap.log 2>&1 || return 1
+  tui_available
 }
 
 tui_input() {
@@ -755,7 +782,7 @@ run_install_step() {
   shift
   local log_file
   log_file="$(mktemp)"
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "installer" ]] && command -v whiptail >/dev/null 2>&1; then
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "installer" ]] && tui_available; then
     whiptail --title " Установка " --infobox "${title}\n\nПодробный лог пишется во временный файл." 9 72 || true
   else
     print_header
@@ -767,7 +794,7 @@ run_install_step() {
     return 0
   fi
 
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "installer" ]] && command -v whiptail >/dev/null 2>&1; then
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "installer" ]] && tui_available; then
     whiptail --title " Ошибка: ${title} " --textbox "${log_file}" 30 110 || true
   else
     cat "${log_file}"
@@ -1539,14 +1566,14 @@ textbox=black,lightgray
 }
 
 ensure_tui_tools() {
-  command -v whiptail >/dev/null 2>&1 && return 0
+  type -P dialog >/dev/null 2>&1 && return 0
   if command -v apt-get >/dev/null 2>&1; then
-    log "Устанавливаю TUI-зависимости меню: whiptail, less..."
+    log "Устанавливаю TUI-зависимости меню: dialog, whiptail, less..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y || return 1
-    apt-get install -y whiptail less || return 1
+    apt-get install -y dialog whiptail less || return 1
   fi
-  command -v whiptail >/dev/null 2>&1
+  tui_available
 }
 
 tui_summary() {
@@ -1779,7 +1806,7 @@ menu_loop() {
   if [[ -t 0 && -t 1 ]] && ensure_tui_tools; then
     menu_loop_whiptail
   else
-    warn "TUI-меню недоступно: нет TTY или не удалось установить whiptail. Открываю простой fallback."
+    warn "TUI-меню недоступно: нет TTY или не удалось установить dialog/whiptail. Открываю простой fallback."
     pause
     menu_loop_plain
   fi

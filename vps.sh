@@ -32,8 +32,36 @@ fail() { echo -e "${RED}ERROR:${NC} $*" >&2; exit 1; }
 pause() { echo; read -rp "Нажми Enter для продолжения..." _ || true; }
 is_interactive() { [[ -t 0 ]]; }
 safe_clear() {
+  [[ -t 1 ]] || return 0
   [[ -n "${TERM:-}" && "${TERM}" != "dumb" ]] || return 0
   clear || true
+}
+tui_available() {
+  type -P dialog >/dev/null 2>&1 || type -P whiptail >/dev/null 2>&1
+}
+whiptail() {
+  local bin
+  if bin="$(type -P dialog 2>/dev/null)"; then
+    local args=()
+    while (($#)); do
+      case "$1" in
+        --notags) args+=(--no-tags) ;;
+        --cancel-button) shift; args+=(--cancel-label "${1:-}") ;;
+        --ok-button) shift; args+=(--ok-label "${1:-}") ;;
+        --yes-button) shift; args+=(--yes-label "${1:-}") ;;
+        --no-button) shift; args+=(--no-label "${1:-}") ;;
+        *) args+=("$1") ;;
+      esac
+      shift || true
+    done
+    command "${bin}" "${args[@]}"
+    return
+  fi
+  if bin="$(type -P whiptail 2>/dev/null)"; then
+    command "${bin}" "$@"
+    return
+  fi
+  return 127
 }
 require_interactive_install() {
   if ! is_interactive; then
@@ -65,14 +93,14 @@ textbox=black,lightgray
 '
 }
 bootstrap_installer_tui() {
-  command -v whiptail >/dev/null 2>&1 && return 0
+  type -P dialog >/dev/null 2>&1 && return 0
   command -v apt-get >/dev/null 2>&1 || return 1
   safe_clear
   echo "Подготовка интерактивного установщика..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y >/tmp/crowdsec-vps-bootstrap.log 2>&1 || return 1
-  apt-get install -y whiptail >>/tmp/crowdsec-vps-bootstrap.log 2>&1 || return 1
-  command -v whiptail >/dev/null 2>&1
+  apt-get install -y dialog whiptail >>/tmp/crowdsec-vps-bootstrap.log 2>&1 || return 1
+  tui_available
 }
 tui_input() {
   local title="$1"
@@ -90,7 +118,7 @@ run_install_step() {
   shift
   local log_file
   log_file="$(mktemp)"
-  if command -v whiptail >/dev/null 2>&1; then
+  if tui_available; then
     whiptail --title " CrowdSec VPS Node " --infobox "${title}\n\nПодробный лог пишется во временный файл." 9 72 || true
   else
     log "${title}"
@@ -99,7 +127,7 @@ run_install_step() {
     rm -f "${log_file}"
     return 0
   fi
-  if command -v whiptail >/dev/null 2>&1; then
+  if tui_available; then
     whiptail --title " Ошибка: ${title} " --textbox "${log_file}" 30 110 || true
   else
     cat "${log_file}"
@@ -160,7 +188,7 @@ ENV
 
 ask_settings() {
   load_env_if_exists
-  if command -v whiptail >/dev/null 2>&1; then
+  if tui_available; then
     tui_theme
     whiptail --title " CrowdSec VPS Node " --msgbox "Подключение VPS к центральному CrowdSec LAPI.\n\nДанные возьми в меню центрального сервера: sudo crowdsec-central-menu" 12 78
     CENTRAL_LAPI_URL="$(tui_input "Central LAPI" "Central LAPI URL" "${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}")" || exit 1
@@ -243,7 +271,7 @@ install_base() {
   log "Устанавливаю базовые пакеты..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https python3 python3-yaml jq sudo iproute2 procps nano rsync iptables nftables whiptail less
+  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https python3 python3-yaml jq sudo iproute2 procps nano rsync iptables nftables dialog whiptail less
   ok "Базовые пакеты установлены."
 }
 
@@ -501,7 +529,7 @@ main() {
   require_interactive_install
   bootstrap_installer_tui || true
   ask_settings
-  if command -v whiptail >/dev/null 2>&1; then
+  if tui_available; then
     tui_theme
     run_install_step "Устанавливаю базовые пакеты" install_base
     run_install_step "Удаляю Fail2Ban при наличии" remove_fail2ban_if_installed
@@ -527,7 +555,7 @@ main() {
     test_config
     restart_services
   fi
-  if command -v whiptail >/dev/null 2>&1; then
+  if tui_available; then
     local tmp
     tmp="$(mktemp)"
     show_status >"${tmp}"
