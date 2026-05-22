@@ -64,7 +64,7 @@ bootstrap_installer_tui() {
   command -v whiptail >/dev/null 2>&1 && return 0
   command -v apt-get >/dev/null 2>&1 || return 1
   clear || true
-  echo "Preparing interactive installer..."
+  echo "Подготовка интерактивного установщика..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y >/tmp/crowdsec-vps-bootstrap.log 2>&1 || return 1
   apt-get install -y whiptail >>/tmp/crowdsec-vps-bootstrap.log 2>&1 || return 1
@@ -168,10 +168,10 @@ ask_settings() {
     else
       INSTALL_FIREWALL_BOUNCER="no"
     fi
-    INSTALL_WEB_COLLECTIONS="$(whiptail --title " Web Collections " --cancel-button "Отмена" --ok-button "Select" --notags --menu "Включать web collections?" 15 78 3 \
-      "auto" "Auto-detect Nginx/Apache" \
-      "yes" "Enable forcibly" \
-      "no" "Disable" \
+    INSTALL_WEB_COLLECTIONS="$(whiptail --title " Web Collections " --cancel-button "Отмена" --ok-button "Выбрать" --notags --menu "Включать web collections?" 15 78 3 \
+      "auto" "Автоопределение Nginx/Apache" \
+      "yes" "Включить принудительно" \
+      "no" "Не включать" \
       3>&1 1>&2 2>&3)" || exit 1
     [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "Central LAPI URL не может быть пустым."
     [[ "${CENTRAL_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]] || fail "Central LAPI URL должен начинаться с http:// или https://"

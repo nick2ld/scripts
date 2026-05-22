@@ -55,11 +55,11 @@ After installation, interactive menu:
 sudo crowdsec-central-menu
 ```
 
-The central menu uses `whiptail`/newt dialogs in the same style as Proxmox VE Helper Scripts: blue background, gray windows, red active item, Select/Exit buttons, arrow-key navigation and no numeric input. The menu is split into sections first, then actions, so the screen stays compact. Plain text mode is used only if `whiptail` cannot be installed.
+The central menu uses `whiptail`/newt dialogs in the same style as Proxmox VE Helper Scripts: blue background, gray windows, red active item, Russian buttons, arrow-key navigation and no numeric input. The menu is split into sections first, then actions, so the screen stays compact. Plain text mode is used only if `whiptail` cannot be installed.
 
 The central and VPS installers also use TUI dialogs for first-time setup. Install steps run behind clean status screens, and failed steps open their log in a scrollable window.
 
-Update installed menu command without reinstalling the stack:
+Обновить установленную команду меню без переустановки всего стека:
 
 ```bash
 tmp="$(mktemp)" && curl -fsSL -H "Cache-Control: no-cache" "https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh?$(date +%s)" -o "$tmp" && bash -n "$tmp" && sudo install -m 0755 "$tmp" /usr/local/sbin/crowdsec-central-menu; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
