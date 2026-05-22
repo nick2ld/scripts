@@ -33,7 +33,7 @@ PROFILE_FILE="/etc/profile.d/crowdsec-central-menu.sh"
 DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
-SCRIPT_VERSION="2026.05.22-whiptail-proxmox-style"
+SCRIPT_VERSION="2026.05.22-ru-whiptail"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -1045,7 +1045,7 @@ menu_loop_whiptail() {
     local category choice summary
     summary="$(tui_summary)"
     category="$(whiptail \
-      --backtitle "Панель управления CrowdSec Central" \
+      --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" \
       --title " CrowdSec Central " \
       --cancel-button "Выход" \
       --ok-button "Выбрать" \
@@ -1064,14 +1064,14 @@ menu_loop_whiptail() {
 
     case "${category}" in
       status)
-        choice="$(whiptail --backtitle "Панель управления CrowdSec Central" --title " Статус и данные " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 5 \
+        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Статус и данные " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 5 \
           "status" "Статус сервисов и портов" \
           "connect" "Данные подключения VPS" \
           "envfile" "Показать central.env" \
           3>&1 1>&2 2>&3)" || continue
         ;;
       access)
-        choice="$(whiptail --backtitle "Панель управления CrowdSec Central" --title " Доступ к LAPI " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 6 \
+        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Доступ к LAPI " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 6 \
           "add_range" "Добавить IP/CIDR к LAPI" \
           "remove_range" "Удалить IP/CIDR из LAPI" \
           "replace_ranges" "Заменить весь список IP/CIDR" \
@@ -1079,7 +1079,7 @@ menu_loop_whiptail() {
           3>&1 1>&2 2>&3)" || continue
         ;;
       network)
-        choice="$(whiptail --backtitle "Панель управления CrowdSec Central" --title " Сеть и ключи " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 8 \
+        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Сеть и ключи " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 8 \
           "web_addr" "Изменить LAN IP или порт Web UI" \
           "lapi_port" "Изменить порт LAPI" \
           "public_addr" "Изменить внешний IP/DDNS для VPS" \
@@ -1089,16 +1089,16 @@ menu_loop_whiptail() {
           3>&1 1>&2 2>&3)" || continue
         ;;
       service)
-        choice="$(whiptail --backtitle "Панель управления CrowdSec Central" --title " Обслуживание " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 7 \
+        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Обслуживание " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 7 \
           "restart" "Перезапустить CrowdSec, Docker и Web UI" \
           "update_webui" "Обновить только контейнер Web UI" \
           "logs" "Показать логи Web UI" \
-          "crowdsec_info" "Machines, bouncers, alerts, decisions" \
+          "crowdsec_info" "Машины, баунсеры, алерты и решения" \
           "reapply" "Повторно применить все настройки" \
           3>&1 1>&2 2>&3)" || continue
         ;;
       system)
-        choice="$(whiptail --backtitle "Панель управления CrowdSec Central" --title " Обновления и диагностика " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 7 \
+        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Обновления и диагностика " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 7 \
           "update_all" "Обновить весь стек" \
           "update_system" "Обновить пакеты Debian" \
           "update_docker" "Обновить Docker" \
@@ -1107,7 +1107,7 @@ menu_loop_whiptail() {
           3>&1 1>&2 2>&3)" || continue
         ;;
       menu)
-        choice="$(whiptail --backtitle "Панель управления CrowdSec Central" --title " Настройки меню " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 5 \
+        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Настройки меню " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 5 \
           "disable_autostart" "Отключить автозапуск меню при входе" \
           "enable_autostart" "Включить автозапуск меню при входе" \
           "repair_menu" "Обновить или переустановить команду меню" \
