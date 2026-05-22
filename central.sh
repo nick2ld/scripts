@@ -36,42 +36,17 @@ DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="2026.05.22-tui-fix2"
+SCRIPT_VERSION="2026.05.22-manager-full"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
 ok() { echo -e "${GREEN}OK:${NC} $*"; }
 warn() { echo -e "${YELLOW}WARN:${NC} $*"; }
 fail() { echo -e "${RED}ERROR:${NC} $*" >&2; exit 1; }
-is_interactive() { [[ -t 0 ]] || has_tty; }
+pause() { echo; read -rp "Нажми Enter для продолжения..." _ || true; }
+is_interactive() { [[ -t 0 ]]; }
 has_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
-use_tui() { [[ -n "${CROWDSEC_TUI_MODE:-}" ]] && command -v whiptail >/dev/null 2>&1 && has_tty; }
-is_tui_session() { use_tui; }
-# Диалоги без возврата значения (msgbox, yesno, textbox)
-tui_dialog() { whiptail "$@" </dev/tty >/dev/tty 2>/dev/tty; }
-# Меню и inputbox — результат должен попасть в stdout (не в /dev/tty)
-tui_prompt() { whiptail "$@" </dev/tty 2>/dev/tty; }
-tui_msgbox() {
-  local title="$1" text="$2" height="${3:-10}"
-  tui_dialog --title " ${title} " --ok-button "ОК" --msgbox "${text}" "${height}" 78
-}
-pause() {
-  if use_tui; then
-    tui_msgbox "Готово" "${TUI_PAUSE_MSG:-Нажмите ОК для продолжения.}" 8
-    unset TUI_PAUSE_MSG
-  else
-    echo
-    read -rp "Нажми Enter для продолжения..." _ || true
-  fi
-}
-tui_alert() {
-  warn "$1"
-  if use_tui; then
-    tui_msgbox "Внимание" "$1" 10
-  else
-    pause
-  fi
-}
+is_tui_session() { [[ -n "${CROWDSEC_TUI_MODE:-}" && -t 1 && -r /dev/tty ]]; }
 require_interactive_install() {
   if ! is_interactive; then
     fail "Интерактивная установка не работает через pipe. Скачай скрипт во временный файл и запусти его: tmp=\"\$(mktemp)\" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh -o \"\$tmp\" && bash \"\$tmp\"; rc=\$?; rm -f \"\$tmp\"; exit \$rc"
@@ -107,7 +82,7 @@ show_file() {
   local tmp="$2"
   if is_tui_session; then
     if [[ "${CROWDSEC_TUI_MODE}" =~ ^(whiptail|installer)$ ]] && command -v whiptail >/dev/null 2>&1; then
-      tui_dialog --title " ${title} " --ok-button "ОК" --textbox "${tmp}" 30 110 || true
+      whiptail --title " ${title} " --textbox "${tmp}" 30 110 </dev/tty >/dev/tty 2>&1 || true
     elif command -v less >/dev/null 2>&1; then
       clear || true
       LESS='-R' less "${tmp}" </dev/tty >/dev/tty || true
@@ -365,69 +340,17 @@ bootstrap_installer_tui() {
   command -v whiptail >/dev/null 2>&1
 }
 
-tui_yesno_height() {
-  local text="$1"
-  local lines h
-  lines="$(printf '%b' "${text}" | wc -l | awk '{print $1}')"
-  h=$((lines + 4))
-  (( h < 8 )) && h=8
-  (( h > 24 )) && h=24
-  echo "${h}"
-}
-
 tui_input() {
-  local title="$1" text="$2" default="${3:-}"
-  tui_prompt --title " ${title} " --ok-button "ОК" --cancel-button "Отмена" --inputbox "${text}" 12 78 "${default}"
+  local title="$1"
+  local text="$2"
+  local default="${3:-}"
+  whiptail --title " ${title} " --inputbox "${text}" 10 78 "${default}" 3>&1 1>&2 2>&3
 }
 
 tui_yesno() {
-  local title="$1" text="$2" h
-  h="$(tui_yesno_height "${text}")"
-  tui_dialog --title " ${title} " --yes-button "ОК" --no-button "Отмена" --yesno "${text}" "${h}" 78
-}
-
-tui_menu_pick() {
-  local title="$1" text="$2" height="$3" width="$4" list_height="$5"
-  local cancel_btn="${TUI_CANCEL_LABEL:-Отмена}"
-  shift 5
-  tui_prompt --backtitle "${TUI_BACKTITLE:-CrowdSec Central}" --title " ${title} " \
-    --cancel-button "${cancel_btn}" --ok-button "ОК" --notags --menu "${text}" "${height}" "${width}" "${list_height}" "$@"
-}
-
-interactive_input() {
-  local title="$1" text="$2" default="${3:-}" value=""
-  if use_tui; then
-    value="$(tui_input "${title}" "${text}" "${default}")" || return 1
-  else
-    print_header
-    read -rp "${text} [${default}]: " value || return 1
-    value="${value:-${default}}"
-  fi
-  printf '%s' "${value}"
-}
-
-interactive_confirm() {
-  local title="$1" text="$2"
-  if use_tui; then
-    tui_yesno "${title}" "${text}"
-  else
-    local confirm=""
-    print_header
-    read -rp "${text} [y/N]: " confirm
-    [[ "${confirm}" =~ ^[Yy]$ ]]
-  fi
-}
-
-interactive_confirm_default_yes() {
-  local title="$1" text="$2"
-  if use_tui; then
-    tui_yesno "${title}" "${text}"
-  else
-    local confirm=""
-    print_header
-    read -rp "${text} [Y/n]: " confirm
-    [[ ! "${confirm:-Y}" =~ ^[Nn]$ ]]
-  fi
+  local title="$1"
+  local text="$2"
+  whiptail --title " ${title} " --yes-button "Да" --no-button "Нет" --yesno "${text}" 10 78
 }
 
 ask_initial_settings_tui() {
@@ -440,10 +363,11 @@ ask_initial_settings_tui() {
   LAPI_PORT="$(tui_input "Начальная настройка" "Порт центрального LAPI" "${LAPI_PORT:-8080}")" || exit 1
   ALLOWED_RANGES="$(tui_input "Доступ к LAPI" "Allowed IP/CIDR для LAPI. Можно оставить пустым." "${ALLOWED_RANGES:-}")" || exit 1
   PUBLIC_ADDR="$(tui_input "Внешний адрес" "Внешний IP или DDNS для готовой команды подключения VPS. Можно оставить пустым." "${PUBLIC_ADDR:-}")" || exit 1
-  WEB_UI_TYPE="$(tui_menu_pick "Веб-морда" "Что установить на central-сервер?" 16 78 4 \
+  WEB_UI_TYPE="$(whiptail --title " Веб-морда " --cancel-button "Отмена" --ok-button "Выбрать" --notags --menu "Что установить на central-сервер?" 16 78 4 \
     "simple" "Simple Web UI (лёгкая локальная веб-морда)" \
     "manager" "CrowdSec Manager (Dockerized CrowdSec + Manager)" \
-    "none" "Без веб-морды")" || exit 1
+    "none" "Без веб-морды" \
+    3>&1 1>&2 2>&3)" || exit 1
 
   [[ -n "${AUTO_REG_TOKEN:-}" ]] || AUTO_REG_TOKEN="$(openssl rand -hex 32)"
   [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || SHARED_BOUNCER_KEY="$(openssl rand -hex 32)"
@@ -703,59 +627,34 @@ configure_ufw_full() {
   ok "Firewall настроен."
 }
 
-is_temp_script_path() {
-  local p="$1"
-  case "${p}" in
-    /tmp/*|*/tmp/*|*/menu/tmp/*) return 0 ;;
-  esac
-  return 1
-}
-
-installed_menu_instance() {
-  local self
-  self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
-  [[ "${self}" == "$(readlink -f "${INSTALLED_SCRIPT}" 2>/dev/null)" ]] \
-    || [[ "$(basename "${self}")" == "crowdsec-central-menu" ]]
-}
-
 find_this_script() {
-  local candidate resolved
-  for candidate in "${BASH_SOURCE[0]:-}" "$0"; do
-    [[ -n "${candidate}" && -f "${candidate}" ]] || continue
-    resolved="$(readlink -f "${candidate}" 2>/dev/null || echo "${candidate}")"
-    is_temp_script_path "${resolved}" && continue
-    printf '%s\n' "${resolved}"
-    return 0
-  done
-  if [[ -f "${INSTALLED_SCRIPT}" ]]; then
-    readlink -f "${INSTALLED_SCRIPT}"
-    return 0
+  local src=""
+  if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+    src="${BASH_SOURCE[0]}"
+  elif [[ -f "$0" ]]; then
+    src="$0"
+  elif [[ -f ./install-central-crowdsec-ui-menu-fixed.sh ]]; then
+    src="./install-central-crowdsec-ui-menu-fixed.sh"
+  elif [[ -f /root/install-central-crowdsec-ui-menu-fixed.sh ]]; then
+    src="/root/install-central-crowdsec-ui-menu-fixed.sh"
+  elif [[ -f /root/install-central-crowdsec-ui-menu.sh ]]; then
+    src="/root/install-central-crowdsec-ui-menu.sh"
   fi
-  for candidate in /root/central.sh ./central.sh ./install-central-crowdsec-ui-menu-fixed.sh \
-    /root/install-central-crowdsec-ui-menu-fixed.sh /root/install-central-crowdsec-ui-menu.sh; do
-    [[ -f "${candidate}" ]] || continue
-    readlink -f "${candidate}"
-    return 0
-  done
-  return 1
+  if [[ -n "${src}" ]]; then
+    readlink -f "${src}"
+  fi
 }
 
 install_menu_files() {
   log "Устанавливаю интерактивное меню..."
   local src
   src="$(find_this_script || true)"
-  if [[ -z "${src}" || ! -f "${src}" ]] || is_temp_script_path "${src}"; then
-    if [[ -f "${INSTALLED_SCRIPT}" ]]; then
-      warn "Источник — временный файл; оставляю уже установленное меню: ${INSTALLED_SCRIPT}"
-      src="${INSTALLED_SCRIPT}"
-    else
-      fail "Не удалось определить путь к скрипту. Скопируй central.sh на сервер и запусти: sudo bash /root/central.sh --install"
-    fi
+  if [[ -n "${src}" && -f "${src}" ]]; then
+    install -m 0755 "${src}" "${INSTALLED_SCRIPT}"
+    ok "Меню установлено в ${INSTALLED_SCRIPT}"
+  else
+    fail "Не удалось определить путь к скрипту. Сохрани файл на диск и запусти: sudo bash /root/install-central-crowdsec-ui-menu-fixed.sh"
   fi
-  install -m 0755 "${src}" "${INSTALLED_SCRIPT}"
-  mkdir -p "${CONFIG_DIR}"
-  echo "${SCRIPT_VERSION}" >"${CONFIG_DIR}/menu.version"
-  ok "Меню установлено: ${INSTALLED_SCRIPT} (${SCRIPT_VERSION})"
 
   cat > "${PROFILE_FILE}" <<'PROFILE'
 # CrowdSec Central menu autostart for root interactive login shells
@@ -790,9 +689,7 @@ update_menu_from_github() {
   bash -n "${tmp}"
   install -m 0755 "${tmp}" "${INSTALLED_SCRIPT}"
   rm -f "${tmp}"
-  mkdir -p "${CONFIG_DIR}"
-  echo "${SCRIPT_VERSION}" >"${CONFIG_DIR}/menu.version"
-  ok "Меню обновлено: ${INSTALLED_SCRIPT} (${SCRIPT_VERSION})"
+  ok "Меню обновлено: ${INSTALLED_SCRIPT}"
 }
 
 run_install_step() {
@@ -801,7 +698,7 @@ run_install_step() {
   local log_file
   log_file="$(mktemp)"
   if [[ "${CROWDSEC_TUI_MODE:-}" == "installer" ]] && command -v whiptail >/dev/null 2>&1; then
-    tui_dialog --title " Установка " --infobox "${title}\n\nПодробный лог пишется во временный файл." 9 72 || true
+    whiptail --title " Установка " --infobox "${title}\n\nПодробный лог пишется во временный файл." 9 72 || true
   else
     print_header
     log "${title}"
@@ -813,7 +710,7 @@ run_install_step() {
   fi
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "installer" ]] && command -v whiptail >/dev/null 2>&1; then
-    tui_dialog --title " Ошибка: ${title} " --ok-button "ОК" --textbox "${log_file}" 30 110 || true
+    whiptail --title " Ошибка: ${title} " --textbox "${log_file}" 30 110 || true
   else
     cat "${log_file}"
   fi
@@ -850,7 +747,7 @@ full_install() {
   if bootstrap_installer_tui; then
     export CROWDSEC_TUI_MODE="installer"
     tui_theme
-    tui_msgbox "CrowdSec Central" "Установка CrowdSec Central LAPI + Web UI.\n\nВсе параметры можно будет изменить позже через меню." 12
+    whiptail --title " CrowdSec Central " --msgbox "Установка CrowdSec Central LAPI + Web UI.\n\nВсе параметры можно будет изменить позже через меню." 12 78
     if tui_yesno "Обновление системы" "Перед установкой обновить системные пакеты Debian?"; then
       do_upgrade="Y"
     else
@@ -963,18 +860,19 @@ show_tokens_file() {
 }
 
 add_allowed_range() {
+  print_header
   safe_source_env
-  local new_range
-  new_range="$(interactive_input "Доступ к LAPI" "IP/CIDR для доступа к LAPI.\nПример: 11.22.33.44/32" "")" || return
+  echo "Добавление IP/CIDR для доступа к LAPI. Пример: 11.22.33.44/32"
+  read -rp "Введи IP/CIDR: " new_range
   new_range="$(printf '%s' "${new_range}" | tr -cd '0-9A-Za-z.:/_-')"
-  if [[ -z "${new_range}" ]]; then tui_alert "Пусто. Ничего не добавлено."; return; fi
+  if [[ -z "${new_range}" ]]; then warn "Пусто. Ничего не добавлено."; pause; return; fi
   if [[ ! "${new_range}" =~ ^[0-9a-fA-F:.]+/[0-9]{1,3}$ ]]; then
-    if ! interactive_confirm "Доступ к LAPI" "Похоже, это не CIDR: ${new_range}\n\nВсё равно добавить?"; then
-      return
-    fi
+    warn "Похоже, это не CIDR."
+    read -rp "Всё равно добавить? [y/N]: " confirm
+    [[ "${confirm:-N}" =~ ^[Yy]$ ]] || { echo "Отменено."; pause; return; }
   fi
   if [[ -z "${ALLOWED_RANGES}" ]]; then ALLOWED_RANGES="${new_range}"; else
-    if echo ",${ALLOWED_RANGES}," | grep -q ",${new_range},"; then tui_alert "Этот IP/CIDR уже есть."; return; fi
+    if echo ",${ALLOWED_RANGES}," | grep -q ",${new_range},"; then warn "Этот IP/CIDR уже есть."; pause; return; fi
     ALLOWED_RANGES="${ALLOWED_RANGES},${new_range}"
   fi
   save_env
@@ -985,30 +883,20 @@ add_allowed_range() {
 }
 
 remove_allowed_range() {
+  print_header
   safe_source_env
-  local remove_num item i
-  local -a items menu_args=()
-  if [[ -z "${ALLOWED_RANGES}" ]]; then tui_alert "Список Allowed IP/CIDR пуст."; return; fi
+  if [[ -z "${ALLOWED_RANGES}" ]]; then echo "Список Allowed IP/CIDR пуст."; pause; return; fi
+  echo "Удаление IP/CIDR по номеру:"
   IFS=',' read -ra items <<< "${ALLOWED_RANGES}"
-  if use_tui; then
-    for i in "${!items[@]}"; do
-      item="$(echo "${items[$i]}" | xargs)"
-      [[ -n "${item}" ]] || continue
-      menu_args+=("$((i+1))" "${item}")
-    done
-    remove_num="$(tui_menu_pick "Удаление IP/CIDR" "Выберите запись для удаления:" 18 78 "${#items[@]}" "${menu_args[@]}")" || return
-  else
-    print_header
-    echo "Удаление IP/CIDR по номеру:"
-    for i in "${!items[@]}"; do echo "$((i+1)) - ${items[$i]}"; done
-    echo
-    read -rp "Введи номер пункта для удаления или Enter для отмены: " remove_num
-    [[ -n "${remove_num}" ]] || return
-    [[ "${remove_num}" =~ ^[0-9]+$ ]] || { tui_alert "Нужно ввести номер."; return; }
-    if (( remove_num < 1 || remove_num > ${#items[@]} )); then
-      tui_alert "Номер вне диапазона."
-      return
-    fi
+  for i in "${!items[@]}"; do echo "$((i+1)) - ${items[$i]}"; done
+  echo
+  read -rp "Введи номер пункта для удаления или Enter для отмены: " remove_num
+  [[ -n "${remove_num}" ]] || { echo "Отменено."; pause; return; }
+  [[ "${remove_num}" =~ ^[0-9]+$ ]] || { warn "Нужно ввести номер."; pause; return; }
+  if (( remove_num < 1 || remove_num > ${#items[@]} )); then
+    warn "Номер вне диапазона."
+    pause
+    return
   fi
   local new_list=""
   for i in "${!items[@]}"; do
@@ -1027,9 +915,11 @@ remove_allowed_range() {
 }
 
 replace_allowed_ranges() {
+  print_header
   safe_source_env
-  local new_ranges
-  new_ranges="$(interactive_input "Доступ к LAPI" "Сейчас: ${ALLOWED_RANGES:-список пуст}\n\nНовый список через запятую.\nПусто — закрыть LAPI для удалённых IP." "${ALLOWED_RANGES:-}")" || return
+  echo "Сейчас: ${ALLOWED_RANGES:-список пуст}"
+  echo "Введи новый список через запятую. Пусто закроет LAPI для удалённых IP."
+  read -rp "Новый Allowed IP/CIDR: " new_ranges
   ALLOWED_RANGES="${new_ranges:-}"
   save_env
   configure_crowdsec_lapi
@@ -1039,12 +929,14 @@ replace_allowed_ranges() {
 }
 
 change_lan_ip_or_web_port() {
+  print_header
   safe_source_env
-  local new_lan_ip new_web_port
-  new_lan_ip="$(interactive_input "Сеть" "Сейчас: ${LOCAL_WEB_UI}\n\nНовый LAN IP:" "${LAN_IP}")" || return
-  new_web_port="$(interactive_input "Сеть" "Новый порт Web UI:" "${WEB_PORT}")" || return
+  echo "Сейчас: LAN IP ${LAN_IP}, Web port ${WEB_PORT}, Web UI ${LOCAL_WEB_UI}"
+  read -rp "Новый LAN IP [${LAN_IP}]: " new_lan_ip
+  read -rp "Новый порт веб-морды [${WEB_PORT}]: " new_web_port
   if [[ -n "${new_web_port}" ]] && ! is_valid_port "${new_web_port}"; then
-    tui_alert "Некорректный порт: ${new_web_port}"
+    warn "Некорректный порт: ${new_web_port}"
+    pause
     return
   fi
   LAN_IP="${new_lan_ip:-${LAN_IP}}"
@@ -1057,12 +949,13 @@ change_lan_ip_or_web_port() {
 }
 
 change_lapi_port() {
+  print_header
   safe_source_env
-  local new_lapi_port
-  new_lapi_port="$(interactive_input "Сеть" "Текущий порт LAPI: ${LAPI_PORT}\n\nНовый порт LAPI:" "${LAPI_PORT}")" || return
-  [[ -n "${new_lapi_port}" ]] || { tui_alert "Порт не изменён."; return; }
+  read -rp "Новый LAPI port [${LAPI_PORT}]: " new_lapi_port
+  [[ -n "${new_lapi_port}" ]] || { warn "Порт не изменён."; pause; return; }
   if ! is_valid_port "${new_lapi_port}"; then
-    tui_alert "Некорректный порт: ${new_lapi_port}"
+    warn "Некорректный порт: ${new_lapi_port}"
+    pause
     return
   fi
   LAPI_PORT="${new_lapi_port}"
@@ -1075,9 +968,10 @@ change_lapi_port() {
 }
 
 change_public_addr() {
+  print_header
   safe_source_env
-  local new_public
-  new_public="$(interactive_input "Внешний адрес" "Сейчас: ${PUBLIC_ADDR:-не задан}\n\nНовый внешний IP/DDNS.\nПусто — убрать адрес." "${PUBLIC_ADDR:-}")" || return
+  echo "Сейчас: ${PUBLIC_ADDR:-не задан}"
+  read -rp "Новый внешний адрес или Enter чтобы убрать: " new_public
   PUBLIC_ADDR="${new_public:-}"
   save_env
   ok "Внешний адрес обновлён. LAPI URL для VPS: ${VPS_LAPI_URL}"
@@ -1085,10 +979,10 @@ change_public_addr() {
 }
 
 regenerate_auto_token() {
-  safe_source_env
-  if ! interactive_confirm "Ключи" "Новые VPS должны будут использовать новый токен.\n\nПерегенерировать auto-registration token?"; then
-    return
-  fi
+  print_header
+  echo "Новые серверы должны будут использовать новый токен."
+  read -rp "Перегенерировать token? [y/N]: " confirm
+  [[ "${confirm:-N}" =~ ^[Yy]$ ]] || { echo "Отменено."; pause; return; }
   AUTO_REG_TOKEN="$(openssl rand -hex 32)"
   save_env
   configure_crowdsec_lapi
@@ -1097,10 +991,10 @@ regenerate_auto_token() {
 }
 
 regenerate_bouncer_key() {
-  safe_source_env
-  if ! interactive_confirm "Ключи" "Удалённые bouncer нужно перенастроить на новый ключ.\n\nСоздать новый shared bouncer key?"; then
-    return
-  fi
+  print_header
+  echo "Удалённые bouncer нужно будет перенастроить на новый ключ."
+  read -rp "Создать новый shared bouncer key? [y/N]: " confirm
+  [[ "${confirm:-N}" =~ ^[Yy]$ ]] || { echo "Отменено."; pause; return; }
   SHARED_BOUNCER_KEY="$(openssl rand -hex 32)"
   save_env
   cscli bouncers delete shared-firewall-bouncer >/dev/null 2>&1 || true
@@ -1143,9 +1037,10 @@ update_web_ui_only() {
 }
 
 update_installed_stack() {
-  if ! interactive_confirm_default_yes "Обновления" "Будет обновлено: Debian, Docker, CrowdSec, Web UI, LAPI, firewall, меню.\n\nПродолжить?"; then
-    return
-  fi
+  print_header
+  echo "Будет обновлено: Debian packages, Docker, CrowdSec, Web UI image, LAPI, firewall, menu."
+  read -rp "Продолжить? [Y/n]: " confirm
+  [[ "${confirm:-Y}" =~ ^[Nn]$ ]] && { echo "Отменено."; pause; return; }
   install_base
   upgrade_system_packages
   install_or_update_docker
@@ -1229,6 +1124,7 @@ show_web_ui_installations() {
 }
 
 remove_simple_web_ui() {
+  print_header
   if ! tui_yesno "Удаление Web UI" "Удалить Simple Web UI (crowdsec-web-ui) и его compose-файлы?\n\nДанные CrowdSec/LAPI не будут затронуты."; then
     echo "Отменено."
     pause
@@ -1245,6 +1141,7 @@ remove_simple_web_ui() {
 }
 
 reinstall_simple_web_ui() {
+  print_header
   if ! tui_yesno "Переустановка Web UI" "Переустановить Simple Web UI?\n\nСтарый контейнер и compose-директория будут удалены. CrowdSec/LAPI не будут затронуты."; then
     echo "Отменено."
     pause
@@ -1264,7 +1161,6 @@ reinstall_simple_web_ui() {
 }
 
 show_crowdsec_manager_note() {
-  safe_source_env
   local tmp
   tmp="$(mktemp)"
   {
@@ -1287,7 +1183,7 @@ show_crowdsec_manager_note() {
 }
 
 migrate_to_crowdsec_manager() {
-  safe_source_env
+  print_header
   if ! tui_yesno "Миграция на CrowdSec Manager" "Будет выполнено:\n\n- backup /etc/crowdsec и /var/lib/crowdsec;\n- удаление apt/systemd CrowdSec;\n- удаление текущих веб-морд;\n- установка Dockerized CrowdSec + CrowdSec Manager;\n- сохранение текущего LAPI-порта ${LAPI_PORT}.\n\nПродолжить?"; then
     echo "Отменено."
     pause
@@ -1301,9 +1197,11 @@ migrate_to_crowdsec_manager() {
 }
 
 reapply_all_settings() {
-  if ! interactive_confirm_default_yes "Обслуживание" "Повторное применение всех настроек.\n\nБудут обновлены: CrowdSec LAPI, Web UI, UFW, автозапуск меню.\n\nПродолжить?"; then
-    return
-  fi
+  print_header
+  echo "Повторное применение всех настроек."
+  echo "Будут обновлены: CrowdSec LAPI, Web UI docker-compose, UFW правила, автозапуск меню."
+  read -rp "Продолжить? [Y/n]: " confirm
+  [[ "${confirm:-Y}" =~ ^[Nn]$ ]] && { echo "Отменено."; pause; return; }
   configure_crowdsec_lapi
   create_or_update_webui_machine
   create_or_update_shared_bouncer_key
@@ -1316,16 +1214,7 @@ reapply_all_settings() {
 
 disable_login_menu() { print_header; rm -f "${PROFILE_FILE}"; ok "Автозапуск меню отключён."; pause; }
 enable_login_menu() { print_header; install_menu_files; ok "Автозапуск меню включён."; pause; }
-repair_menu_installation() {
-  print_header
-  if command -v curl >/dev/null 2>&1; then
-    update_menu_from_github
-  else
-    install_menu_files
-  fi
-  ok "Команда меню обновлена: sudo crowdsec-central-menu"
-  pause
-}
+repair_menu_installation() { print_header; update_menu_from_github; ok "Команда меню обновлена: sudo crowdsec-central-menu"; pause; }
 
 show_versions() {
   local tmp
@@ -1343,7 +1232,6 @@ show_versions() {
 }
 
 test_webui_lapi() {
-  safe_source_env
   local tmp
   tmp="$(mktemp)"
   {
@@ -1438,17 +1326,17 @@ menu_loop_whiptail() {
   require_root
   tui_theme
   export CROWDSEC_TUI_MODE="whiptail"
-  export TUI_BACKTITLE="Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}"
-  if [[ -f "${CONFIG_DIR}/menu.version" ]] && [[ "$(cat "${CONFIG_DIR}/menu.version" 2>/dev/null)" != "${SCRIPT_VERSION}" ]]; then
-    warn "На диске другая версия меню ($(cat "${CONFIG_DIR}/menu.version")). Текущий скрипт: ${SCRIPT_VERSION}. Обновите: Настройки меню → Обновить команду меню."
-  fi
   clear || true
   while true; do
-    local category choice="" summary
+    local category choice summary
     summary="$(tui_summary)"
-    TUI_CANCEL_LABEL="Выход"
-    category="$(tui_menu_pick "CrowdSec Central" \
-      "Выберите раздел (стрелки + Enter, Отмена — выход):\n\n${summary}" \
+    category="$(whiptail \
+      --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" \
+      --title " CrowdSec Central " \
+      --cancel-button "Выход" \
+      --ok-button "Выбрать" \
+      --notags \
+      --menu "Выберите раздел:\nИспользуйте TAB или стрелки для навигации, ENTER для выбора.\n\n${summary}" \
       23 76 8 \
       "status" "Статус и данные" \
       "access" "Доступ к LAPI" \
@@ -1457,71 +1345,71 @@ menu_loop_whiptail() {
       "service" "Обслуживание" \
       "system" "Обновления и диагностика" \
       "menu" "Настройки меню" \
-      "exit" "Выход")" || exit 0
-    unset TUI_CANCEL_LABEL
-    category="${category//$'\r'/}"
-    category="${category//$'\n'/}"
-    [[ -z "${category}" ]] && continue
+      "exit" "Выход" \
+      3>&1 1>&2 2>&3)" || exit 0
     [[ "${category}" == "exit" ]] && exit 0
 
     case "${category}" in
       status)
-        choice="$(tui_menu_pick "Статус и данные" "Выберите действие:" 18 76 5 \
+        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Статус и данные " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 5 \
           "status" "Статус сервисов и портов" \
           "connect" "Данные подключения VPS" \
-          "envfile" "Показать central.env")" || continue
+          "envfile" "Показать central.env" \
+          3>&1 1>&2 2>&3)" || continue
         ;;
       access)
-        choice="$(tui_menu_pick "Доступ к LAPI" "Выберите действие:" 18 76 6 \
+        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Доступ к LAPI " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 6 \
           "add_range" "Добавить IP/CIDR к LAPI" \
           "remove_range" "Удалить IP/CIDR из LAPI" \
           "replace_ranges" "Заменить весь список IP/CIDR" \
-          "firewall" "Показать firewall/UFW")" || continue
+          "firewall" "Показать firewall/UFW" \
+          3>&1 1>&2 2>&3)" || continue
         ;;
       network)
-        choice="$(tui_menu_pick "Сеть и ключи" "Выберите действие:" 20 76 8 \
+        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Сеть и ключи " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 8 \
           "web_addr" "Изменить LAN IP или порт Web UI" \
           "lapi_port" "Изменить порт LAPI" \
           "public_addr" "Изменить внешний IP/DDNS для VPS" \
           "auto_token" "Перегенерировать auto-registration token" \
           "bouncer_key" "Перегенерировать shared bouncer key" \
-          "test_lapi" "Проверить доступ Web UI к LAPI")" || continue
+          "test_lapi" "Проверить доступ Web UI к LAPI" \
+          3>&1 1>&2 2>&3)" || continue
         ;;
       webui)
-        choice="$(tui_menu_pick "Веб-морда" "Выберите действие:" 19 76 6 \
+        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Веб-морда " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 19 76 6 \
           "webui_detect" "Показать установленные веб-морды" \
           "webui_reinstall" "Переустановить Simple Web UI" \
           "webui_remove" "Удалить Simple Web UI" \
           "manager_install" "Установить CrowdSec Manager (миграция)" \
-          "manager_note" "CrowdSec Manager: что будет изменено")" || continue
+          "manager_note" "CrowdSec Manager: что будет изменено" \
+          3>&1 1>&2 2>&3)" || continue
         ;;
       service)
-        choice="$(tui_menu_pick "Обслуживание" "Выберите действие:" 20 76 7 \
+        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Обслуживание " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 7 \
           "restart" "Перезапустить CrowdSec, Docker и Web UI" \
           "update_webui" "Обновить только контейнер Web UI" \
           "logs" "Показать логи Web UI" \
           "crowdsec_info" "Машины, баунсеры, алерты и решения" \
-          "reapply" "Повторно применить все настройки")" || continue
+          "reapply" "Повторно применить все настройки" \
+          3>&1 1>&2 2>&3)" || continue
         ;;
       system)
-        choice="$(tui_menu_pick "Обновления и диагностика" "Выберите действие:" 20 76 7 \
+        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Обновления и диагностика " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 7 \
           "update_all" "Обновить весь стек" \
           "update_system" "Обновить пакеты Debian" \
           "update_docker" "Обновить Docker" \
           "update_crowdsec" "Обновить CrowdSec" \
-          "versions" "Показать версии ПО")" || continue
+          "versions" "Показать версии ПО" \
+          3>&1 1>&2 2>&3)" || continue
         ;;
       menu)
-        choice="$(tui_menu_pick "Настройки меню" "Выберите действие:" 18 76 5 \
+        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Настройки меню " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 5 \
           "disable_autostart" "Отключить автозапуск меню при входе" \
           "enable_autostart" "Включить автозапуск меню при входе" \
-          "repair_menu" "Обновить или переустановить команду меню")" || continue
-        ;;
-      *)
-        continue
+          "repair_menu" "Обновить или переустановить команду меню" \
+          3>&1 1>&2 2>&3)" || continue
         ;;
     esac
-    [[ -n "${choice}" ]] || continue
     run_menu_action "${choice}"
   done
 }
@@ -1609,10 +1497,10 @@ menu_loop_plain() {
 }
 
 menu_loop() {
-  if has_tty && ensure_tui_tools; then
+  if [[ -t 0 && -t 1 ]] && ensure_tui_tools; then
     menu_loop_whiptail
   else
-    warn "TUI-меню недоступно: нет /dev/tty или не удалось установить whiptail. Открываю текстовый fallback."
+    warn "TUI-меню недоступно: нет TTY или не удалось установить whiptail. Открываю простой fallback."
     pause
     menu_loop_plain
   fi
@@ -1622,10 +1510,7 @@ case "${1:-}" in
   --install) full_install ;;
   --menu) menu_loop ;;
   *)
-    if [[ -f "${ENV_FILE}" ]] && [[ -x "${INSTALLED_SCRIPT}" ]] && ! installed_menu_instance; then
-      exec "${INSTALLED_SCRIPT}" --menu
-    fi
-    if installed_menu_instance || [[ -f "${ENV_FILE}" ]]; then
+    if [[ "$(basename "$0")" == "crowdsec-central-menu" || -f "${ENV_FILE}" ]]; then
       menu_loop
     else
       full_install
