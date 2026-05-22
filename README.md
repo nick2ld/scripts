@@ -55,7 +55,7 @@ After installation, interactive menu:
 sudo crowdsec-central-menu
 ```
 
-The central menu prefers `dialog` for real focusable buttons and falls back to `whiptail` only if `dialog` is unavailable. The UI follows the Proxmox VE Helper Scripts style: blue background, gray windows, highlighted active item, Russian buttons, arrow-key navigation and no numeric input. The menu is split into sections first, then actions, so the screen stays compact. Plain text mode is used only if neither TUI backend can be installed.
+The central menu prefers `dialog` for real focusable buttons and falls back to `whiptail` only if `dialog` is unavailable. The UI uses a flat Midnight Commander-like palette, Russian buttons, arrow-key navigation and no numeric input. The menu is split into sections first, then actions, so the screen stays compact. Plain text mode is used only if neither TUI backend can be installed.
 
 The central and VPS installers also use TUI dialogs for first-time setup. Install steps run behind clean status screens, and failed steps open their log in a scrollable window.
 
@@ -82,7 +82,15 @@ sudo bash vps.sh
 You will need values from central server menu:
 - `LAPI URL`
 - `AUTO_REG_TOKEN`
-- `SHARED_BOUNCER_KEY`
+- `BOUNCER_KEY`
+
+For readable bouncer names in CrowdSec Manager, create an individual key on the central server:
+
+```text
+Сеть и ключи -> Создать bouncer key с именем VPS
+```
+
+Use the generated `BOUNCER_KEY` and the same `Machine name` during VPS installation. If you reuse the shared key, CrowdSec Manager will show the shared central bouncer name instead of the VPS name.
 
 ## What These Scripts Configure
 
@@ -90,6 +98,7 @@ You will need values from central server menu:
 - CrowdSec LAPI listening on configured port
 - Auto-registration token and allowed CIDR ranges
 - Shared bouncer key for remote nodes
+- Per-VPS bouncer key generation with a visible CrowdSec Manager name
 - Docker + CrowdSec Web UI
 - UFW rules for Web UI and LAPI
 - Interactive management menu
@@ -98,12 +107,12 @@ You will need values from central server menu:
 - CrowdSec agent installation
 - Fail2Ban safe removal (with backup)
 - Node registration to central LAPI
-- Optional web log collections
+- Optional service-specific collections and log sources for Nginx, Apache, Caddy, Traefik and HAProxy
 - Firewall bouncer connection to central LAPI
 
 ## Security Notes
 
-- Keep `AUTO_REG_TOKEN` and `SHARED_BOUNCER_KEY` private.
+- Keep `AUTO_REG_TOKEN` and every `BOUNCER_KEY` private.
 - Do not expose Web UI port to public internet.
 - Restrict LAPI access with explicit `Allowed IP/CIDR`.
 

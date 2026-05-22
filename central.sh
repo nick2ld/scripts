@@ -36,7 +36,7 @@ DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="2026.05.22-manager-full-dialog-copy"
+SCRIPT_VERSION="2026.05.22-manager-full-mc-vps"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -63,7 +63,7 @@ tui_available() {
 whiptail() {
   local bin
   if bin="$(type -P dialog 2>/dev/null)"; then
-    local args=(--no-mouse)
+    local args=(--no-mouse --no-shadow)
     local nl arg
     printf -v nl '\n'
     while (($#)); do
@@ -529,6 +529,48 @@ create_or_update_shared_bouncer_key() {
   ok "Bouncer key готов."
 }
 
+create_named_vps_bouncer_key() {
+  safe_source_env
+  local node_name bouncer_key tmp
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    node_name="$(whiptail --title " Индивидуальный bouncer для VPS " --inputbox "Введите имя VPS.\n\nИменно это имя будет видно в CrowdSec Manager в разделе Registered Bouncers." 12 86 "$(hostname -f 2>/dev/null || hostname)-vps" 3>&1 1>&2 2>&3)" || return
+  else
+    read -rp "Имя VPS/bouncer: " node_name
+  fi
+  node_name="$(printf '%s' "${node_name:-}" | tr -cd 'A-Za-z0-9._:-')"
+  [[ -n "${node_name}" ]] || fail "Имя bouncer не может быть пустым."
+  bouncer_key="$(openssl rand -hex 32)"
+  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+    docker exec crowdsec cscli bouncers delete "${node_name}" >/dev/null 2>&1 || true
+    docker exec crowdsec cscli bouncers add "${node_name}" --key "${bouncer_key}" >/dev/null
+  else
+    cscli bouncers delete "${node_name}" >/dev/null 2>&1 || true
+    cscli bouncers add "${node_name}" --key "${bouncer_key}" >/dev/null
+  fi
+  tmp="$(mktemp)"
+  {
+    echo "Данные для установки VPS:"
+    echo
+    echo "Central LAPI URL:"
+    echo "${VPS_LAPI_URL}"
+    echo
+    echo "AUTO_REG_TOKEN:"
+    echo "${AUTO_REG_TOKEN}"
+    echo
+    echo "BOUNCER_KEY:"
+    echo "${bouncer_key}"
+    echo
+    echo "Machine name:"
+    echo "${node_name}"
+    echo
+    echo "Важно:"
+    echo "- Используй этот bouncer key только на VPS '${node_name}'."
+    echo "- В CrowdSec Manager bouncer будет отображаться как '${node_name}', а не shared-firewall-bouncer."
+  } >"${tmp}"
+  show_file "Индивидуальный bouncer key VPS" "${tmp}"
+  rm -f "${tmp}"
+}
+
 backup_and_remove_apt_crowdsec() {
   local backup_dir="${CONFIG_DIR}/backup-before-docker-crowdsec-$(date +%F-%H%M%S)"
   mkdir -p "${backup_dir}"
@@ -928,6 +970,8 @@ show_connection_info() {
     echo "LAPI URL: ${VPS_LAPI_URL}"
     echo "Auto-registration token: ${AUTO_REG_TOKEN}"
     echo "Shared bouncer key: ${SHARED_BOUNCER_KEY}"
+    echo "Для красивого имени bouncer в CrowdSec Manager создай индивидуальный ключ:"
+    echo "Сеть и ключи -> Создать bouncer key с именем VPS"
     echo "Allowed IP/CIDR: ${ALLOWED_RANGES:-не заданы}"
     echo "Веб-морду наружу не пробрасывать: ${LOCAL_WEB_UI}"
   } >"${tmp}"
@@ -1549,21 +1593,56 @@ test_webui_lapi() {
 }
 
 tui_theme() {
+  local dialogrc="/tmp/crowdsec-dialogrc-${UID:-0}"
+  cat > "${dialogrc}" <<'EOF'
+use_shadow = OFF
+use_colors = ON
+screen_color = (WHITE,BLUE,ON)
+dialog_color = (WHITE,BLUE,OFF)
+title_color = (YELLOW,BLUE,ON)
+border_color = (CYAN,BLUE,ON)
+border2_color = (CYAN,BLUE,ON)
+button_active_color = (BLACK,CYAN,ON)
+button_inactive_color = (WHITE,BLUE,OFF)
+button_key_active_color = (BLACK,CYAN,ON)
+button_key_inactive_color = (YELLOW,BLUE,ON)
+button_label_active_color = (BLACK,CYAN,ON)
+button_label_inactive_color = (WHITE,BLUE,OFF)
+inputbox_color = (WHITE,BLUE,OFF)
+inputbox_border_color = (CYAN,BLUE,ON)
+searchbox_color = (WHITE,BLUE,OFF)
+searchbox_title_color = (YELLOW,BLUE,ON)
+searchbox_border_color = (CYAN,BLUE,ON)
+position_indicator_color = (YELLOW,BLUE,ON)
+menubox_color = (WHITE,BLUE,OFF)
+menubox_border_color = (CYAN,BLUE,ON)
+item_color = (WHITE,BLUE,OFF)
+item_selected_color = (BLACK,CYAN,ON)
+tag_color = (YELLOW,BLUE,ON)
+tag_selected_color = (BLACK,CYAN,ON)
+tag_key_color = (YELLOW,BLUE,ON)
+tag_key_selected_color = (BLACK,CYAN,ON)
+check_color = (WHITE,BLUE,OFF)
+check_selected_color = (BLACK,CYAN,ON)
+uarrow_color = (YELLOW,BLUE,ON)
+darrow_color = (YELLOW,BLUE,ON)
+EOF
+  export DIALOGRC="${dialogrc}"
   export NEWT_COLORS='
 root=white,blue
-border=black,lightgray
-window=black,lightgray
-shadow=black,black
-title=red,lightgray
-button=black,lightgray
-actbutton=white,red
-checkbox=black,lightgray
-actcheckbox=white,red
-entry=black,white
-label=black,lightgray
-listbox=black,lightgray
-actlistbox=white,red
-textbox=black,lightgray
+border=cyan,blue
+window=white,blue
+shadow=blue,blue
+title=yellow,blue
+button=white,blue
+actbutton=black,cyan
+checkbox=white,blue
+actcheckbox=black,cyan
+entry=white,blue
+label=white,blue
+listbox=white,blue
+actlistbox=black,cyan
+textbox=white,blue
 '
 }
 
@@ -1600,6 +1679,7 @@ run_menu_action() {
     public_addr) change_public_addr ;;
     auto_token) regenerate_auto_token ;;
     bouncer_key) regenerate_bouncer_key ;;
+    node_bouncer) create_named_vps_bouncer_key ;;
     restart) restart_services ;;
     update_webui) update_web_ui_only ;;
     logs) show_logs ;;
@@ -1675,6 +1755,7 @@ menu_loop_whiptail() {
             "public_addr" "Изменить внешний IP/DDNS для VPS" \
             "auto_token" "Перегенерировать auto-registration token" \
             "bouncer_key" "Перегенерировать shared bouncer key" \
+            "node_bouncer" "Создать bouncer key с именем VPS" \
             "test_lapi" "Проверить доступ Web UI к LAPI" \
             3>&1 1>&2 2>&3)" || break
           ;;
@@ -1727,7 +1808,6 @@ menu_loop_plain() {
     echo "+----------------------------------------------------------+"
     printf "| %-56s |\n" "Веб-морда: ${LOCAL_WEB_UI}"
     printf "| %-56s |\n" "LAPI для VPS: ${VPS_LAPI_URL}"
-    printf "| %-56s |\n" "Allowed IP/CIDR: ${ALLOWED_RANGES:-не заданы}"
     echo "+----------------------------------------------------------+"
     echo
     echo "[ СТАТУС И ДАННЫЕ ]"
@@ -1746,27 +1826,28 @@ menu_loop_plain() {
     echo "  9) Изменить внешний адрес или DDNS для VPS"
     echo " 10) Перегенерировать auto-registration token"
     echo " 11) Создать новый shared bouncer key"
+    echo " 12) Создать bouncer key с именем VPS"
     echo
     echo "[ ОБСЛУЖИВАНИЕ ]"
-    echo " 12) Перезапустить CrowdSec, Docker и Web UI"
-    echo " 13) Обновить только контейнер веб-морды"
-    echo " 14) Показать логи веб-морды"
-    echo " 15) Показать machines, bouncers, alerts и decisions"
-    echo " 16) Показать firewall"
-    echo " 17) Повторно применить все настройки"
-    echo " 18) Отключить автозапуск меню при входе"
-    echo " 19) Включить автозапуск меню при входе"
-    echo " 20) Обновить всё установленное ПО"
-    echo " 21) Обновить только системные пакеты Debian"
-    echo " 22) Обновить только Docker"
-    echo " 23) Обновить только CrowdSec"
-    echo " 24) Показать версии установленного ПО"
-    echo " 25) Починить или переустановить команду меню"
-    echo " 26) Проверить доступ Web UI к LAPI"
+    echo " 13) Перезапустить CrowdSec, Docker и Web UI"
+    echo " 14) Обновить только контейнер веб-морды"
+    echo " 15) Показать логи веб-морды"
+    echo " 16) Показать machines, bouncers, alerts и decisions"
+    echo " 17) Показать firewall"
+    echo " 18) Повторно применить все настройки"
+    echo " 19) Отключить автозапуск меню при входе"
+    echo " 20) Включить автозапуск меню при входе"
+    echo " 21) Обновить всё установленное ПО"
+    echo " 22) Обновить только системные пакеты Debian"
+    echo " 23) Обновить только Docker"
+    echo " 24) Обновить только CrowdSec"
+    echo " 25) Показать версии установленного ПО"
+    echo " 26) Починить или переустановить команду меню"
+    echo " 27) Проверить доступ Web UI к LAPI"
     echo
     echo "  0) Выход"
     echo
-    if ! read -rp "Выбери действие [0-26]: " choice; then
+    if ! read -rp "Выбери действие [0-27]: " choice; then
       echo
       exit 0
     fi
@@ -1782,21 +1863,22 @@ menu_loop_plain() {
       9) change_public_addr ;;
       10) regenerate_auto_token ;;
       11) regenerate_bouncer_key ;;
-      12) restart_services ;;
-      13) update_web_ui_only ;;
-      14) show_logs ;;
-      15) show_crowdsec_info ;;
-      16) show_firewall ;;
-      17) reapply_all_settings ;;
-      18) disable_login_menu ;;
-      19) enable_login_menu ;;
-      20) update_installed_stack ;;
-      21) update_system_only ;;
-      22) update_docker_only ;;
-      23) update_crowdsec_only ;;
-      24) show_versions ;;
-      25) repair_menu_installation ;;
-      26) test_webui_lapi ;;
+      12) create_named_vps_bouncer_key ;;
+      13) restart_services ;;
+      14) update_web_ui_only ;;
+      15) show_logs ;;
+      16) show_crowdsec_info ;;
+      17) show_firewall ;;
+      18) reapply_all_settings ;;
+      19) disable_login_menu ;;
+      20) enable_login_menu ;;
+      21) update_installed_stack ;;
+      22) update_system_only ;;
+      23) update_docker_only ;;
+      24) update_crowdsec_only ;;
+      25) show_versions ;;
+      26) repair_menu_installation ;;
+      27) test_webui_lapi ;;
       0) exit 0 ;;
       *) echo "Неизвестный пункт меню."; pause ;;
     esac

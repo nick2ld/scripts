@@ -9,8 +9,8 @@ set -Eeuo pipefail
 # - Installs CrowdSec agent.
 # - Registers this VPS to the central LAPI using auto-registration token.
 # - Does NOT delete local_api_credentials.yaml before registration; it uses --file properly.
-# - Installs SSH/Linux collections and optional Nginx/Apache collections.
-# - Installs firewall bouncer and points it to the central LAPI with shared bouncer key.
+# - Installs SSH/Linux collections and optional service-specific collections.
+# - Installs firewall bouncer and points it to the central LAPI with a bouncer key.
 #
 # Install:
 #   sudo bash install-crowdsec-vps-node-fixed.sh
@@ -42,7 +42,7 @@ tui_available() {
 whiptail() {
   local bin
   if bin="$(type -P dialog 2>/dev/null)"; then
-    local args=(--no-mouse)
+    local args=(--no-mouse --no-shadow)
     local nl arg
     printf -v nl '\n'
     while (($#)); do
@@ -81,17 +81,52 @@ prompt_default() {
   printf -v "${__var_name}" '%s' "${__value:-${__default}}"
 }
 tui_theme() {
+  local dialogrc="/tmp/crowdsec-dialogrc-${UID:-0}"
+  cat > "${dialogrc}" <<'EOF'
+use_shadow = OFF
+use_colors = ON
+screen_color = (WHITE,BLUE,ON)
+dialog_color = (WHITE,BLUE,OFF)
+title_color = (YELLOW,BLUE,ON)
+border_color = (CYAN,BLUE,ON)
+border2_color = (CYAN,BLUE,ON)
+button_active_color = (BLACK,CYAN,ON)
+button_inactive_color = (WHITE,BLUE,OFF)
+button_key_active_color = (BLACK,CYAN,ON)
+button_key_inactive_color = (YELLOW,BLUE,ON)
+button_label_active_color = (BLACK,CYAN,ON)
+button_label_inactive_color = (WHITE,BLUE,OFF)
+inputbox_color = (WHITE,BLUE,OFF)
+inputbox_border_color = (CYAN,BLUE,ON)
+searchbox_color = (WHITE,BLUE,OFF)
+searchbox_title_color = (YELLOW,BLUE,ON)
+searchbox_border_color = (CYAN,BLUE,ON)
+position_indicator_color = (YELLOW,BLUE,ON)
+menubox_color = (WHITE,BLUE,OFF)
+menubox_border_color = (CYAN,BLUE,ON)
+item_color = (WHITE,BLUE,OFF)
+item_selected_color = (BLACK,CYAN,ON)
+tag_color = (YELLOW,BLUE,ON)
+tag_selected_color = (BLACK,CYAN,ON)
+tag_key_color = (YELLOW,BLUE,ON)
+tag_key_selected_color = (BLACK,CYAN,ON)
+check_color = (WHITE,BLUE,OFF)
+check_selected_color = (BLACK,CYAN,ON)
+uarrow_color = (YELLOW,BLUE,ON)
+darrow_color = (YELLOW,BLUE,ON)
+EOF
+  export DIALOGRC="${dialogrc}"
   export NEWT_COLORS='
 root=white,blue
-border=black,lightgray
-window=black,lightgray
-shadow=black,black
-title=red,lightgray
-button=black,lightgray
-actbutton=white,red
-entry=black,white
-label=black,lightgray
-textbox=black,lightgray
+border=cyan,blue
+window=white,blue
+shadow=blue,blue
+title=yellow,blue
+button=white,blue
+actbutton=black,cyan
+entry=white,blue
+label=white,blue
+textbox=white,blue
 '
 }
 bootstrap_installer_tui() {
@@ -168,6 +203,7 @@ load_env_if_exists() {
   MACHINE_NAME="${MACHINE_NAME:-$(hostname -f 2>/dev/null || hostname)}"
   INSTALL_FIREWALL_BOUNCER="${INSTALL_FIREWALL_BOUNCER:-yes}"
   INSTALL_WEB_COLLECTIONS="${INSTALL_WEB_COLLECTIONS:-auto}"
+  INSTALL_EXTRA_COLLECTIONS="${INSTALL_EXTRA_COLLECTIONS:-auto}"
   FIREWALL_BOUNCER_PACKAGE="${FIREWALL_BOUNCER_PACKAGE:-}"
   FIREWALL_BOUNCER_MODE="${FIREWALL_BOUNCER_MODE:-}"
 }
@@ -182,6 +218,7 @@ SHARED_BOUNCER_KEY=${SHARED_BOUNCER_KEY}
 MACHINE_NAME=${MACHINE_NAME}
 INSTALL_FIREWALL_BOUNCER=${INSTALL_FIREWALL_BOUNCER}
 INSTALL_WEB_COLLECTIONS=${INSTALL_WEB_COLLECTIONS}
+INSTALL_EXTRA_COLLECTIONS=${INSTALL_EXTRA_COLLECTIONS}
 FIREWALL_BOUNCER_PACKAGE=${FIREWALL_BOUNCER_PACKAGE}
 FIREWALL_BOUNCER_MODE=${FIREWALL_BOUNCER_MODE}
 ENV
@@ -195,7 +232,7 @@ ask_settings() {
     whiptail --title " CrowdSec VPS Node " --msgbox "Подключение VPS к центральному CrowdSec LAPI.\n\nДанные возьми в меню центрального сервера: sudo crowdsec-central-menu" 12 78
     CENTRAL_LAPI_URL="$(tui_input "Central LAPI" "Central LAPI URL" "${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}")" || exit 1
     AUTO_REG_TOKEN="$(tui_input "Central LAPI" "AUTO_REG_TOKEN" "${AUTO_REG_TOKEN:-}")" || exit 1
-    SHARED_BOUNCER_KEY="$(tui_input "Firewall Bouncer" "SHARED_BOUNCER_KEY" "${SHARED_BOUNCER_KEY:-}")" || exit 1
+    SHARED_BOUNCER_KEY="$(tui_input "Firewall Bouncer" "BOUNCER_KEY\n\nЛучше создать индивидуальный ключ на central:\nСеть и ключи -> Создать bouncer key с именем VPS.\nТогда это имя будет видно в CrowdSec Manager." "${SHARED_BOUNCER_KEY:-}")" || exit 1
     MACHINE_NAME="$(tui_input "Machine" "Machine name" "${MACHINE_NAME}")" || exit 1
     if tui_yesno "Firewall Bouncer" "Ставить firewall-bouncer для автоматической блокировки IP?"; then
       INSTALL_FIREWALL_BOUNCER="yes"
@@ -205,6 +242,11 @@ ask_settings() {
     INSTALL_WEB_COLLECTIONS="$(whiptail --title " Web Collections " --cancel-button "Отмена" --ok-button "Выбрать" --notags --menu "Включать web collections?" 15 78 3 \
       "auto" "Автоопределение Nginx/Apache" \
       "yes" "Включить принудительно" \
+      "no" "Не включать" \
+      3>&1 1>&2 2>&3)" || exit 1
+    INSTALL_EXTRA_COLLECTIONS="$(whiptail --title " Дополнительные collections " --cancel-button "Отмена" --ok-button "Выбрать" --notags --menu "Подключать collections под найденный софт?" 16 82 3 \
+      "auto" "Автоопределение Caddy/Traefik/HAProxy" \
+      "yes" "Включить всё поддерживаемое" \
       "no" "Не включать" \
       3>&1 1>&2 2>&3)" || exit 1
     [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "Central LAPI URL не может быть пустым."
@@ -238,7 +280,7 @@ ask_settings() {
   [[ -n "${AUTO_REG_TOKEN}" ]] || fail "AUTO_REG_TOKEN не может быть пустым."
   [[ "${AUTO_REG_TOKEN}" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "AUTO_REG_TOKEN содержит недопустимые символы."
 
-  prompt_default input_bouncer "SHARED_BOUNCER_KEY: " "${SHARED_BOUNCER_KEY:-}"
+  prompt_default input_bouncer "BOUNCER_KEY (лучше индивидуальный ключ из central-меню для имени VPS в Manager): " "${SHARED_BOUNCER_KEY:-}"
   SHARED_BOUNCER_KEY="${input_bouncer:-${SHARED_BOUNCER_KEY}}"
   if [[ -n "${SHARED_BOUNCER_KEY}" ]] && [[ ! "${SHARED_BOUNCER_KEY}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
     fail "SHARED_BOUNCER_KEY содержит недопустимые символы."
@@ -265,6 +307,14 @@ ask_settings() {
   echo "no   - не включать"
   prompt_default input_web "Включать web collections? [auto]: " "auto"
   INSTALL_WEB_COLLECTIONS="${input_web:-auto}"
+
+  echo
+  echo "Дополнительные collections: Caddy, Traefik, HAProxy."
+  echo "auto - включить только если найден сервис или каталог логов"
+  echo "yes  - поставить все поддерживаемые collections"
+  echo "no   - не включать"
+  prompt_default input_extra "Включать дополнительные collections? [auto]: " "auto"
+  INSTALL_EXTRA_COLLECTIONS="${input_extra:-auto}"
 
   save_env
 }
@@ -335,6 +385,20 @@ install_collections() {
       cscli collections install crowdsecurity/apache2 || true
     fi
   fi
+  if [[ "${INSTALL_EXTRA_COLLECTIONS}" == "yes" || "${INSTALL_EXTRA_COLLECTIONS}" == "auto" ]]; then
+    if [[ "${INSTALL_EXTRA_COLLECTIONS}" == "yes" ]] || command -v caddy >/dev/null 2>&1 || [[ -d /var/log/caddy ]]; then
+      log "Подключаю Caddy collection."
+      cscli collections install crowdsecurity/caddy || true
+    fi
+    if [[ "${INSTALL_EXTRA_COLLECTIONS}" == "yes" ]] || command -v traefik >/dev/null 2>&1 || [[ -d /var/log/traefik ]]; then
+      log "Подключаю Traefik collection."
+      cscli collections install crowdsecurity/traefik || true
+    fi
+    if [[ "${INSTALL_EXTRA_COLLECTIONS}" == "yes" ]] || command -v haproxy >/dev/null 2>&1 || [[ -e /var/log/haproxy.log ]] || [[ -d /var/log/haproxy ]]; then
+      log "Подключаю HAProxy collection."
+      cscli collections install crowdsecurity/haproxy || true
+    fi
+  fi
   ok "Collections установлены или уже были установлены."
 }
 
@@ -368,6 +432,36 @@ labels:
   type: apache2
 YAML
       ok "Добавлен мониторинг Apache logs."
+    fi
+  fi
+  if [[ "${INSTALL_EXTRA_COLLECTIONS}" == "yes" || "${INSTALL_EXTRA_COLLECTIONS}" == "auto" ]]; then
+    if [[ -d /var/log/caddy ]]; then
+      cat > /etc/crowdsec/acquis.d/caddy.yaml <<'YAML'
+filenames:
+  - /var/log/caddy/*.log
+labels:
+  type: caddy
+YAML
+      ok "Добавлен мониторинг Caddy logs."
+    fi
+    if [[ -d /var/log/traefik ]]; then
+      cat > /etc/crowdsec/acquis.d/traefik.yaml <<'YAML'
+filenames:
+  - /var/log/traefik/*.log
+labels:
+  type: traefik
+YAML
+      ok "Добавлен мониторинг Traefik logs."
+    fi
+    if [[ -e /var/log/haproxy.log || -d /var/log/haproxy ]]; then
+      cat > /etc/crowdsec/acquis.d/haproxy.yaml <<'YAML'
+filenames:
+  - /var/log/haproxy.log
+  - /var/log/haproxy/*.log
+labels:
+  type: haproxy
+YAML
+      ok "Добавлен мониторинг HAProxy logs."
     fi
   fi
   ok "Источники логов настроены."
@@ -494,6 +588,11 @@ show_status() {
   if [[ "${INSTALL_WEB_COLLECTIONS}" != "no" ]]; then
     [[ -d /var/log/nginx ]] && echo "  Nginx monitoring: /var/log/nginx/access.log и error.log"
     [[ -d /var/log/apache2 ]] && echo "  Apache monitoring: /var/log/apache2/access.log и error.log"
+  fi
+  if [[ "${INSTALL_EXTRA_COLLECTIONS}" != "no" ]]; then
+    [[ -d /var/log/caddy ]] && echo "  Caddy monitoring: /var/log/caddy/*.log"
+    [[ -d /var/log/traefik ]] && echo "  Traefik monitoring: /var/log/traefik/*.log"
+    [[ -e /var/log/haproxy.log || -d /var/log/haproxy ]] && echo "  HAProxy monitoring: /var/log/haproxy.log и /var/log/haproxy/*.log"
   fi
   if [[ "${INSTALL_FIREWALL_BOUNCER}" == "yes" ]]; then
     echo "  Firewall bouncer: активная блокировка IP через ${FIREWALL_BOUNCER_MODE}"
