@@ -42,7 +42,8 @@ warn() { echo -e "${YELLOW}WARN:${NC} $*"; }
 fail() { echo -e "${RED}ERROR:${NC} $*" >&2; exit 1; }
 pause() { echo; read -rp "Нажми Enter для продолжения..." _ || true; }
 is_interactive() { [[ -t 0 ]]; }
-is_tui_session() { [[ -n "${CROWDSEC_TUI_MODE:-}" && -t 0 && -t 1 ]]; }
+has_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
+is_tui_session() { [[ -n "${CROWDSEC_TUI_MODE:-}" && -t 1 && -r /dev/tty ]]; }
 require_interactive_install() {
   if ! is_interactive; then
     fail "Интерактивная установка не работает через pipe. Скачай скрипт во временный файл и запусти его: tmp=\"\$(mktemp)\" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh -o \"\$tmp\" && bash \"\$tmp\"; rc=\$?; rm -f \"\$tmp\"; exit \$rc"
@@ -71,21 +72,27 @@ show_output() {
   cat > "${tmp}"
   if is_tui_session; then
     if [[ "${CROWDSEC_TUI_MODE}" =~ ^(whiptail|installer)$ ]] && command -v whiptail >/dev/null 2>&1; then
-      whiptail --title " ${title} " --textbox "${tmp}" 30 110 || true
+      whiptail --title " ${title} " --textbox "${tmp}" 30 110 </dev/tty >/dev/tty 2>&1 || true
     elif command -v less >/dev/null 2>&1; then
       clear || true
-      LESS='-R' less "${tmp}" || true
+      LESS='-R' less "${tmp}" </dev/tty >/dev/tty || true
     else
       clear || true
+      printf '%s\n\n' "${title}" >/dev/tty
+      cat "${tmp}" >/dev/tty
+      read -rp "Нажми Enter для продолжения..." _ </dev/tty || true
+    fi
+  else
+    clear || true
+    if has_tty; then
+      printf '%s\n\n' "${title}" >/dev/tty
+      cat "${tmp}" >/dev/tty
+      read -rp "Нажми Enter для продолжения..." _ </dev/tty || true
+    else
       printf '%s\n\n' "${title}"
       cat "${tmp}"
       pause
     fi
-  else
-    clear || true
-    printf '%s\n\n' "${title}"
-    cat "${tmp}"
-    pause
   fi
   rm -f "${tmp}"
 }
