@@ -85,6 +85,9 @@ prompt_default() {
 quote_env() {
   printf '%q' "${1:-}"
 }
+normalize_lapi_url() {
+  CENTRAL_LAPI_URL="${CENTRAL_LAPI_URL%/}"
+}
 tui_theme() {
   local dialogrc="/tmp/crowdsec-dialogrc-${UID:-0}"
   cat > "${dialogrc}" <<'EOF'
@@ -267,6 +270,7 @@ load_env_if_exists() {
     done < "${ENV_FILE}"
   fi
   CENTRAL_LAPI_URL="${CENTRAL_LAPI_URL:-}"
+  normalize_lapi_url
   AUTO_REG_TOKEN="${AUTO_REG_TOKEN:-}"
   SHARED_BOUNCER_KEY="${SHARED_BOUNCER_KEY:-}"
   MACHINE_NAME="${MACHINE_NAME:-$(hostname -f 2>/dev/null || hostname)}"
@@ -326,6 +330,7 @@ ask_settings() {
       3>&1 1>&2 2>&3)" || exit 1
     [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "Central LAPI URL не может быть пустым."
     [[ "${CENTRAL_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]] || fail "Central LAPI URL должен начинаться с http:// или https://"
+    normalize_lapi_url
     [[ -n "${AUTO_REG_TOKEN}" ]] || fail "AUTO_REG_TOKEN не может быть пустым."
     [[ "${AUTO_REG_TOKEN}" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "AUTO_REG_TOKEN содержит недопустимые символы."
     if [[ -n "${SHARED_BOUNCER_KEY}" ]] && [[ ! "${SHARED_BOUNCER_KEY}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
@@ -350,6 +355,7 @@ ask_settings() {
   CENTRAL_LAPI_URL="${input_lapi:-${CENTRAL_LAPI_URL}}"
   [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "Central LAPI URL не может быть пустым."
   [[ "${CENTRAL_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]] || fail "Central LAPI URL должен начинаться с http:// или https://"
+  normalize_lapi_url
 
   prompt_default input_token "AUTO_REG_TOKEN: " "${AUTO_REG_TOKEN:-}"
   AUTO_REG_TOKEN="${input_token:-${AUTO_REG_TOKEN}}"
@@ -657,11 +663,49 @@ YAML
   ok "Источники логов настроены."
 }
 
+preflight_lapi_access() {
+  load_env_if_exists
+  normalize_lapi_url
+  local health_url="${CENTRAL_LAPI_URL}/health"
+  local tmp_body http_code curl_rc
+  tmp_body="$(mktemp)"
+  log "Проверяю доступность central LAPI: ${health_url}"
+  set +e
+  http_code="$(curl -sS -m 10 -o "${tmp_body}" -w '%{http_code}' "${health_url}" 2>"${tmp_body}.err")"
+  curl_rc=$?
+  set -e
+  if [[ "${curl_rc}" -ne 0 ]]; then
+    cat "${tmp_body}.err" 2>/dev/null || true
+    rm -f "${tmp_body}" "${tmp_body}.err"
+    fail "Central LAPI недоступен с этой VPS. Проверь адрес ${CENTRAL_LAPI_URL}, маршрут, firewall и проброс TCP-порта LAPI."
+  fi
+  if [[ "${http_code}" != "200" ]]; then
+    echo "HTTP ${http_code} от ${health_url}"
+    cat "${tmp_body}" 2>/dev/null || true
+    rm -f "${tmp_body}" "${tmp_body}.err"
+    case "${http_code}" in
+      401|403)
+        fail "Central LAPI отвечает, но доступ запрещён. На central создай подключение VPS с внешним IP этой машины: Подключения VPS и LAPI -> Создать подключение VPS."
+        ;;
+      000)
+        fail "Central LAPI не отвечает. Проверь адрес, порт и firewall."
+        ;;
+      *)
+        fail "Central LAPI /health вернул неожиданный HTTP ${http_code}. Проверь состояние central CrowdSec."
+        ;;
+    esac
+  fi
+  rm -f "${tmp_body}" "${tmp_body}.err"
+  ok "Central LAPI доступен."
+}
+
 register_to_central_lapi() {
   load_env_if_exists
+  normalize_lapi_url
   local reg_log reg_rc
   log "Регистрирую VPS на центральном LAPI..."
   mkdir -p /etc/crowdsec
+  preflight_lapi_access
 
   if [[ -f /etc/crowdsec/local_api_credentials.yaml ]] \
     && grep -q "url: ${CENTRAL_LAPI_URL}" /etc/crowdsec/local_api_credentials.yaml \
@@ -700,7 +744,7 @@ YAML
   if [[ "${reg_rc}" -ne 0 ]]; then
     cat "${reg_log}"
     rm -f "${reg_log}"
-    fail "Не удалось зарегистрировать VPS на central LAPI. Проверь URL, AUTO_REG_TOKEN, доступ к порту LAPI и создай/проверь подключение в меню central."
+    fail "Не удалось зарегистрировать VPS на central LAPI. Если /health доступен, чаще всего причина: неверный AUTO_REG_TOKEN, IP VPS не добавлен в allowed_ranges на central или machine с таким именем уже существует."
   fi
   cat "${reg_log}" || true
   rm -f "${reg_log}"
