@@ -33,7 +33,7 @@ PROFILE_FILE="/etc/profile.d/crowdsec-central-menu.sh"
 DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
-SCRIPT_VERSION="2026.05.22-tui-installer"
+SCRIPT_VERSION="2026.05.22-tui-output-v2"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -70,6 +70,13 @@ show_output() {
   local tmp
   tmp="$(mktemp)"
   cat > "${tmp}"
+  show_file "${title}" "${tmp}"
+  rm -f "${tmp}"
+}
+
+show_file() {
+  local title="$1"
+  local tmp="$2"
   if is_tui_session; then
     if [[ "${CROWDSEC_TUI_MODE}" =~ ^(whiptail|installer)$ ]] && command -v whiptail >/dev/null 2>&1; then
       whiptail --title " ${title} " --textbox "${tmp}" 30 110 </dev/tty >/dev/tty 2>&1 || true
@@ -108,7 +115,6 @@ show_output() {
       pause
     fi
   fi
-  rm -f "${tmp}"
 }
 
 require_root() {
@@ -663,6 +669,8 @@ full_install() {
 }
 
 show_status() {
+  local tmp
+  tmp="$(mktemp)"
   {
     print_header
     safe_source_env
@@ -678,10 +686,14 @@ show_status() {
     echo
     echo "Порты:"
     ss -lntp 2>/dev/null | grep -E ":(${WEB_PORT}|${LAPI_PORT})" || echo "  порты ${WEB_PORT}/${LAPI_PORT} не найдены в listen"
-  } | show_output "Статус"
+  } >"${tmp}"
+  show_file "Статус" "${tmp}"
+  rm -f "${tmp}"
 }
 
 show_connection_info() {
+  local tmp
+  tmp="$(mktemp)"
   {
     print_header
     safe_source_env
@@ -691,14 +703,20 @@ show_connection_info() {
     echo "Shared bouncer key: ${SHARED_BOUNCER_KEY}"
     echo "Allowed IP/CIDR: ${ALLOWED_RANGES:-не заданы}"
     echo "Веб-морду наружу не пробрасывать: ${LOCAL_WEB_UI}"
-  } | show_output "Данные подключения"
+  } >"${tmp}"
+  show_file "Данные подключения" "${tmp}"
+  rm -f "${tmp}"
 }
 
 show_tokens_file() {
+  local tmp
+  tmp="$(mktemp)"
   {
     print_header
     [[ -f "${ENV_FILE}" ]] && cat "${ENV_FILE}" || echo "Файл настроек не найден: ${ENV_FILE}"
-  } | show_output "central.env"
+  } >"${tmp}"
+  show_file "central.env" "${tmp}"
+  rm -f "${tmp}"
 }
 
 add_allowed_range() {
@@ -887,9 +905,29 @@ update_system_only() { print_header; upgrade_system_packages; pause; }
 update_docker_only() { print_header; install_or_update_docker; systemctl restart docker || true; [[ -f "${COMPOSE_FILE}" ]] && cd "${COMPOSE_DIR}" && docker compose up -d || true; pause; }
 update_crowdsec_only() { print_header; install_or_update_crowdsec; configure_crowdsec_lapi; create_or_update_webui_machine; create_or_update_shared_bouncer_key; pause; }
 
-show_logs() { { print_header; docker logs crowdsec-web-ui --tail 150 2>&1 || echo "Контейнер crowdsec-web-ui не найден."; } | show_output "Логи Web UI"; }
-show_crowdsec_info() { { print_header; echo "Machines:"; cscli machines list || true; echo; echo "Bouncers:"; cscli bouncers list || true; echo; echo "Alerts:"; cscli alerts list || true; echo; echo "Decisions:"; cscli decisions list || true; } | show_output "CrowdSec"; }
-show_firewall() { { print_header; ufw status verbose || true; } | show_output "Firewall"; }
+show_logs() {
+  local tmp
+  tmp="$(mktemp)"
+  { print_header; docker logs crowdsec-web-ui --tail 150 2>&1 || echo "Контейнер crowdsec-web-ui не найден."; } >"${tmp}"
+  show_file "Логи Web UI" "${tmp}"
+  rm -f "${tmp}"
+}
+
+show_crowdsec_info() {
+  local tmp
+  tmp="$(mktemp)"
+  { print_header; echo "Machines:"; cscli machines list || true; echo; echo "Bouncers:"; cscli bouncers list || true; echo; echo "Alerts:"; cscli alerts list || true; echo; echo "Decisions:"; cscli decisions list || true; } >"${tmp}"
+  show_file "CrowdSec" "${tmp}"
+  rm -f "${tmp}"
+}
+
+show_firewall() {
+  local tmp
+  tmp="$(mktemp)"
+  { print_header; ufw status verbose || true; } >"${tmp}"
+  show_file "Firewall" "${tmp}"
+  rm -f "${tmp}"
+}
 
 reapply_all_settings() {
   print_header
@@ -912,6 +950,8 @@ enable_login_menu() { print_header; install_menu_files; ok "Автозапуск
 repair_menu_installation() { print_header; update_menu_from_github; ok "Команда меню обновлена: sudo crowdsec-central-menu"; pause; }
 
 show_versions() {
+  local tmp
+  tmp="$(mktemp)"
   {
     print_header
     echo "Debian/Ubuntu:"
@@ -919,10 +959,14 @@ show_versions() {
     echo; echo "CrowdSec:"; command -v cscli >/dev/null 2>&1 && cscli version || echo "не установлен"
     echo; echo "Docker:"; command -v docker >/dev/null 2>&1 && { docker --version; docker compose version; } || echo "не установлен"
     echo; echo "Web UI image:"; command -v docker >/dev/null 2>&1 && docker images "${WEBUI_IMAGE}" || true
-  } | show_output "Версии"
+  } >"${tmp}"
+  show_file "Версии" "${tmp}"
+  rm -f "${tmp}"
 }
 
 test_webui_lapi() {
+  local tmp
+  tmp="$(mktemp)"
   {
     print_header
     echo "Проверяю LAPI с хоста:"
@@ -930,7 +974,9 @@ test_webui_lapi() {
     echo
     echo "Проверяю LAPI из контейнера Web UI через node fetch:"
     docker exec crowdsec-web-ui sh -lc "node -e 'fetch(\"http://host.docker.internal:${LAPI_PORT}/health\").then(r=>r.text()).then(console.log).catch(e=>{console.error(e); process.exit(1)})'" || true
-  } | show_output "Проверка LAPI"
+  } >"${tmp}"
+  show_file "Проверка LAPI" "${tmp}"
+  rm -f "${tmp}"
 }
 
 tui_theme() {
