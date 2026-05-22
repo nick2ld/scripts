@@ -1,141 +1,69 @@
-# CrowdSec Scripts
+# Useful Scripts
 
-Production-ready Bash scripts for deploying and operating CrowdSec in a central + node architecture.
+## Русский
 
-## Repository Contents
+Набор полезных скриптов для администрирования серверов.
 
-- `central.sh` - installs and manages CrowdSec Central LAPI + Web UI on Debian/Ubuntu.
-- `vps.sh` - installs and connects a VPS CrowdSec node to a central LAPI.
+### Оглавление
 
-## Requirements
+- [CrowdSec Central + VPS](#crowdsec-central--vps-ru)
+- [English](#english)
 
-- OS: Debian/Ubuntu (or Debian-based)
-- Run as root (`sudo`)
-- Internet access for package installation
+### CrowdSec Central + VPS {#crowdsec-central--vps-ru}
 
-## Quick Start
+Каталог: [`crowdsec/`](./crowdsec/)
 
-### One-command install from GitHub
+Скрипты:
 
-Use the temporary-file form below. It keeps stdin attached to the terminal, so the installer can ask interactive questions correctly.
+- [`crowdsec/central.sh`](./crowdsec/central.sh) - установка и управление central-сервером CrowdSec: LAPI, Dockerized CrowdSec, CrowdSec Manager, bouncer keys, доступ VPS.
+- [`crowdsec/vps.sh`](./crowdsec/vps.sh) - подключение VPS/node к central LAPI, установка firewall bouncer, выбор CrowdSec Hub elements.
 
-Central server:
+Документация:
 
-```bash
-tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
-```
+- [`crowdsec/README.md`](./crowdsec/README.md)
 
-VPS node:
+Быстрый запуск central:
 
 ```bash
-tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/vps.sh -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
+tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/crowdsec/central.sh -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
 ```
 
-Alternative with `wget`:
+Быстрый запуск VPS:
 
 ```bash
-wget -qO /tmp/crowdsec-central.sh https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh && if [ "$(id -u)" -eq 0 ]; then bash /tmp/crowdsec-central.sh; else sudo bash /tmp/crowdsec-central.sh; fi; rc=$?; rm -f /tmp/crowdsec-central.sh; [ "$rc" -eq 0 ]
+tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/crowdsec/vps.sh -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
 ```
 
-For VPS node with `wget`:
+## English
+
+A collection of useful server administration scripts.
+
+### Table Of Contents
+
+- [CrowdSec Central + VPS](#crowdsec-central--vps-en)
+- [Русский](#русский)
+
+### CrowdSec Central + VPS {#crowdsec-central--vps-en}
+
+Directory: [`crowdsec/`](./crowdsec/)
+
+Scripts:
+
+- [`crowdsec/central.sh`](./crowdsec/central.sh) - install and manage a CrowdSec central server: LAPI, Dockerized CrowdSec, CrowdSec Manager, bouncer keys, VPS access.
+- [`crowdsec/vps.sh`](./crowdsec/vps.sh) - connect a VPS/node to central LAPI, install firewall bouncer, select CrowdSec Hub elements.
+
+Documentation:
+
+- [`crowdsec/README.md`](./crowdsec/README.md)
+
+Quick start for central:
 
 ```bash
-wget -qO /tmp/crowdsec-vps.sh https://raw.githubusercontent.com/nick2ld/scripts/main/vps.sh && if [ "$(id -u)" -eq 0 ]; then bash /tmp/crowdsec-vps.sh; else sudo bash /tmp/crowdsec-vps.sh; fi; rc=$?; rm -f /tmp/crowdsec-vps.sh; [ "$rc" -eq 0 ]
+tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/crowdsec/central.sh -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
 ```
 
-### 1) Central server
+Quick start for VPS:
 
 ```bash
-sudo bash central.sh
+tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/crowdsec/vps.sh -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
 ```
-
-After installation, interactive menu:
-
-```bash
-sudo crowdsec-central-menu
-```
-
-The central menu prefers `dialog` for real focusable buttons and falls back to `whiptail` only if `dialog` is unavailable. The UI uses a flat Midnight Commander-like palette, Russian buttons, arrow-key navigation and no numeric input. The menu is split into sections first, then actions, so the screen stays compact. Plain text mode is used only if neither TUI backend can be installed.
-
-The central and VPS installers also use TUI dialogs for first-time setup. Install steps run behind clean status screens, and failed steps open their log in a scrollable window.
-
-The central menu includes Web UI lifecycle actions: detect installed Web UIs, remove or reinstall the current Simple Web UI, and migrate to CrowdSec Manager. CrowdSec Manager mode backs up and removes apt/systemd CrowdSec, removes existing Web UI containers, then deploys Dockerized CrowdSec + CrowdSec Manager while preserving the configured external LAPI port for VPS nodes.
-
-Обновить установленную команду меню без переустановки всего стека:
-
-```bash
-tmp="$(mktemp)" && curl -fsSL -H "Cache-Control: no-cache" "https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh?$(date +%s)" -o "$tmp" && bash -n "$tmp" && sudo install -m 0755 "$tmp" /usr/local/sbin/crowdsec-central-menu; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
-```
-
-Check installed menu version:
-
-```bash
-grep '^SCRIPT_VERSION=' /usr/local/sbin/crowdsec-central-menu
-```
-
-### 2) VPS node
-
-```bash
-sudo bash vps.sh
-```
-
-You will need values from central server menu:
-- `LAPI URL`
-- `AUTO_REG_TOKEN`
-- `BOUNCER_KEY`
-
-For readable bouncer names in CrowdSec Manager, create an individual key on the central server:
-
-```text
-Сеть и ключи -> Создать bouncer key с именем VPS
-```
-
-Use the generated `BOUNCER_KEY` and the same `Machine name` during VPS installation. CrowdSec Manager shows the bouncer name from the key created on central, not the machine name typed on the VPS. If you reuse the shared key, CrowdSec Manager will show the shared central bouncer name instead of the VPS name.
-
-## What These Scripts Configure
-
-### `central.sh`
-- CrowdSec LAPI listening on configured port
-- Auto-registration token and allowed CIDR ranges
-- Shared bouncer key for remote nodes
-- Per-VPS bouncer key generation with a visible CrowdSec Manager name
-- Docker + CrowdSec Web UI
-- UFW rules for Web UI and LAPI
-- Interactive management menu
-
-### `vps.sh`
-- CrowdSec agent installation
-- Fail2Ban safe removal (with backup)
-- Node registration to central LAPI
-- CrowdSec Hub collection selection from the real `cscli` list, with suggestions based on installed commands, systemd services and Docker containers/images
-- Firewall bouncer connection to central LAPI
-
-## Security Notes
-
-- Keep `AUTO_REG_TOKEN` and every `BOUNCER_KEY` private.
-- Do not expose Web UI port to public internet.
-- Restrict LAPI access with explicit `Allowed IP/CIDR`.
-
-## Validation
-
-Use Git Bash or Linux shell:
-
-```bash
-bash -n central.sh
-bash -n vps.sh
-```
-
-On this Windows environment, explicit path may be needed:
-
-```powershell
-& "C:\Program Files\Git\bin\bash.exe" -n "/c/Users/user/Documents/скрипты для CrowdSec/central.sh"
-& "C:\Program Files\Git\bin\bash.exe" -n "/c/Users/user/Documents/скрипты для CrowdSec/vps.sh"
-```
-
-## Contributing
-
-See `CONTRIBUTING.md`.
-
-## License
-
-MIT - see `LICENSE`.
