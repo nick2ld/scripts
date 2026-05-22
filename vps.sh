@@ -31,6 +31,10 @@ warn() { echo -e "${YELLOW}WARN:${NC} $*"; }
 fail() { echo -e "${RED}ERROR:${NC} $*" >&2; exit 1; }
 pause() { echo; read -rp "Нажми Enter для продолжения..." _ || true; }
 is_interactive() { [[ -t 0 ]]; }
+safe_clear() {
+  [[ -n "${TERM:-}" && "${TERM}" != "dumb" ]] || return 0
+  clear || true
+}
 require_interactive_install() {
   if ! is_interactive; then
     fail "Интерактивная установка не работает через pipe. Скачай скрипт во временный файл и запусти его: tmp=\"\$(mktemp)\" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/vps.sh -o \"\$tmp\" && bash \"\$tmp\"; rc=\$?; rm -f \"\$tmp\"; exit \$rc"
@@ -63,7 +67,7 @@ textbox=black,lightgray
 bootstrap_installer_tui() {
   command -v whiptail >/dev/null 2>&1 && return 0
   command -v apt-get >/dev/null 2>&1 || return 1
-  clear || true
+  safe_clear
   echo "Подготовка интерактивного установщика..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y >/tmp/crowdsec-vps-bootstrap.log 2>&1 || return 1

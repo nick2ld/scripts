@@ -36,7 +36,7 @@ DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="2026.05.22-manager-full-uvar-fix"
+SCRIPT_VERSION="2026.05.22-manager-full-uvar-term-fix"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -52,6 +52,10 @@ pause() {
 is_interactive() { [[ -t 0 ]]; }
 has_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
 is_tui_session() { [[ -n "${CROWDSEC_TUI_MODE:-}" && -t 1 && -r /dev/tty ]]; }
+safe_clear() {
+  [[ -n "${TERM:-}" && "${TERM}" != "dumb" ]] || return 0
+  clear || true
+}
 require_interactive_install() {
   if ! is_interactive; then
     fail "Интерактивная установка не работает через pipe. Скачай скрипт во временный файл и запусти его: tmp=\"\$(mktemp)\" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh -o \"\$tmp\" && bash \"\$tmp\"; rc=\$?; rm -f \"\$tmp\"; exit \$rc"
@@ -117,16 +121,16 @@ show_file() {
     if [[ "${CROWDSEC_TUI_MODE}" =~ ^(whiptail|installer)$ ]] && command -v whiptail >/dev/null 2>&1; then
       whiptail --title " ${title} " --textbox "${tmp}" 30 110 </dev/tty >/dev/tty 2>&1 || true
     elif command -v less >/dev/null 2>&1; then
-      clear || true
+      safe_clear
       LESS='-R' less "${tmp}" </dev/tty >/dev/tty || true
     else
-      clear || true
+      safe_clear
       printf '%s\n\n' "${title}" >/dev/tty
       cat "${tmp}" >/dev/tty
       read -rp "Нажми Enter для продолжения..." _ </dev/tty || true
     fi
   else
-    clear || true
+    safe_clear
     if has_tty; then
       printf '%s\n\n' "${title}" >/dev/tty
       cat "${tmp}" >/dev/tty
@@ -250,7 +254,7 @@ ENV
 }
 
 print_header() {
-  clear || true
+  safe_clear
   echo "============================================================"
   echo "CrowdSec Central LAPI + Web UI (${SCRIPT_VERSION})"
   echo "============================================================"
@@ -376,7 +380,7 @@ ask_initial_settings() {
 bootstrap_installer_tui() {
   command -v whiptail >/dev/null 2>&1 && return 0
   command -v apt-get >/dev/null 2>&1 || return 1
-  clear || true
+  safe_clear
   echo "Подготовка интерактивного установщика..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y >/tmp/crowdsec-menu-bootstrap.log 2>&1 || return 1
@@ -1595,7 +1599,7 @@ menu_loop_whiptail() {
   require_root
   tui_theme
   export CROWDSEC_TUI_MODE="whiptail"
-  clear || true
+  safe_clear
   while true; do
     local category choice summary
     summary="$(tui_summary)"
@@ -1685,7 +1689,7 @@ menu_loop_whiptail() {
 
 menu_loop_plain() {
   require_root
-  clear || true
+  safe_clear
   while true; do
     print_header
     safe_source_env
@@ -1731,7 +1735,10 @@ menu_loop_plain() {
     echo
     echo "  0) Выход"
     echo
-    read -rp "Выбери действие [0-26]: " choice
+    if ! read -rp "Выбери действие [0-26]: " choice; then
+      echo
+      exit 0
+    fi
     case "${choice}" in
       1) show_status; pause ;;
       2) show_connection_info; pause ;;
