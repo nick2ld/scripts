@@ -174,6 +174,7 @@ run_install_step() {
   log_file="$(mktemp)"
   clean_log="$(mktemp)"
   if tui_available; then
+    set +e
     (
       set +eE
       "$@" >"${log_file}" 2>&1 &
@@ -187,6 +188,7 @@ run_install_step() {
       wait "${pid}"
     ) | whiptail --title " CrowdSec VPS Node " --gauge "${title}" 18 90 0
     local rc=${PIPESTATUS[0]}
+    set -e
     if [[ "${rc}" -eq 0 ]]; then
       rm -f "${log_file}" "${clean_log}"
       return 0

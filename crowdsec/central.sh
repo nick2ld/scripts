@@ -847,7 +847,9 @@ run_install_step() {
   local log_file
   log_file="$(mktemp)"
   if [[ "${CROWDSEC_TUI_MODE:-}" == "installer" ]] && tui_available; then
+    set +e
     (
+      set +eE
       "$@" >"${log_file}" 2>&1 &
       local pid=$! pct=3 tail_text
       while kill -0 "${pid}" 2>/dev/null; do
@@ -859,6 +861,7 @@ run_install_step() {
       wait "${pid}"
     ) | whiptail --title " Установка " --gauge "${title}" 18 90 0
     local rc=${PIPESTATUS[0]}
+    set -e
     if [[ "${rc}" -eq 0 ]]; then
       rm -f "${log_file}"
       return 0
