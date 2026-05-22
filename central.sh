@@ -36,7 +36,7 @@ DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="2026.05.22-tui-dialogs"
+SCRIPT_VERSION="2026.05.22-tui-fix2"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -47,10 +47,13 @@ is_interactive() { [[ -t 0 ]] || has_tty; }
 has_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
 use_tui() { [[ -n "${CROWDSEC_TUI_MODE:-}" ]] && command -v whiptail >/dev/null 2>&1 && has_tty; }
 is_tui_session() { use_tui; }
-tui_run() { whiptail "$@" </dev/tty >/dev/tty 2>&1; }
+# Диалоги без возврата значения (msgbox, yesno, textbox)
+tui_dialog() { whiptail "$@" </dev/tty >/dev/tty 2>/dev/tty; }
+# Меню и inputbox — результат должен попасть в stdout (не в /dev/tty)
+tui_prompt() { whiptail "$@" </dev/tty 2>/dev/tty; }
 tui_msgbox() {
   local title="$1" text="$2" height="${3:-10}"
-  tui_run --title " ${title} " --ok-button "ОК" --msgbox "${text}" "${height}" 78
+  tui_dialog --title " ${title} " --ok-button "ОК" --msgbox "${text}" "${height}" 78
 }
 pause() {
   if use_tui; then
@@ -104,7 +107,7 @@ show_file() {
   local tmp="$2"
   if is_tui_session; then
     if [[ "${CROWDSEC_TUI_MODE}" =~ ^(whiptail|installer)$ ]] && command -v whiptail >/dev/null 2>&1; then
-      tui_run --title " ${title} " --ok-button "ОК" --textbox "${tmp}" 30 110 || true
+      tui_dialog --title " ${title} " --ok-button "ОК" --textbox "${tmp}" 30 110 || true
     elif command -v less >/dev/null 2>&1; then
       clear || true
       LESS='-R' less "${tmp}" </dev/tty >/dev/tty || true
@@ -374,20 +377,20 @@ tui_yesno_height() {
 
 tui_input() {
   local title="$1" text="$2" default="${3:-}"
-  tui_run --title " ${title} " --ok-button "ОК" --cancel-button "Отмена" --inputbox "${text}" 12 78 "${default}"
+  tui_prompt --title " ${title} " --ok-button "ОК" --cancel-button "Отмена" --inputbox "${text}" 12 78 "${default}"
 }
 
 tui_yesno() {
   local title="$1" text="$2" h
   h="$(tui_yesno_height "${text}")"
-  tui_run --title " ${title} " --yes-button "ОК" --no-button "Отмена" --yesno "${text}" "${h}" 78
+  tui_dialog --title " ${title} " --yes-button "ОК" --no-button "Отмена" --yesno "${text}" "${h}" 78
 }
 
 tui_menu_pick() {
   local title="$1" text="$2" height="$3" width="$4" list_height="$5"
   local cancel_btn="${TUI_CANCEL_LABEL:-Отмена}"
   shift 5
-  tui_run --backtitle "${TUI_BACKTITLE:-CrowdSec Central}" --title " ${title} " \
+  tui_prompt --backtitle "${TUI_BACKTITLE:-CrowdSec Central}" --title " ${title} " \
     --cancel-button "${cancel_btn}" --ok-button "ОК" --notags --menu "${text}" "${height}" "${width}" "${list_height}" "$@"
 }
 
@@ -700,34 +703,59 @@ configure_ufw_full() {
   ok "Firewall настроен."
 }
 
+is_temp_script_path() {
+  local p="$1"
+  case "${p}" in
+    /tmp/*|*/tmp/*|*/menu/tmp/*) return 0 ;;
+  esac
+  return 1
+}
+
+installed_menu_instance() {
+  local self
+  self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+  [[ "${self}" == "$(readlink -f "${INSTALLED_SCRIPT}" 2>/dev/null)" ]] \
+    || [[ "$(basename "${self}")" == "crowdsec-central-menu" ]]
+}
+
 find_this_script() {
-  local src=""
-  if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
-    src="${BASH_SOURCE[0]}"
-  elif [[ -f "$0" ]]; then
-    src="$0"
-  elif [[ -f ./install-central-crowdsec-ui-menu-fixed.sh ]]; then
-    src="./install-central-crowdsec-ui-menu-fixed.sh"
-  elif [[ -f /root/install-central-crowdsec-ui-menu-fixed.sh ]]; then
-    src="/root/install-central-crowdsec-ui-menu-fixed.sh"
-  elif [[ -f /root/install-central-crowdsec-ui-menu.sh ]]; then
-    src="/root/install-central-crowdsec-ui-menu.sh"
+  local candidate resolved
+  for candidate in "${BASH_SOURCE[0]:-}" "$0"; do
+    [[ -n "${candidate}" && -f "${candidate}" ]] || continue
+    resolved="$(readlink -f "${candidate}" 2>/dev/null || echo "${candidate}")"
+    is_temp_script_path "${resolved}" && continue
+    printf '%s\n' "${resolved}"
+    return 0
+  done
+  if [[ -f "${INSTALLED_SCRIPT}" ]]; then
+    readlink -f "${INSTALLED_SCRIPT}"
+    return 0
   fi
-  if [[ -n "${src}" ]]; then
-    readlink -f "${src}"
-  fi
+  for candidate in /root/central.sh ./central.sh ./install-central-crowdsec-ui-menu-fixed.sh \
+    /root/install-central-crowdsec-ui-menu-fixed.sh /root/install-central-crowdsec-ui-menu.sh; do
+    [[ -f "${candidate}" ]] || continue
+    readlink -f "${candidate}"
+    return 0
+  done
+  return 1
 }
 
 install_menu_files() {
   log "Устанавливаю интерактивное меню..."
   local src
   src="$(find_this_script || true)"
-  if [[ -n "${src}" && -f "${src}" ]]; then
-    install -m 0755 "${src}" "${INSTALLED_SCRIPT}"
-    ok "Меню установлено в ${INSTALLED_SCRIPT}"
-  else
-    fail "Не удалось определить путь к скрипту. Сохрани файл на диск и запусти: sudo bash /root/install-central-crowdsec-ui-menu-fixed.sh"
+  if [[ -z "${src}" || ! -f "${src}" ]] || is_temp_script_path "${src}"; then
+    if [[ -f "${INSTALLED_SCRIPT}" ]]; then
+      warn "Источник — временный файл; оставляю уже установленное меню: ${INSTALLED_SCRIPT}"
+      src="${INSTALLED_SCRIPT}"
+    else
+      fail "Не удалось определить путь к скрипту. Скопируй central.sh на сервер и запусти: sudo bash /root/central.sh --install"
+    fi
   fi
+  install -m 0755 "${src}" "${INSTALLED_SCRIPT}"
+  mkdir -p "${CONFIG_DIR}"
+  echo "${SCRIPT_VERSION}" >"${CONFIG_DIR}/menu.version"
+  ok "Меню установлено: ${INSTALLED_SCRIPT} (${SCRIPT_VERSION})"
 
   cat > "${PROFILE_FILE}" <<'PROFILE'
 # CrowdSec Central menu autostart for root interactive login shells
@@ -762,7 +790,9 @@ update_menu_from_github() {
   bash -n "${tmp}"
   install -m 0755 "${tmp}" "${INSTALLED_SCRIPT}"
   rm -f "${tmp}"
-  ok "Меню обновлено: ${INSTALLED_SCRIPT}"
+  mkdir -p "${CONFIG_DIR}"
+  echo "${SCRIPT_VERSION}" >"${CONFIG_DIR}/menu.version"
+  ok "Меню обновлено: ${INSTALLED_SCRIPT} (${SCRIPT_VERSION})"
 }
 
 run_install_step() {
@@ -771,7 +801,7 @@ run_install_step() {
   local log_file
   log_file="$(mktemp)"
   if [[ "${CROWDSEC_TUI_MODE:-}" == "installer" ]] && command -v whiptail >/dev/null 2>&1; then
-    tui_run --title " Установка " --infobox "${title}\n\nПодробный лог пишется во временный файл." 9 72 || true
+    tui_dialog --title " Установка " --infobox "${title}\n\nПодробный лог пишется во временный файл." 9 72 || true
   else
     print_header
     log "${title}"
@@ -783,7 +813,7 @@ run_install_step() {
   fi
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "installer" ]] && command -v whiptail >/dev/null 2>&1; then
-    tui_run --title " Ошибка: ${title} " --ok-button "ОК" --textbox "${log_file}" 30 110 || true
+    tui_dialog --title " Ошибка: ${title} " --ok-button "ОК" --textbox "${log_file}" 30 110 || true
   else
     cat "${log_file}"
   fi
@@ -1286,7 +1316,16 @@ reapply_all_settings() {
 
 disable_login_menu() { print_header; rm -f "${PROFILE_FILE}"; ok "Автозапуск меню отключён."; pause; }
 enable_login_menu() { print_header; install_menu_files; ok "Автозапуск меню включён."; pause; }
-repair_menu_installation() { print_header; update_menu_from_github; ok "Команда меню обновлена: sudo crowdsec-central-menu"; pause; }
+repair_menu_installation() {
+  print_header
+  if command -v curl >/dev/null 2>&1; then
+    update_menu_from_github
+  else
+    install_menu_files
+  fi
+  ok "Команда меню обновлена: sudo crowdsec-central-menu"
+  pause
+}
 
 show_versions() {
   local tmp
@@ -1400,6 +1439,9 @@ menu_loop_whiptail() {
   tui_theme
   export CROWDSEC_TUI_MODE="whiptail"
   export TUI_BACKTITLE="Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}"
+  if [[ -f "${CONFIG_DIR}/menu.version" ]] && [[ "$(cat "${CONFIG_DIR}/menu.version" 2>/dev/null)" != "${SCRIPT_VERSION}" ]]; then
+    warn "На диске другая версия меню ($(cat "${CONFIG_DIR}/menu.version")). Текущий скрипт: ${SCRIPT_VERSION}. Обновите: Настройки меню → Обновить команду меню."
+  fi
   clear || true
   while true; do
     local category choice="" summary
@@ -1580,7 +1622,10 @@ case "${1:-}" in
   --install) full_install ;;
   --menu) menu_loop ;;
   *)
-    if [[ "$(basename "$0")" == "crowdsec-central-menu" || -f "${ENV_FILE}" ]]; then
+    if [[ -f "${ENV_FILE}" ]] && [[ -x "${INSTALLED_SCRIPT}" ]] && ! installed_menu_instance; then
+      exec "${INSTALLED_SCRIPT}" --menu
+    fi
+    if installed_menu_instance || [[ -f "${ENV_FILE}" ]]; then
       menu_loop
     else
       full_install
