@@ -42,6 +42,7 @@ warn() { echo -e "${YELLOW}WARN:${NC} $*"; }
 fail() { echo -e "${RED}ERROR:${NC} $*" >&2; exit 1; }
 pause() { echo; read -rp "Нажми Enter для продолжения..." _ || true; }
 is_interactive() { [[ -t 0 ]]; }
+is_tui_session() { [[ -n "${CROWDSEC_TUI_MODE:-}" && -t 0 && -t 1 ]]; }
 require_interactive_install() {
   if ! is_interactive; then
     fail "Интерактивная установка не работает через pipe. Скачай скрипт во временный файл и запусти его: tmp=\"\$(mktemp)\" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh -o \"\$tmp\" && bash \"\$tmp\"; rc=\$?; rm -f \"\$tmp\"; exit \$rc"
@@ -61,6 +62,32 @@ is_valid_port() {
   local p="${1:-}"
   [[ "${p}" =~ ^[0-9]+$ ]] || return 1
   (( p >= 1 && p <= 65535 ))
+}
+
+show_output() {
+  local title="$1"
+  local tmp
+  tmp="$(mktemp)"
+  cat > "${tmp}"
+  if is_tui_session; then
+    if [[ "${CROWDSEC_TUI_MODE}" == "whiptail" ]] && command -v whiptail >/dev/null 2>&1; then
+      whiptail --title " ${title} " --textbox "${tmp}" 30 110 || true
+    elif command -v less >/dev/null 2>&1; then
+      clear || true
+      LESS='-R' less "${tmp}" || true
+    else
+      clear || true
+      printf '%s\n\n' "${title}"
+      cat "${tmp}"
+      pause
+    fi
+  else
+    clear || true
+    printf '%s\n\n' "${title}"
+    cat "${tmp}"
+    pause
+  fi
+  rm -f "${tmp}"
 }
 
 require_root() {
@@ -516,36 +543,42 @@ full_install() {
 }
 
 show_status() {
-  print_header
-  safe_source_env
-  print_current_settings
-  echo "Статус сервисов:"
-  systemctl is-active --quiet crowdsec && echo "  CrowdSec: работает" || echo "  CrowdSec: не работает"
-  command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker && echo "  Docker: работает" || echo "  Docker: не работает или не установлен"
-  if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -q '^crowdsec-web-ui$'; then
-    echo "  Web UI контейнер: работает"
-  else
-    echo "  Web UI контейнер: не работает"
-  fi
-  echo
-  echo "Порты:"
-  ss -lntp 2>/dev/null | grep -E ":(${WEB_PORT}|${LAPI_PORT})" || echo "  порты ${WEB_PORT}/${LAPI_PORT} не найдены в listen"
+  {
+    print_header
+    safe_source_env
+    print_current_settings
+    echo "Статус сервисов:"
+    systemctl is-active --quiet crowdsec && echo "  CrowdSec: работает" || echo "  CrowdSec: не работает"
+    command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker && echo "  Docker: работает" || echo "  Docker: не работает или не установлен"
+    if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -q '^crowdsec-web-ui$'; then
+      echo "  Web UI контейнер: работает"
+    else
+      echo "  Web UI контейнер: не работает"
+    fi
+    echo
+    echo "Порты:"
+    ss -lntp 2>/dev/null | grep -E ":(${WEB_PORT}|${LAPI_PORT})" || echo "  порты ${WEB_PORT}/${LAPI_PORT} не найдены в listen"
+  } | show_output "Статус"
 }
 
 show_connection_info() {
-  print_header
-  safe_source_env
-  echo "Данные для подключения удалённых серверов:"
-  echo "LAPI URL: ${VPS_LAPI_URL}"
-  echo "Auto-registration token: ${AUTO_REG_TOKEN}"
-  echo "Shared bouncer key: ${SHARED_BOUNCER_KEY}"
-  echo "Allowed IP/CIDR: ${ALLOWED_RANGES:-не заданы}"
-  echo "Веб-морду наружу не пробрасывать: ${LOCAL_WEB_UI}"
+  {
+    print_header
+    safe_source_env
+    echo "Данные для подключения удалённых серверов:"
+    echo "LAPI URL: ${VPS_LAPI_URL}"
+    echo "Auto-registration token: ${AUTO_REG_TOKEN}"
+    echo "Shared bouncer key: ${SHARED_BOUNCER_KEY}"
+    echo "Allowed IP/CIDR: ${ALLOWED_RANGES:-не заданы}"
+    echo "Веб-морду наружу не пробрасывать: ${LOCAL_WEB_UI}"
+  } | show_output "Данные подключения"
 }
 
 show_tokens_file() {
-  print_header
-  [[ -f "${ENV_FILE}" ]] && cat "${ENV_FILE}" || echo "Файл настроек не найден: ${ENV_FILE}"
+  {
+    print_header
+    [[ -f "${ENV_FILE}" ]] && cat "${ENV_FILE}" || echo "Файл настроек не найден: ${ENV_FILE}"
+  } | show_output "central.env"
 }
 
 add_allowed_range() {
@@ -734,9 +767,9 @@ update_system_only() { print_header; upgrade_system_packages; pause; }
 update_docker_only() { print_header; install_or_update_docker; systemctl restart docker || true; [[ -f "${COMPOSE_FILE}" ]] && cd "${COMPOSE_DIR}" && docker compose up -d || true; pause; }
 update_crowdsec_only() { print_header; install_or_update_crowdsec; configure_crowdsec_lapi; create_or_update_webui_machine; create_or_update_shared_bouncer_key; pause; }
 
-show_logs() { print_header; docker logs crowdsec-web-ui --tail 150 2>/dev/null || echo "Контейнер crowdsec-web-ui не найден."; pause; }
-show_crowdsec_info() { print_header; echo "Machines:"; cscli machines list || true; echo; echo "Bouncers:"; cscli bouncers list || true; echo; echo "Alerts:"; cscli alerts list || true; echo; echo "Decisions:"; cscli decisions list || true; pause; }
-show_firewall() { print_header; ufw status verbose || true; pause; }
+show_logs() { { print_header; docker logs crowdsec-web-ui --tail 150 2>&1 || echo "Контейнер crowdsec-web-ui не найден."; } | show_output "Логи Web UI"; }
+show_crowdsec_info() { { print_header; echo "Machines:"; cscli machines list || true; echo; echo "Bouncers:"; cscli bouncers list || true; echo; echo "Alerts:"; cscli alerts list || true; echo; echo "Decisions:"; cscli decisions list || true; } | show_output "CrowdSec"; }
+show_firewall() { { print_header; ufw status verbose || true; } | show_output "Firewall"; }
 
 reapply_all_settings() {
   print_header
@@ -759,23 +792,25 @@ enable_login_menu() { print_header; install_menu_files; ok "Автозапуск
 repair_menu_installation() { print_header; update_menu_from_github; ok "Команда меню обновлена: sudo crowdsec-central-menu"; pause; }
 
 show_versions() {
-  print_header
-  echo "Debian/Ubuntu:"
-  [[ -f /etc/os-release ]] && grep PRETTY_NAME /etc/os-release | cut -d= -f2- | tr -d '"' || true
-  echo; echo "CrowdSec:"; command -v cscli >/dev/null 2>&1 && cscli version || echo "не установлен"
-  echo; echo "Docker:"; command -v docker >/dev/null 2>&1 && { docker --version; docker compose version; } || echo "не установлен"
-  echo; echo "Web UI image:"; command -v docker >/dev/null 2>&1 && docker images "${WEBUI_IMAGE}" || true
-  pause
+  {
+    print_header
+    echo "Debian/Ubuntu:"
+    [[ -f /etc/os-release ]] && grep PRETTY_NAME /etc/os-release | cut -d= -f2- | tr -d '"' || true
+    echo; echo "CrowdSec:"; command -v cscli >/dev/null 2>&1 && cscli version || echo "не установлен"
+    echo; echo "Docker:"; command -v docker >/dev/null 2>&1 && { docker --version; docker compose version; } || echo "не установлен"
+    echo; echo "Web UI image:"; command -v docker >/dev/null 2>&1 && docker images "${WEBUI_IMAGE}" || true
+  } | show_output "Версии"
 }
 
 test_webui_lapi() {
-  print_header
-  echo "Проверяю LAPI с хоста:"
-  curl -i "http://127.0.0.1:${LAPI_PORT}/health" || true
-  echo
-  echo "Проверяю LAPI из контейнера Web UI через node fetch:"
-  docker exec crowdsec-web-ui sh -lc "node -e 'fetch(\"http://host.docker.internal:${LAPI_PORT}/health\").then(r=>r.text()).then(console.log).catch(e=>{console.error(e); process.exit(1)})'" || true
-  pause
+  {
+    print_header
+    echo "Проверяю LAPI с хоста:"
+    curl -i "http://127.0.0.1:${LAPI_PORT}/health" || true
+    echo
+    echo "Проверяю LAPI из контейнера Web UI через node fetch:"
+    docker exec crowdsec-web-ui sh -lc "node -e 'fetch(\"http://host.docker.internal:${LAPI_PORT}/health\").then(r=>r.text()).then(console.log).catch(e=>{console.error(e); process.exit(1)})'" || true
+  } | show_output "Проверка LAPI"
 }
 
 tui_theme() {
@@ -938,6 +973,7 @@ fzf_pick() {
 menu_loop_fzf() {
   require_root
   export TERM="${TERM:-xterm-256color}"
+  export CROWDSEC_TUI_MODE="fzf"
   clear || true
   while true; do
     local category
@@ -957,6 +993,7 @@ menu_loop_fzf() {
 menu_loop_whiptail() {
   require_root
   tui_theme
+  export CROWDSEC_TUI_MODE="whiptail"
   clear || true
   while true; do
     local choice
