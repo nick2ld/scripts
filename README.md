@@ -1,28 +1,33 @@
 # Useful Scripts
 
+<a id="ru"></a>
 ## Русский
 
-Набор полезных скриптов для администрирования серверов.
+Репозиторий задуман как каталог полезных серверных скриптов. Каждый набор скриптов лежит в отдельном каталоге со своей документацией.
 
 ### Оглавление
 
-- [CrowdSec Central + VPS](#crowdsec-central--vps-ru)
-- [English](#english)
+- [Каталог скриптов](#ru-catalog)
+- [CrowdSec Central + VPS](#ru-crowdsec)
+- [English](#en)
 
-### CrowdSec Central + VPS {#crowdsec-central--vps-ru}
+<a id="ru-catalog"></a>
+### Каталог скриптов
 
-Каталог: [`crowdsec/`](./crowdsec/)
+| Набор | Каталог | Описание |
+| --- | --- | --- |
+| CrowdSec Central + VPS | [`crowdsec/`](./crowdsec/) | Установка central-сервера CrowdSec Manager и подключение VPS/node к центральному LAPI. |
 
-Версия: `v0.1.0` от `2026-05-22`.
+<a id="ru-crowdsec"></a>
+### CrowdSec Central + VPS
 
-Скрипты:
+Версия: `v0.1` от `2026-05-22`.
 
-- [`crowdsec/central.sh`](./crowdsec/central.sh) - установка и управление central-сервером CrowdSec: LAPI, Dockerized CrowdSec, CrowdSec Manager, мастер подключения VPS.
-- [`crowdsec/vps.sh`](./crowdsec/vps.sh) - подключение VPS/node к central LAPI, firewall bouncer, выбор и управление CrowdSec Hub collections/scenarios/parsers/appsec/context.
+Файлы:
 
-Документация:
-
-- [`crowdsec/README.md`](./crowdsec/README.md)
+- [`crowdsec/central.sh`](./crowdsec/central.sh) - central-сервер: Dockerized CrowdSec, LAPI, CrowdSec Manager, мастер подключения VPS.
+- [`crowdsec/vps.sh`](./crowdsec/vps.sh) - VPS/node: подключение к central LAPI, firewall bouncer, выбор и управление CrowdSec Hub elements.
+- [`crowdsec/README.md`](./crowdsec/README.md) - подробная документация на русском и английском.
 
 Быстрый запуск central:
 
@@ -30,35 +35,42 @@
 tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/crowdsec/central.sh -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
 ```
 
-Быстрый запуск VPS:
+Быстрый запуск VPS/node:
 
 ```bash
 tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/crowdsec/vps.sh -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
 ```
 
+Важно: старые URL `.../main/central.sh` и `.../main/vps.sh` больше не используются. Скрипты находятся в каталоге `crowdsec/`.
+
+<a id="en"></a>
 ## English
 
-A collection of useful server administration scripts.
+This repository is a catalog of useful server scripts. Each script set lives in its own directory with dedicated documentation.
 
 ### Table Of Contents
 
-- [CrowdSec Central + VPS](#crowdsec-central--vps-en)
-- [Русский](#русский)
+- [Script Catalog](#en-catalog)
+- [CrowdSec Central + VPS](#en-crowdsec)
+- [Русский](#ru)
 
-### CrowdSec Central + VPS {#crowdsec-central--vps-en}
+<a id="en-catalog"></a>
+### Script Catalog
 
-Directory: [`crowdsec/`](./crowdsec/)
+| Set | Directory | Description |
+| --- | --- | --- |
+| CrowdSec Central + VPS | [`crowdsec/`](./crowdsec/) | Install a CrowdSec Manager central server and connect VPS/node machines to the central LAPI. |
 
-Version: `v0.1.0`, released on `2026-05-22`.
+<a id="en-crowdsec"></a>
+### CrowdSec Central + VPS
 
-Scripts:
+Version: `v0.1`, released on `2026-05-22`.
 
-- [`crowdsec/central.sh`](./crowdsec/central.sh) - install and manage a CrowdSec central server: LAPI, Dockerized CrowdSec, CrowdSec Manager, VPS onboarding wizard.
-- [`crowdsec/vps.sh`](./crowdsec/vps.sh) - connect a VPS/node to central LAPI, firewall bouncer, select/manage CrowdSec Hub collections/scenarios/parsers/appsec/context.
+Files:
 
-Documentation:
-
-- [`crowdsec/README.md`](./crowdsec/README.md)
+- [`crowdsec/central.sh`](./crowdsec/central.sh) - central server: Dockerized CrowdSec, LAPI, CrowdSec Manager, VPS onboarding wizard.
+- [`crowdsec/vps.sh`](./crowdsec/vps.sh) - VPS/node: connect to central LAPI, firewall bouncer, select and manage CrowdSec Hub elements.
+- [`crowdsec/README.md`](./crowdsec/README.md) - detailed documentation in Russian and English.
 
 Quick start for central:
 
@@ -66,8 +78,10 @@ Quick start for central:
 tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/crowdsec/central.sh -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
 ```
 
-Quick start for VPS:
+Quick start for VPS/node:
 
 ```bash
 tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/nick2ld/scripts/main/crowdsec/vps.sh -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; [ "$rc" -eq 0 ]
 ```
+
+Note: old URLs `.../main/central.sh` and `.../main/vps.sh` are no longer used. Scripts are under the `crowdsec/` directory.

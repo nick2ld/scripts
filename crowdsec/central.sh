@@ -37,7 +37,7 @@ DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.1.0"
+SCRIPT_VERSION="v0.1"
 SCRIPT_RELEASE_DATE="2026-05-22"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/crowdsec/central.sh"
 
@@ -992,7 +992,7 @@ show_connection_info() {
       echo "Пока нет сохранённых подключений."
       echo
       echo "Создай подключение через:"
-      echo "  Доступ к LAPI -> Создать подключение VPS"
+      echo "  Подключения VPS и LAPI -> Создать подключение VPS"
       echo
       echo "Мастер спросит имя VPS и его внешний IP, сам добавит доступ к LAPI и создаст bouncer key."
     else

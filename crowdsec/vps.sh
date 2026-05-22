@@ -24,7 +24,7 @@ NC='\033[0m'
 CONFIG_DIR="/root/crowdsec-vps-node"
 ENV_FILE="${CONFIG_DIR}/node.env"
 FAIL2BAN_BACKUP_DIR="${CONFIG_DIR}/fail2ban-backup"
-SCRIPT_VERSION="v0.1.0"
+SCRIPT_VERSION="v0.1"
 SCRIPT_RELEASE_DATE="2026-05-22"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -268,7 +268,7 @@ ask_settings() {
     whiptail --title " CrowdSec VPS Node " --msgbox "Подключение VPS к центральному CrowdSec LAPI.\n\nДанные возьми в меню центрального сервера: sudo crowdsec-central-menu" 12 78
     CENTRAL_LAPI_URL="$(tui_input "Central LAPI" "Central LAPI URL" "${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}")" || exit 1
     AUTO_REG_TOKEN="$(tui_input "Central LAPI" "AUTO_REG_TOKEN" "${AUTO_REG_TOKEN:-}")" || exit 1
-    SHARED_BOUNCER_KEY="$(tui_input "Firewall Bouncer" "BOUNCER_KEY\n\nЛучше создать индивидуальный ключ на central:\nСеть и ключи -> Создать bouncer key с именем VPS.\nТогда это имя будет видно в CrowdSec Manager." "${SHARED_BOUNCER_KEY:-}")" || exit 1
+    SHARED_BOUNCER_KEY="$(tui_input "Firewall Bouncer" "BOUNCER_KEY\n\nЛучше создать индивидуальное подключение на central:\nПодключения VPS и LAPI -> Создать подключение VPS.\nТогда имя будет видно в CrowdSec Manager." "${SHARED_BOUNCER_KEY:-}")" || exit 1
     MACHINE_NAME="$(tui_input "Machine" "Machine name" "${MACHINE_NAME}")" || exit 1
     if tui_yesno "Firewall Bouncer" "Ставить firewall-bouncer для автоматической блокировки IP?"; then
       INSTALL_FIREWALL_BOUNCER="yes"
@@ -302,8 +302,9 @@ ask_settings() {
   echo
   echo "На центральном сервере открой:"
   echo "  sudo crowdsec-central-menu"
-  echo "Пункт 2 покажет LAPI URL, AUTO_REG_TOKEN и SHARED_BOUNCER_KEY."
-  echo "Перед установкой добавь внешний IP этого VPS в allowed IP/CIDR на центральном сервере."
+  echo "В меню central открой: Подключения VPS и LAPI -> Создать подключение VPS."
+  echo "Мастер покажет LAPI URL, AUTO_REG_TOKEN, BOUNCER_KEY и Machine name."
+  echo "IP VPS добавлять вручную в CIDR не нужно: это делает мастер central."
   echo
   prompt_default input_lapi "Central LAPI URL [${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}]: " "${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}"
   CENTRAL_LAPI_URL="${input_lapi:-${CENTRAL_LAPI_URL}}"
@@ -315,7 +316,7 @@ ask_settings() {
   [[ -n "${AUTO_REG_TOKEN}" ]] || fail "AUTO_REG_TOKEN не может быть пустым."
   [[ "${AUTO_REG_TOKEN}" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "AUTO_REG_TOKEN содержит недопустимые символы."
 
-  prompt_default input_bouncer "BOUNCER_KEY (лучше индивидуальный ключ из central-меню для имени VPS в Manager): " "${SHARED_BOUNCER_KEY:-}"
+  prompt_default input_bouncer "BOUNCER_KEY из мастера подключения VPS на central: " "${SHARED_BOUNCER_KEY:-}"
   SHARED_BOUNCER_KEY="${input_bouncer:-${SHARED_BOUNCER_KEY}}"
   if [[ -n "${SHARED_BOUNCER_KEY}" ]] && [[ ! "${SHARED_BOUNCER_KEY}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
     fail "SHARED_BOUNCER_KEY содержит недопустимые символы."
