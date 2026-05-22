@@ -42,7 +42,7 @@ tui_available() {
 whiptail() {
   local bin
   if bin="$(type -P dialog 2>/dev/null)"; then
-    local args=()
+    local args=(--no-mouse)
     local nl arg
     printf -v nl '\n'
     while (($#)); do

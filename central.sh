@@ -36,7 +36,7 @@ DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="2026.05.22-manager-full-dialog-format"
+SCRIPT_VERSION="2026.05.22-manager-full-dialog-copy"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -63,7 +63,7 @@ tui_available() {
 whiptail() {
   local bin
   if bin="$(type -P dialog 2>/dev/null)"; then
-    local args=()
+    local args=(--no-mouse)
     local nl arg
     printf -v nl '\n'
     while (($#)); do
