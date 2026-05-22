@@ -28,12 +28,14 @@ CONFIG_DIR="/root/crowdsec-central"
 ENV_FILE="${CONFIG_DIR}/central.env"
 COMPOSE_DIR="/opt/crowdsec-web-ui"
 COMPOSE_FILE="${COMPOSE_DIR}/docker-compose.yml"
+MANAGER_COMPOSE_DIR="/opt/crowdsec-manager"
+MANAGER_COMPOSE_FILE="${MANAGER_COMPOSE_DIR}/docker-compose.yml"
 INSTALLED_SCRIPT="/usr/local/sbin/crowdsec-central-menu"
 PROFILE_FILE="/etc/profile.d/crowdsec-central-menu.sh"
 DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
-SCRIPT_VERSION="2026.05.22-ru-whiptail"
+SCRIPT_VERSION="2026.05.22-webui-lifecycle"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -915,6 +917,94 @@ show_firewall() {
   rm -f "${tmp}"
 }
 
+detect_web_uis() {
+  local found="no"
+  echo "Обнаруженные веб-морды:"
+  if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^crowdsec-web-ui$'; then
+    echo "  - Simple Web UI: контейнер crowdsec-web-ui"
+    found="yes"
+  fi
+  if [[ -f "${COMPOSE_FILE}" ]]; then
+    echo "  - Simple Web UI: ${COMPOSE_FILE}"
+    found="yes"
+  fi
+  if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^crowdsec-manager$'; then
+    echo "  - CrowdSec Manager: контейнер crowdsec-manager"
+    found="yes"
+  fi
+  if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
+    echo "  - CrowdSec Manager: ${MANAGER_COMPOSE_FILE}"
+    found="yes"
+  fi
+  [[ "${found}" == "yes" ]] || echo "  не найдены"
+}
+
+show_web_ui_installations() {
+  local tmp
+  tmp="$(mktemp)"
+  { print_header; detect_web_uis; } >"${tmp}"
+  show_file "Веб-морды" "${tmp}"
+  rm -f "${tmp}"
+}
+
+remove_simple_web_ui() {
+  print_header
+  if ! tui_yesno "Удаление Web UI" "Удалить Simple Web UI (crowdsec-web-ui) и его compose-файлы?\n\nДанные CrowdSec/LAPI не будут затронуты."; then
+    echo "Отменено."
+    pause
+    return
+  fi
+  if [[ -f "${COMPOSE_FILE}" ]]; then
+    (cd "${COMPOSE_DIR}" && docker compose down --remove-orphans) || true
+  else
+    docker rm -f crowdsec-web-ui >/dev/null 2>&1 || true
+  fi
+  rm -rf "${COMPOSE_DIR}"
+  ok "Simple Web UI удалена. CrowdSec engine и LAPI не тронуты."
+  pause
+}
+
+reinstall_simple_web_ui() {
+  print_header
+  if ! tui_yesno "Переустановка Web UI" "Переустановить Simple Web UI?\n\nСтарый контейнер и compose-директория будут удалены. CrowdSec/LAPI не будут затронуты."; then
+    echo "Отменено."
+    pause
+    return
+  fi
+  if [[ -f "${COMPOSE_FILE}" ]]; then
+    (cd "${COMPOSE_DIR}" && docker compose down --remove-orphans) || true
+  else
+    docker rm -f crowdsec-web-ui >/dev/null 2>&1 || true
+  fi
+  rm -rf "${COMPOSE_DIR}"
+  create_or_update_webui_machine
+  install_or_update_web_ui
+  configure_ufw_full
+  ok "Simple Web UI переустановлена."
+  pause
+}
+
+show_crowdsec_manager_note() {
+  local tmp
+  tmp="$(mktemp)"
+  {
+    print_header
+    echo "CrowdSec Manager пока не устанавливается автоматически этим скриптом."
+    echo
+    echo "Причина:"
+    echo "  текущий central использует CrowdSec как apt/systemd-сервис;"
+    echo "  типовой CrowdSec Manager standalone-compose поднимает свой CrowdSec-контейнер;"
+    echo "  автоматическая замена engine на Docker может сломать существующий central LAPI для VPS."
+    echo
+    echo "Безопасный путь:"
+    echo "  1. оставить apt/systemd CrowdSec как стабильный central LAPI;"
+    echo "  2. добавить CrowdSec Manager только после отдельной проверки режима INCLUDE_CROWDSEC=false;"
+    echo "  3. не менять порт LAPI 8080 и bouncer keys без явного подтверждения."
+  } >"${tmp}"
+  show_file "CrowdSec Manager" "${tmp}"
+  rm -f "${tmp}"
+}
+
 reapply_all_settings() {
   print_header
   echo "Повторное применение всех настроек."
@@ -1030,6 +1120,10 @@ run_menu_action() {
     update_docker) update_docker_only ;;
     update_crowdsec) update_crowdsec_only ;;
     versions) show_versions ;;
+    webui_detect) show_web_ui_installations ;;
+    webui_reinstall) reinstall_simple_web_ui ;;
+    webui_remove) remove_simple_web_ui ;;
+    manager_note) show_crowdsec_manager_note ;;
     repair_menu) repair_menu_installation ;;
     test_lapi) test_webui_lapi ;;
     exit) exit 0 ;;
@@ -1051,10 +1145,11 @@ menu_loop_whiptail() {
       --ok-button "Выбрать" \
       --notags \
       --menu "Выберите раздел:\nИспользуйте TAB или стрелки для навигации, ENTER для выбора.\n\n${summary}" \
-      22 76 7 \
+      23 76 8 \
       "status" "Статус и данные" \
       "access" "Доступ к LAPI" \
       "network" "Сеть и ключи" \
+      "webui" "Веб-морда" \
       "service" "Обслуживание" \
       "system" "Обновления и диагностика" \
       "menu" "Настройки меню" \
@@ -1086,6 +1181,14 @@ menu_loop_whiptail() {
           "auto_token" "Перегенерировать auto-registration token" \
           "bouncer_key" "Перегенерировать shared bouncer key" \
           "test_lapi" "Проверить доступ Web UI к LAPI" \
+          3>&1 1>&2 2>&3)" || continue
+        ;;
+      webui)
+        choice="$(whiptail --backtitle "Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}" --title " Веб-морда " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 19 76 6 \
+          "webui_detect" "Показать установленные веб-морды" \
+          "webui_reinstall" "Переустановить Simple Web UI" \
+          "webui_remove" "Удалить Simple Web UI" \
+          "manager_note" "CrowdSec Manager: статус интеграции" \
           3>&1 1>&2 2>&3)" || continue
         ;;
       service)
