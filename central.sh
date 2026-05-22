@@ -1161,6 +1161,7 @@ reinstall_simple_web_ui() {
 }
 
 show_crowdsec_manager_note() {
+  safe_source_env
   local tmp
   tmp="$(mktemp)"
   {
@@ -1183,6 +1184,7 @@ show_crowdsec_manager_note() {
 }
 
 migrate_to_crowdsec_manager() {
+  safe_source_env
   print_header
   if ! tui_yesno "Миграция на CrowdSec Manager" "Будет выполнено:\n\n- backup /etc/crowdsec и /var/lib/crowdsec;\n- удаление apt/systemd CrowdSec;\n- удаление текущих веб-морд;\n- установка Dockerized CrowdSec + CrowdSec Manager;\n- сохранение текущего LAPI-порта ${LAPI_PORT}.\n\nПродолжить?"; then
     echo "Отменено."
@@ -1232,6 +1234,7 @@ show_versions() {
 }
 
 test_webui_lapi() {
+  safe_source_env
   local tmp
   tmp="$(mktemp)"
   {
