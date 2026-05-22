@@ -33,7 +33,7 @@ PROFILE_FILE="/etc/profile.d/crowdsec-central-menu.sh"
 DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
-SCRIPT_VERSION="2026.05.22-compact-fzf"
+SCRIPT_VERSION="2026.05.22-tui-installer"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/main/central.sh"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
@@ -70,7 +70,7 @@ show_output() {
   tmp="$(mktemp)"
   cat > "${tmp}"
   if is_tui_session; then
-    if [[ "${CROWDSEC_TUI_MODE}" == "whiptail" ]] && command -v whiptail >/dev/null 2>&1; then
+    if [[ "${CROWDSEC_TUI_MODE}" =~ ^(whiptail|installer)$ ]] && command -v whiptail >/dev/null 2>&1; then
       whiptail --title " ${title} " --textbox "${tmp}" 30 110 || true
     elif command -v less >/dev/null 2>&1; then
       clear || true
@@ -309,6 +309,47 @@ ask_initial_settings() {
   save_env
 }
 
+bootstrap_installer_tui() {
+  command -v whiptail >/dev/null 2>&1 && return 0
+  command -v apt-get >/dev/null 2>&1 || return 1
+  clear || true
+  echo "Preparing interactive installer..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y >/tmp/crowdsec-menu-bootstrap.log 2>&1 || return 1
+  apt-get install -y whiptail >>/tmp/crowdsec-menu-bootstrap.log 2>&1 || return 1
+  command -v whiptail >/dev/null 2>&1
+}
+
+tui_input() {
+  local title="$1"
+  local text="$2"
+  local default="${3:-}"
+  whiptail --title " ${title} " --inputbox "${text}" 10 78 "${default}" 3>&1 1>&2 2>&3
+}
+
+tui_yesno() {
+  local title="$1"
+  local text="$2"
+  whiptail --title " ${title} " --yes-button "Да" --no-button "Нет" --yesno "${text}" 10 78
+}
+
+ask_initial_settings_tui() {
+  safe_source_env
+  DETECTED_IP="$(get_lan_ip)"
+  [[ -n "${DETECTED_IP}" ]] || DETECTED_IP="${LAN_IP}"
+
+  LAN_IP="$(tui_input "Начальная настройка" "LAN IP для Web UI и локального LAPI" "${DETECTED_IP}")" || exit 1
+  WEB_PORT="$(tui_input "Начальная настройка" "Порт Web UI" "${WEB_PORT:-3000}")" || exit 1
+  LAPI_PORT="$(tui_input "Начальная настройка" "Порт центрального LAPI" "${LAPI_PORT:-8080}")" || exit 1
+  ALLOWED_RANGES="$(tui_input "Доступ к LAPI" "Allowed IP/CIDR для LAPI. Можно оставить пустым." "${ALLOWED_RANGES:-}")" || exit 1
+  PUBLIC_ADDR="$(tui_input "Внешний адрес" "Внешний IP или DDNS для готовой команды подключения VPS. Можно оставить пустым." "${PUBLIC_ADDR:-}")" || exit 1
+
+  [[ -n "${AUTO_REG_TOKEN:-}" ]] || AUTO_REG_TOKEN="$(openssl rand -hex 32)"
+  [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || SHARED_BOUNCER_KEY="$(openssl rand -hex 32)"
+  [[ -n "${WEBUI_PASSWORD:-}" ]] || WEBUI_PASSWORD="$(openssl rand -hex 24)"
+  save_env
+}
+
 configure_crowdsec_lapi() {
   safe_source_env
   if [[ -z "${AUTO_REG_TOKEN:-}" ]]; then
@@ -501,6 +542,32 @@ update_menu_from_github() {
   ok "Меню обновлено: ${INSTALLED_SCRIPT}"
 }
 
+run_install_step() {
+  local title="$1"
+  shift
+  local log_file
+  log_file="$(mktemp)"
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "installer" ]] && command -v whiptail >/dev/null 2>&1; then
+    whiptail --title " Установка " --infobox "${title}\n\nПодробный лог пишется во временный файл." 9 72 || true
+  else
+    print_header
+    log "${title}"
+  fi
+
+  if "$@" >"${log_file}" 2>&1; then
+    rm -f "${log_file}"
+    return 0
+  fi
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "installer" ]] && command -v whiptail >/dev/null 2>&1; then
+    whiptail --title " Ошибка: ${title} " --textbox "${log_file}" 30 110 || true
+  else
+    cat "${log_file}"
+  fi
+  rm -f "${log_file}"
+  fail "Этап установки завершился ошибкой: ${title}"
+}
+
 show_install_result() {
   safe_source_env
   echo
@@ -517,11 +584,43 @@ show_install_result() {
   echo "============================================================"
 }
 
+show_install_result_tui() {
+  {
+    show_install_result
+  } | show_output "Установка завершена"
+}
+
 full_install() {
   require_root
   detect_debian
-  print_header
   require_interactive_install
+  if bootstrap_installer_tui; then
+    export CROWDSEC_TUI_MODE="installer"
+    tui_theme
+    whiptail --title " CrowdSec Central " --msgbox "Установка CrowdSec Central LAPI + Web UI.\n\nВсе параметры можно будет изменить позже через меню." 12 78
+    if tui_yesno "Обновление системы" "Перед установкой обновить системные пакеты Debian?"; then
+      do_upgrade="Y"
+    else
+      do_upgrade="N"
+    fi
+    ask_initial_settings_tui
+    run_install_step "Устанавливаю базовые пакеты" install_base
+    if [[ ! "${do_upgrade:-Y}" =~ ^[Nn]$ ]]; then
+      run_install_step "Обновляю системные пакеты Debian" upgrade_system_packages
+    fi
+    run_install_step "Устанавливаю или обновляю Docker" install_or_update_docker
+    run_install_step "Устанавливаю или обновляю CrowdSec" install_or_update_crowdsec
+    run_install_step "Настраиваю CrowdSec LAPI" configure_crowdsec_lapi
+    run_install_step "Создаю machine account для Web UI" create_or_update_webui_machine
+    run_install_step "Создаю shared bouncer key" create_or_update_shared_bouncer_key
+    run_install_step "Запускаю Web UI" install_or_update_web_ui
+    run_install_step "Настраиваю UFW firewall" configure_ufw_full
+    run_install_step "Устанавливаю команду меню" install_menu_files
+    show_install_result_tui
+    return
+  fi
+
+  print_header
   echo "Установка CrowdSec Central LAPI + Web UI + меню управления."
   echo "Необязательные параметры можно пропустить и изменить позже."
   echo
