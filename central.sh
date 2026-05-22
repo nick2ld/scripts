@@ -1402,7 +1402,7 @@ menu_loop_whiptail() {
   export TUI_BACKTITLE="Панель управления CrowdSec Central | версия ${SCRIPT_VERSION}"
   clear || true
   while true; do
-    local category choice summary
+    local category choice="" summary
     summary="$(tui_summary)"
     TUI_CANCEL_LABEL="Выход"
     category="$(tui_menu_pick "CrowdSec Central" \
@@ -1417,6 +1417,9 @@ menu_loop_whiptail() {
       "menu" "Настройки меню" \
       "exit" "Выход")" || exit 0
     unset TUI_CANCEL_LABEL
+    category="${category//$'\r'/}"
+    category="${category//$'\n'/}"
+    [[ -z "${category}" ]] && continue
     [[ "${category}" == "exit" ]] && exit 0
 
     case "${category}" in
@@ -1472,7 +1475,11 @@ menu_loop_whiptail() {
           "enable_autostart" "Включить автозапуск меню при входе" \
           "repair_menu" "Обновить или переустановить команду меню")" || continue
         ;;
+      *)
+        continue
+        ;;
     esac
+    [[ -n "${choice}" ]] || continue
     run_menu_action "${choice}"
   done
 }
