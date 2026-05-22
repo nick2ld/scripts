@@ -43,7 +43,12 @@ log() { echo -e "${BLUE}==>${NC} $*"; }
 ok() { echo -e "${GREEN}OK:${NC} $*"; }
 warn() { echo -e "${YELLOW}WARN:${NC} $*"; }
 fail() { echo -e "${RED}ERROR:${NC} $*" >&2; exit 1; }
-pause() { echo; read -rp "Нажми Enter для продолжения..." _ || true; }
+pause() {
+  if [[ "${CROWDSEC_TUI_MODE:-}" != "whiptail" && "${CROWDSEC_TUI_MODE:-}" != "installer" ]]; then
+    echo
+    read -rp "Нажми Enter для продолжения..." _ || true
+  fi
+}
 is_interactive() { [[ -t 0 ]]; }
 has_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
 is_tui_session() { [[ -n "${CROWDSEC_TUI_MODE:-}" && -t 1 && -r /dev/tty ]]; }
@@ -75,6 +80,34 @@ show_output() {
   cat > "${tmp}"
   show_file "${title}" "${tmp}"
   rm -f "${tmp}"
+}
+
+run_menu_step() {
+  local title="$1"
+  shift
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    local log_file
+    log_file="$(mktemp)"
+    whiptail --title " Выполнение " --infobox "${title}...\nПожалуйста, подождите." 8 78
+    if "$@" >"${log_file}" 2>&1; then
+      rm -f "${log_file}"
+      whiptail --title " Успех " --msgbox "${title} успешно завершено." 8 78
+      return 0
+    else
+      whiptail --title " Ошибка " --textbox "${log_file}" 30 110
+      rm -f "${log_file}"
+      return 1
+    fi
+  else
+    log "${title}..."
+    if "$@"; then
+      ok "${title} завершено."
+      return 0
+    else
+      warn "${title} заверсилось с ошибкой."
+      return 1
+    fi
+  fi
 }
 
 show_file() {
@@ -433,12 +466,21 @@ create_or_update_shared_bouncer_key() {
   safe_source_env
   [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || SHARED_BOUNCER_KEY="$(openssl rand -hex 32)"
   save_env
-  if cscli bouncers list 2>/dev/null | grep -q "shared-firewall-bouncer"; then
-    ok "Bouncer shared-firewall-bouncer уже существует."
-    return
+  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+    if docker exec crowdsec cscli bouncers list 2>/dev/null | grep -q "shared-firewall-bouncer"; then
+      ok "Bouncer shared-firewall-bouncer уже существует в Docker."
+      return
+    fi
+    log "Создаю общий bouncer key для удалённых серверов в Docker..."
+    docker exec crowdsec cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
+  else
+    if cscli bouncers list 2>/dev/null | grep -q "shared-firewall-bouncer"; then
+      ok "Bouncer shared-firewall-bouncer уже существует."
+      return
+    fi
+    log "Создаю общий bouncer key для удалённых серверов..."
+    cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
   fi
-  log "Создаю общий bouncer key для удалённых серверов..."
-  cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
   ok "Bouncer key готов."
 }
 
@@ -860,44 +902,100 @@ show_tokens_file() {
 }
 
 add_allowed_range() {
-  print_header
   safe_source_env
-  echo "Добавление IP/CIDR для доступа к LAPI. Пример: 11.22.33.44/32"
-  read -rp "Введи IP/CIDR: " new_range
-  new_range="$(printf '%s' "${new_range}" | tr -cd '0-9A-Za-z.:/_-')"
-  if [[ -z "${new_range}" ]]; then warn "Пусто. Ничего не добавлено."; pause; return; fi
-  if [[ ! "${new_range}" =~ ^[0-9a-fA-F:.]+/[0-9]{1,3}$ ]]; then
-    warn "Похоже, это не CIDR."
-    read -rp "Всё равно добавить? [y/N]: " confirm
-    [[ "${confirm:-N}" =~ ^[Yy]$ ]] || { echo "Отменено."; pause; return; }
+  local new_range
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    new_range=$(whiptail --title " Добавление IP/CIDR " --inputbox "Введите IP/CIDR для добавления к LAPI (например, 11.22.33.44/32):" 10 78 3>&1 1>&2 2>&3) || return
+  else
+    print_header
+    echo "Добавление IP/CIDR для доступа к LAPI. Пример: 11.22.33.44/32"
+    read -rp "Введи IP/CIDR: " new_range
   fi
-  if [[ -z "${ALLOWED_RANGES}" ]]; then ALLOWED_RANGES="${new_range}"; else
-    if echo ",${ALLOWED_RANGES}," | grep -q ",${new_range},"; then warn "Этот IP/CIDR уже есть."; pause; return; fi
+
+  new_range="$(printf '%s' "${new_range}" | tr -cd '0-9A-Za-z.:/_-')"
+  if [[ -z "${new_range}" ]]; then
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+      whiptail --title " Ошибка " --msgbox "IP/CIDR не может быть пустым." 8 78
+    else
+      warn "Пусто. Ничего не добавлено."
+      pause
+    fi
+    return
+  fi
+
+  if [[ ! "${new_range}" =~ ^[0-9a-fA-F:.]+/[0-9]{1,3}$ ]]; then
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+      whiptail --title " Предупреждение " --yes-button "Добавить" --no-button "Отмена" --yesno "Похоже, это не CIDR.\nВсё равно добавить?" 10 78 || return
+    else
+      warn "Похоже, это не CIDR."
+      read -rp "Всё равно добавить? [y/N]: " confirm
+      [[ "${confirm:-N}" =~ ^[Yy]$ ]] || { echo "Отменено."; pause; return; }
+    fi
+  fi
+
+  if [[ -z "${ALLOWED_RANGES}" ]]; then
+    ALLOWED_RANGES="${new_range}"
+  else
+    if echo ",${ALLOWED_RANGES}," | grep -q ",${new_range},"; then
+      if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+        whiptail --title " Ошибка " --msgbox "Этот IP/CIDR уже есть в списке." 8 78
+      else
+        warn "Этот IP/CIDR уже есть."
+        pause
+      fi
+      return
+    fi
     ALLOWED_RANGES="${ALLOWED_RANGES},${new_range}"
   fi
+
   save_env
   configure_crowdsec_lapi
   configure_ufw_full
-  ok "IP/CIDR добавлен: ${new_range}"
-  pause
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    whiptail --title " Успех " --msgbox "IP/CIDR добавлен: ${new_range}" 8 78
+  else
+    ok "IP/CIDR добавлен: ${new_range}"
+    pause
+  fi
 }
 
 remove_allowed_range() {
-  print_header
   safe_source_env
-  if [[ -z "${ALLOWED_RANGES}" ]]; then echo "Список Allowed IP/CIDR пуст."; pause; return; fi
-  echo "Удаление IP/CIDR по номеру:"
-  IFS=',' read -ra items <<< "${ALLOWED_RANGES}"
-  for i in "${!items[@]}"; do echo "$((i+1)) - ${items[$i]}"; done
-  echo
-  read -rp "Введи номер пункта для удаления или Enter для отмены: " remove_num
-  [[ -n "${remove_num}" ]] || { echo "Отменено."; pause; return; }
-  [[ "${remove_num}" =~ ^[0-9]+$ ]] || { warn "Нужно ввести номер."; pause; return; }
-  if (( remove_num < 1 || remove_num > ${#items[@]} )); then
-    warn "Номер вне диапазона."
-    pause
+  if [[ -z "${ALLOWED_RANGES}" ]]; then
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+      whiptail --title " Удаление IP/CIDR " --msgbox "Список Allowed IP/CIDR пуст." 8 78
+    else
+      echo "Список Allowed IP/CIDR пуст."
+      pause
+    fi
     return
   fi
+
+  local remove_num
+  IFS=',' read -ra items <<< "${ALLOWED_RANGES}"
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    local menu_args=()
+    for i in "${!items[@]}"; do
+      menu_args+=("$((i+1))" "${items[$i]}")
+    done
+    remove_num=$(whiptail --title " Удаление IP/CIDR " --cancel-button "Отмена" --ok-button "Удалить" --menu "Выберите пункт для удаления:" 18 78 8 "${menu_args[@]}" 3>&1 1>&2 2>&3) || return
+  else
+    print_header
+    echo "Удаление IP/CIDR по номеру:"
+    for i in "${!items[@]}"; do echo "$((i+1)) - ${items[$i]}"; done
+    echo
+    read -rp "Введи номер пункта для удаления или Enter для отмены: " remove_num
+    [[ -n "${remove_num}" ]] || { echo "Отменено."; pause; return; }
+    [[ "${remove_num}" =~ ^[0-9]+$ ]] || { warn "Нужно ввести номер."; pause; return; }
+    if (( remove_num < 1 || remove_num > ${#items[@]} )); then
+      warn "Номер вне диапазона."
+      pause
+      return
+    fi
+  fi
+
   local new_list=""
   for i in "${!items[@]}"; do
     if [[ $((i+1)) -ne ${remove_num} ]]; then
@@ -910,101 +1008,185 @@ remove_allowed_range() {
   save_env
   configure_crowdsec_lapi
   configure_ufw_full
-  ok "Пункт удалён."
-  pause
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    whiptail --title " Успех " --msgbox "Пункт удалён." 8 78
+  else
+    ok "Пункт удалён."
+    pause
+  fi
 }
 
 replace_allowed_ranges() {
-  print_header
   safe_source_env
-  echo "Сейчас: ${ALLOWED_RANGES:-список пуст}"
-  echo "Введи новый список через запятую. Пусто закроет LAPI для удалённых IP."
-  read -rp "Новый Allowed IP/CIDR: " new_ranges
+  local new_ranges
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    new_ranges=$(whiptail --title " Замена списка IP/CIDR " --inputbox "Текущий список: ${ALLOWED_RANGES:-пуст}\n\nВведите новый список через запятую:" 12 78 "${ALLOWED_RANGES}" 3>&1 1>&2 2>&3) || return
+  else
+    print_header
+    echo "Сейчас: ${ALLOWED_RANGES:-список пуст}"
+    echo "Введи новый список через запятую. Пусто закроет LAPI для удалённых IP."
+    read -rp "Новый Allowed IP/CIDR: " new_ranges
+  fi
+
   ALLOWED_RANGES="${new_ranges:-}"
   save_env
   configure_crowdsec_lapi
   configure_ufw_full
-  ok "Список Allowed IP/CIDR обновлён."
-  pause
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    whiptail --title " Успех " --msgbox "Список Allowed IP/CIDR обновлён." 8 78
+  else
+    ok "Список Allowed IP/CIDR обновлён."
+    pause
+  fi
 }
 
 change_lan_ip_or_web_port() {
-  print_header
   safe_source_env
-  echo "Сейчас: LAN IP ${LAN_IP}, Web port ${WEB_PORT}, Web UI ${LOCAL_WEB_UI}"
-  read -rp "Новый LAN IP [${LAN_IP}]: " new_lan_ip
-  read -rp "Новый порт веб-морды [${WEB_PORT}]: " new_web_port
+  local new_lan_ip new_web_port
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    new_lan_ip=$(whiptail --title " Изменение LAN IP " --inputbox "Введите новый LAN IP:" 10 78 "${LAN_IP}" 3>&1 1>&2 2>&3) || return
+    new_web_port=$(whiptail --title " Изменение порта Web UI " --inputbox "Введите новый порт веб-морды:" 10 78 "${WEB_PORT}" 3>&1 1>&2 2>&3) || return
+  else
+    print_header
+    echo "Сейчас: LAN IP ${LAN_IP}, Web port ${WEB_PORT}, Web UI ${LOCAL_WEB_UI}"
+    read -rp "Новый LAN IP [${LAN_IP}]: " new_lan_ip
+    read -rp "Новый порт веб-морды [${WEB_PORT}]: " new_web_port
+  fi
+
   if [[ -n "${new_web_port}" ]] && ! is_valid_port "${new_web_port}"; then
-    warn "Некорректный порт: ${new_web_port}"
-    pause
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+      whiptail --title " Ошибка " --msgbox "Некорректный порт: ${new_web_port}" 8 78
+    else
+      warn "Некорректный порт: ${new_web_port}"
+      pause
+    fi
     return
   fi
+
   LAN_IP="${new_lan_ip:-${LAN_IP}}"
   WEB_PORT="${new_web_port:-${WEB_PORT}}"
   save_env
   install_or_update_web_ui
   configure_ufw_full
-  ok "Адрес веб-морды обновлён: ${LOCAL_WEB_UI}"
-  pause
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    whiptail --title " Успех " --msgbox "Адрес веб-морды обновлён: ${LOCAL_WEB_UI}" 8 78
+  else
+    ok "Адрес веб-морды обновлён: ${LOCAL_WEB_UI}"
+    pause
+  fi
 }
 
 change_lapi_port() {
-  print_header
   safe_source_env
-  read -rp "Новый LAPI port [${LAPI_PORT}]: " new_lapi_port
-  [[ -n "${new_lapi_port}" ]] || { warn "Порт не изменён."; pause; return; }
+  local new_lapi_port
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    new_lapi_port=$(whiptail --title " Изменение порта LAPI " --inputbox "Введите новый порт LAPI:" 10 78 "${LAPI_PORT}" 3>&1 1>&2 2>&3) || return
+  else
+    print_header
+    read -rp "Новый LAPI port [${LAPI_PORT}]: " new_lapi_port
+    [[ -n "${new_lapi_port}" ]] || { warn "Порт не изменён."; pause; return; }
+  fi
+
   if ! is_valid_port "${new_lapi_port}"; then
-    warn "Некорректный порт: ${new_lapi_port}"
-    pause
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+      whiptail --title " Ошибка " --msgbox "Некорректный порт: ${new_lapi_port}" 8 78
+    else
+      warn "Некорректный порт: ${new_lapi_port}"
+      pause
+    fi
     return
   fi
+
   LAPI_PORT="${new_lapi_port}"
   save_env
   configure_crowdsec_lapi
   install_or_update_web_ui
   configure_ufw_full
-  ok "Порт LAPI обновлён: ${LAPI_PORT}"
-  pause
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    whiptail --title " Успех " --msgbox "Порт LAPI обновлён: ${LAPI_PORT}" 8 78
+  else
+    ok "Порт LAPI обновлён: ${LAPI_PORT}"
+    pause
+  fi
 }
 
 change_public_addr() {
-  print_header
   safe_source_env
-  echo "Сейчас: ${PUBLIC_ADDR:-не задан}"
-  read -rp "Новый внешний адрес или Enter чтобы убрать: " new_public
+  local new_public
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    new_public=$(whiptail --title " Внешний адрес LAPI " --inputbox "Текущий адрес: ${PUBLIC_ADDR:-не задан}\n\nВведите новый внешний IP или DNS (оставьте пустым, чтобы удалить):" 12 78 "${PUBLIC_ADDR}" 3>&1 1>&2 2>&3) || return
+  else
+    print_header
+    echo "Сейчас: ${PUBLIC_ADDR:-не задан}"
+    read -rp "Новый внешний адрес или Enter чтобы убрать: " new_public
+  fi
+
   PUBLIC_ADDR="${new_public:-}"
   save_env
-  ok "Внешний адрес обновлён. LAPI URL для VPS: ${VPS_LAPI_URL}"
-  pause
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    whiptail --title " Успех " --msgbox "Внешний адрес обновлён.\nLAPI URL для VPS: ${VPS_LAPI_URL}" 10 78
+  else
+    ok "Внешний адрес обновлён. LAPI URL для VPS: ${VPS_LAPI_URL}"
+    pause
+  fi
 }
 
 regenerate_auto_token() {
-  print_header
-  echo "Новые серверы должны будут использовать новый токен."
-  read -rp "Перегенерировать token? [y/N]: " confirm
-  [[ "${confirm:-N}" =~ ^[Yy]$ ]] || { echo "Отменено."; pause; return; }
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    whiptail --title " Регенерация токена " --yes-button "Продолжить" --no-button "Отмена" --yesno "Новые серверы должны будут использовать новый токен.\n\nПерегенерировать токен авторегистрации?" 12 78 || return
+  else
+    print_header
+    echo "Новые серверы должны будут использовать новый токен."
+    read -rp "Перегенерировать token? [y/N]: " confirm
+    [[ "${confirm:-N}" =~ ^[Yy]$ ]] || { echo "Отменено."; pause; return; }
+  fi
+
   AUTO_REG_TOKEN="$(openssl rand -hex 32)"
   save_env
   configure_crowdsec_lapi
-  ok "Auto-registration token обновлён."
-  pause
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    whiptail --title " Успех " --msgbox "Auto-registration token обновлён." 8 78
+  else
+    ok "Auto-registration token обновлён."
+    pause
+  fi
 }
 
 regenerate_bouncer_key() {
-  print_header
-  echo "Удалённые bouncer нужно будет перенастроить на новый ключ."
-  read -rp "Создать новый shared bouncer key? [y/N]: " confirm
-  [[ "${confirm:-N}" =~ ^[Yy]$ ]] || { echo "Отменено."; pause; return; }
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    whiptail --title " Регенерация bouncer key " --yes-button "Продолжить" --no-button "Отмена" --yesno "Удалённые bouncers нужно будет перенастроить на новый ключ.\n\nСоздать новый shared bouncer key?" 12 78 || return
+  else
+    print_header
+    echo "Удалённые bouncer нужно будет перенастроить на новый ключ."
+    read -rp "Создать новый shared bouncer key? [y/N]: " confirm
+    [[ "${confirm:-N}" =~ ^[Yy]$ ]] || { echo "Отменено."; pause; return; }
+  fi
+
   SHARED_BOUNCER_KEY="$(openssl rand -hex 32)"
   save_env
-  cscli bouncers delete shared-firewall-bouncer >/dev/null 2>&1 || true
-  cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
-  ok "Shared bouncer key обновлён."
-  pause
+  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+    docker exec crowdsec cscli bouncers delete shared-firewall-bouncer >/dev/null 2>&1 || true
+    docker exec crowdsec cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
+  else
+    cscli bouncers delete shared-firewall-bouncer >/dev/null 2>&1 || true
+    cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
+  fi
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    whiptail --title " Успех " --msgbox "Shared bouncer key обновлён." 8 78
+  else
+    ok "Shared bouncer key обновлён."
+    pause
+  fi
 }
 
-restart_services() {
-  print_header
+restart_services_cmd() {
   if [[ "${WEB_UI_TYPE:-simple}" == "manager" && -f "${MANAGER_COMPOSE_FILE}" ]]; then
     (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d) || true
   else
@@ -1013,76 +1195,9 @@ restart_services() {
   systemctl restart docker || true
   if [[ -d "${COMPOSE_DIR}" ]]; then cd "${COMPOSE_DIR}" && docker compose up -d || true; fi
   if [[ -d "${MANAGER_COMPOSE_DIR}" ]]; then cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d || true; fi
-  ok "Сервисы перезапущены."
-  pause
 }
-
-update_web_ui_only() {
-  print_header
-  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
-    [[ -f "${MANAGER_COMPOSE_FILE}" ]] || { install_or_update_crowdsec_manager; pause; return; }
-    cd "${MANAGER_COMPOSE_DIR}"
-    docker compose pull
-    docker compose up -d
-    ok "CrowdSec Manager обновлён."
-    pause
-    return
-  fi
-  if [[ ! -f "${COMPOSE_FILE}" ]]; then install_or_update_web_ui; pause; return; fi
-  cd "${COMPOSE_DIR}"
-  docker compose pull
-  docker compose up -d
-  ok "Веб-морда обновлена."
-  pause
-}
-
-update_installed_stack() {
-  print_header
-  echo "Будет обновлено: Debian packages, Docker, CrowdSec, Web UI image, LAPI, firewall, menu."
-  read -rp "Продолжить? [Y/n]: " confirm
-  [[ "${confirm:-Y}" =~ ^[Nn]$ ]] && { echo "Отменено."; pause; return; }
-  install_base
-  upgrade_system_packages
-  install_or_update_docker
-  install_or_update_crowdsec
-  configure_crowdsec_lapi
-  create_or_update_webui_machine
-  create_or_update_shared_bouncer_key
-  install_or_update_web_ui
-  configure_ufw_full
-  install_menu_files
-  ok "Обновление всего установленного ПО завершено."
-  pause
-}
-
-update_system_only() { print_header; upgrade_system_packages; pause; }
-update_docker_only() { print_header; install_or_update_docker; systemctl restart docker || true; [[ -f "${COMPOSE_FILE}" ]] && cd "${COMPOSE_DIR}" && docker compose up -d || true; pause; }
-update_crowdsec_only() { print_header; install_or_update_crowdsec; configure_crowdsec_lapi; create_or_update_webui_machine; create_or_update_shared_bouncer_key; pause; }
-
-show_logs() {
-  local tmp
-  tmp="$(mktemp)"
-  {
-    print_header
-    if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
-      docker logs crowdsec-manager --tail 150 2>&1 || echo "Контейнер crowdsec-manager не найден."
-      echo
-      echo "---- CrowdSec container ----"
-      docker logs crowdsec --tail 80 2>&1 || true
-    else
-      docker logs crowdsec-web-ui --tail 150 2>&1 || echo "Контейнер crowdsec-web-ui не найден."
-    fi
-  } >"${tmp}"
-  show_file "Логи Web UI" "${tmp}"
-  rm -f "${tmp}"
-}
-
-show_crowdsec_info() {
-  local tmp
-  tmp="$(mktemp)"
-  { print_header; echo "Machines:"; cscli machines list || true; echo; echo "Bouncers:"; cscli bouncers list || true; echo; echo "Alerts:"; cscli alerts list || true; echo; echo "Decisions:"; cscli decisions list || true; } >"${tmp}"
-  show_file "CrowdSec" "${tmp}"
-  rm -f "${tmp}"
+restart_services() {
+  run_menu_step "Перезапуск сервисов" restart_services_cmd
 }
 
 show_firewall() {
@@ -1123,30 +1238,37 @@ show_web_ui_installations() {
   rm -f "${tmp}"
 }
 
-remove_simple_web_ui() {
-  print_header
-  if ! tui_yesno "Удаление Web UI" "Удалить Simple Web UI (crowdsec-web-ui) и его compose-файлы?\n\nДанные CrowdSec/LAPI не будут затронуты."; then
-    echo "Отменено."
-    pause
-    return
-  fi
+remove_simple_web_ui_cmd() {
   if [[ -f "${COMPOSE_FILE}" ]]; then
-    (cd "${COMPOSE_DIR}" && docker compose down --remove-orphans) || true
+    (cd "${COMPOSE_DIR}" && docker compose down --remove-orphans)
   else
-    docker rm -f crowdsec-web-ui >/dev/null 2>&1 || true
+    docker rm -f crowdsec-web-ui >/dev/null 2>&1
   fi
   rm -rf "${COMPOSE_DIR}"
-  ok "Simple Web UI удалена. CrowdSec engine и LAPI не тронуты."
-  pause
+}
+remove_simple_web_ui() {
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    if tui_yesno "Удаление Web UI" "Удалить Simple Web UI (crowdsec-web-ui) и его compose-файлы?\n\nДанные CrowdSec/LAPI не будут затронуты."; then
+      run_menu_step "Удаление Simple Web UI" remove_simple_web_ui_cmd
+    fi
+  else
+    print_header
+    read -rp "Удалить Simple Web UI (crowdsec-web-ui) и его compose-файлы? [y/N]: " confirm
+    if [[ "${confirm:-N}" =~ ^[Yy]$ ]]; then
+      log "Удаляю Simple Web UI..."
+      if remove_simple_web_ui_cmd; then
+        ok "Simple Web UI удалена."
+      else
+        warn "Ошибка при удалении Simple Web UI."
+      fi
+    else
+      echo "Отменено."
+    fi
+    pause
+  fi
 }
 
-reinstall_simple_web_ui() {
-  print_header
-  if ! tui_yesno "Переустановка Web UI" "Переустановить Simple Web UI?\n\nСтарый контейнер и compose-директория будут удалены. CrowdSec/LAPI не будут затронуты."; then
-    echo "Отменено."
-    pause
-    return
-  fi
+reinstall_simple_web_ui_cmd() {
   if [[ -f "${COMPOSE_FILE}" ]]; then
     (cd "${COMPOSE_DIR}" && docker compose down --remove-orphans) || true
   else
@@ -1156,11 +1278,27 @@ reinstall_simple_web_ui() {
   create_or_update_webui_machine
   install_or_update_web_ui
   configure_ufw_full
-  ok "Simple Web UI переустановлена."
-  pause
+}
+reinstall_simple_web_ui() {
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    if tui_yesno "Переустановка Web UI" "Переустановить Simple Web UI?\n\nСтарый контейнер и compose-директория будут удалены. CrowdSec/LAPI не будут затронуты."; then
+      run_menu_step "Переустановка Simple Web UI" reinstall_simple_web_ui_cmd
+    fi
+  else
+    print_header
+    read -rp "Переустановить Simple Web UI? [y/N]: " confirm
+    if [[ "${confirm:-N}" =~ ^[Yy]$ ]]; then
+      reinstall_simple_web_ui_cmd
+      ok "Simple Web UI переустановлена."
+    else
+      echo "Отменено."
+    fi
+    pause
+  fi
 }
 
 show_crowdsec_manager_note() {
+  safe_source_env
   local tmp
   tmp="$(mktemp)"
   {
@@ -1182,34 +1320,152 @@ show_crowdsec_manager_note() {
   rm -f "${tmp}"
 }
 
-migrate_to_crowdsec_manager() {
-  print_header
-  if ! tui_yesno "Миграция на CrowdSec Manager" "Будет выполнено:\n\n- backup /etc/crowdsec и /var/lib/crowdsec;\n- удаление apt/systemd CrowdSec;\n- удаление текущих веб-морд;\n- установка Dockerized CrowdSec + CrowdSec Manager;\n- сохранение текущего LAPI-порта ${LAPI_PORT}.\n\nПродолжить?"; then
-    echo "Отменено."
-    pause
-    return
-  fi
+migrate_to_crowdsec_manager_cmd() {
   install_or_update_docker
   install_or_update_crowdsec_manager
   configure_ufw_full
-  ok "Миграция на CrowdSec Manager завершена."
-  pause
+}
+migrate_to_crowdsec_manager() {
+  safe_source_env
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    if tui_yesno "Миграция на CrowdSec Manager" "Будет выполнено:\n\n- backup /etc/crowdsec и /var/lib/crowdsec;\n- удаление apt/systemd CrowdSec;\n- удаление текущих веб-морд;\n- установка Dockerized CrowdSec + CrowdSec Manager;\n- сохранение текущего LAPI-порта ${LAPI_PORT}.\n\nПродолжить?"; then
+      run_menu_step "Миграция на CrowdSec Manager" migrate_to_crowdsec_manager_cmd
+    fi
+  else
+    print_header
+    echo "Будет выполнено:"
+    echo "  - backup /etc/crowdsec и /var/lib/crowdsec"
+    echo "  - удаление apt/systemd CrowdSec"
+    echo "  - удаление текущих веб-морд"
+    echo "  - установка Dockerized CrowdSec + CrowdSec Manager"
+    echo "  - сохранение текущего LAPI-порта ${LAPI_PORT}"
+    echo
+    read -rp "Продолжить миграцию? [y/N]: " confirm
+    if [[ "${confirm:-N}" =~ ^[Yy]$ ]]; then
+      migrate_to_crowdsec_manager_cmd
+      ok "Миграция на CrowdSec Manager завершена."
+    else
+      echo "Отменено."
+    fi
+    pause
+  fi
 }
 
-reapply_all_settings() {
-  print_header
-  echo "Повторное применение всех настроек."
-  echo "Будут обновлены: CrowdSec LAPI, Web UI docker-compose, UFW правила, автозапуск меню."
-  read -rp "Продолжить? [Y/n]: " confirm
-  [[ "${confirm:-Y}" =~ ^[Nn]$ ]] && { echo "Отменено."; pause; return; }
-  configure_crowdsec_lapi
-  create_or_update_webui_machine
-  create_or_update_shared_bouncer_key
-  install_or_update_web_ui
+reapply_all_settings_cmd() {
+  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+    configure_docker_crowdsec_lapi
+    create_or_update_shared_bouncer_key
+    (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
+  else
+    configure_crowdsec_lapi
+    create_or_update_webui_machine
+    create_or_update_shared_bouncer_key
+    install_or_update_web_ui
+  fi
   configure_ufw_full
   install_menu_files
-  ok "Все настройки применены."
-  pause
+}
+reapply_all_settings() {
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    if tui_yesno "Применение настроек" "Повторно применить все настройки?\n\nБудут обновлены: конфигурация LAPI, Web UI, правила UFW и автозапуск меню."; then
+      run_menu_step "Применение всех настроек" reapply_all_settings_cmd
+    fi
+  else
+    print_header
+    echo "Повторное применение всех настроек."
+    echo "Будут обновлены: CrowdSec LAPI, Web UI docker-compose, UFW правила, автозапуск меню."
+    read -rp "Продолжить? [Y/n]: " confirm
+    if [[ "${confirm:-Y}" =~ ^[Yy]$ ]]; then
+      reapply_all_settings_cmd
+      ok "Все настройки применены."
+    else
+      echo "Отменено."
+    fi
+    pause
+  fi
+}
+
+update_system_only() {
+  run_menu_step "Обновление системных пакетов Debian" upgrade_system_packages
+}
+
+update_docker_only() {
+  run_menu_step "Обновление Docker" install_or_update_docker
+}
+
+update_crowdsec_only() {
+  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+    run_menu_step "Обновление CrowdSec в Docker" install_or_update_crowdsec_manager
+  else
+    run_menu_step "Обновление CrowdSec" install_or_update_crowdsec
+  fi
+}
+
+update_web_ui_only() {
+  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+    run_menu_step "Обновление CrowdSec Manager" install_or_update_crowdsec_manager
+  else
+    run_menu_step "Обновление Simple Web UI" install_or_update_web_ui
+  fi
+}
+
+update_installed_stack() {
+  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+    run_menu_step "Обновление Docker" install_or_update_docker
+    run_menu_step "Обновление CrowdSec + Manager" install_or_update_crowdsec_manager
+  else
+    run_menu_step "Обновление Docker" install_or_update_docker
+    run_menu_step "Обновление CrowdSec" install_or_update_crowdsec
+    run_menu_step "Обновление Simple Web UI" install_or_update_web_ui
+  fi
+  run_menu_step "Настройка Firewall" configure_ufw_full
+}
+
+show_logs() {
+  local tmp
+  tmp="$(mktemp)"
+  {
+    print_header
+    if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+      echo "Логи CrowdSec Manager (последние 100 строк):"
+      docker logs --tail 100 crowdsec-manager 2>&1 || true
+      echo
+      echo "Логи CrowdSec Docker (последние 100 строк):"
+      docker logs --tail 100 crowdsec 2>&1 || true
+    elif command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' | grep -q '^crowdsec-web-ui$'; then
+      echo "Логи Simple Web UI (последние 100 строк):"
+      docker logs --tail 100 crowdsec-web-ui 2>&1 || true
+    else
+      echo "Веб-морда не установлена или не запущена в Docker."
+    fi
+  } >"${tmp}"
+  show_file "Логи" "${tmp}"
+  rm -f "${tmp}"
+}
+
+show_crowdsec_info() {
+  local tmp
+  tmp="$(mktemp)"
+  {
+    print_header
+    local cmd="cscli"
+    if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+      cmd="docker exec crowdsec cscli"
+    fi
+    echo "=== Машины (machines) ==="
+    $cmd machines list 2>&1 || true
+    echo
+    echo "=== Баунсеры (bouncers) ==="
+    $cmd bouncers list 2>&1 || true
+    echo
+    echo "=== Активные решения (decisions) ==="
+    $cmd decisions list -l 50 2>&1 || true
+    echo
+    echo "=== Последние алерты (alerts) ==="
+    $cmd alerts list -l 20 2>&1 || true
+  } >"${tmp}"
+  show_file "Информация CrowdSec" "${tmp}"
+  rm -f "${tmp}"
 }
 
 disable_login_menu() { print_header; rm -f "${PROFILE_FILE}"; ok "Автозапуск меню отключён."; pause; }
@@ -1232,6 +1488,7 @@ show_versions() {
 }
 
 test_webui_lapi() {
+  safe_source_env
   local tmp
   tmp="$(mktemp)"
   {
