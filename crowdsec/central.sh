@@ -1006,20 +1006,22 @@ show_connection_info() {
       echo
       echo "Мастер спросит имя VPS и его внешний IP, сам добавит доступ к LAPI и создаст bouncer key."
     else
-      printf '%-22s  %-24s  %-40s  %s\n' "Дата" "VPS" "IP" "LAPI"
-      printf '%-22s  %-24s  %-40s  %s\n' "----" "---" "--" "----"
+      echo "Краткий список:"
+      echo
       while IFS=$'\t' read -r created name ip lapi token key; do
         [[ -n "${name:-}" ]] || continue
-        printf '%-22s  %-24s  %-40s  %s\n' "${created}" "${name}" "${ip}" "${lapi}"
+        echo "- ${name}"
+        echo "  дата: ${created}"
+        echo "  ip:   ${ip}"
+        echo "  lapi: ${lapi}"
+        echo
       done <"${CONNECTIONS_FILE}"
       echo
-      echo "Подробные данные для повторного копирования:"
+      echo "Данные для копирования в VPS-скрипт:"
       echo
       while IFS=$'\t' read -r created name ip lapi token key; do
         [[ -n "${name:-}" ]] || continue
-        echo "=== ${name} ==="
-        echo "created: ${created}"
-        echo "ip: ${ip}"
+        echo "----- ${name} -----"
         echo "CENTRAL_LAPI_URL=${lapi}"
         echo "AUTO_REG_TOKEN=${token}"
         echo "BOUNCER_KEY=${key}"
