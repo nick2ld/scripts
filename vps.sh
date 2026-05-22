@@ -80,6 +80,9 @@ prompt_default() {
   fi
   printf -v "${__var_name}" '%s' "${__value:-${__default}}"
 }
+quote_env() {
+  printf '%q' "${1:-}"
+}
 tui_theme() {
   local dialogrc="/tmp/crowdsec-dialogrc-${UID:-0}"
   cat > "${dialogrc}" <<'EOF'
@@ -213,6 +216,8 @@ load_env_if_exists() {
   INSTALL_FIREWALL_BOUNCER="${INSTALL_FIREWALL_BOUNCER:-yes}"
   COLLECTION_SELECTION_MODE="${COLLECTION_SELECTION_MODE:-manual}"
   SELECTED_COLLECTIONS="${SELECTED_COLLECTIONS:-}"
+  HUB_ITEM_SELECTION_MODE="${HUB_ITEM_SELECTION_MODE:-none}"
+  SELECTED_HUB_ITEMS="${SELECTED_HUB_ITEMS:-}"
   FIREWALL_BOUNCER_PACKAGE="${FIREWALL_BOUNCER_PACKAGE:-}"
   FIREWALL_BOUNCER_MODE="${FIREWALL_BOUNCER_MODE:-}"
 }
@@ -220,16 +225,18 @@ load_env_if_exists() {
 save_env() {
   mkdir -p "${CONFIG_DIR}"
   chmod 700 "${CONFIG_DIR}"
-  cat > "${ENV_FILE}" <<ENV
-CENTRAL_LAPI_URL=${CENTRAL_LAPI_URL}
-AUTO_REG_TOKEN=${AUTO_REG_TOKEN}
-SHARED_BOUNCER_KEY=${SHARED_BOUNCER_KEY}
-MACHINE_NAME=${MACHINE_NAME}
-INSTALL_FIREWALL_BOUNCER=${INSTALL_FIREWALL_BOUNCER}
-COLLECTION_SELECTION_MODE=${COLLECTION_SELECTION_MODE}
-SELECTED_COLLECTIONS=${SELECTED_COLLECTIONS}
-FIREWALL_BOUNCER_PACKAGE=${FIREWALL_BOUNCER_PACKAGE}
-FIREWALL_BOUNCER_MODE=${FIREWALL_BOUNCER_MODE}
+cat > "${ENV_FILE}" <<ENV
+CENTRAL_LAPI_URL=$(quote_env "${CENTRAL_LAPI_URL}")
+AUTO_REG_TOKEN=$(quote_env "${AUTO_REG_TOKEN}")
+SHARED_BOUNCER_KEY=$(quote_env "${SHARED_BOUNCER_KEY}")
+MACHINE_NAME=$(quote_env "${MACHINE_NAME}")
+INSTALL_FIREWALL_BOUNCER=$(quote_env "${INSTALL_FIREWALL_BOUNCER}")
+COLLECTION_SELECTION_MODE=$(quote_env "${COLLECTION_SELECTION_MODE}")
+SELECTED_COLLECTIONS=$(quote_env "${SELECTED_COLLECTIONS}")
+HUB_ITEM_SELECTION_MODE=$(quote_env "${HUB_ITEM_SELECTION_MODE}")
+SELECTED_HUB_ITEMS=$(quote_env "${SELECTED_HUB_ITEMS}")
+FIREWALL_BOUNCER_PACKAGE=$(quote_env "${FIREWALL_BOUNCER_PACKAGE}")
+FIREWALL_BOUNCER_MODE=$(quote_env "${FIREWALL_BOUNCER_MODE}")
 ENV
   chmod 600 "${ENV_FILE}"
 }
@@ -252,6 +259,10 @@ ask_settings() {
       "manual" "Показать список из CrowdSec Hub и выбрать вручную" \
       "auto" "Поставить только базовые и похожие на найденный софт" \
       "base" "Поставить только linux + sshd" \
+      3>&1 1>&2 2>&3)" || exit 1
+    HUB_ITEM_SELECTION_MODE="$(whiptail --title " Дополнительные Hub elements " --cancel-button "Отмена" --ok-button "Выбрать" --notags --menu "Выбирать отдельно scenarios/parsers/appsec и прочее?\n\nОбычно достаточно collections, потому что они подтягивают связанные элементы." 18 90 2 \
+      "none" "Нет, только collections" \
+      "manual" "Да, показать расширенный выбор Hub elements" \
       3>&1 1>&2 2>&3)" || exit 1
     [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "Central LAPI URL не может быть пустым."
     [[ "${CENTRAL_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]] || fail "Central LAPI URL должен начинаться с http:// или https://"
@@ -311,6 +322,9 @@ ask_settings() {
   echo "base   - поставить только linux + sshd"
   prompt_default input_collections "Режим выбора collections [manual]: " "manual"
   COLLECTION_SELECTION_MODE="${input_collections:-manual}"
+
+  prompt_default input_hub_items "Выбирать отдельно scenarios/parsers/appsec/context? [none/manual]: " "none"
+  HUB_ITEM_SELECTION_MODE="${input_hub_items:-none}"
 
   save_env
 }
@@ -413,6 +427,37 @@ PY
   cscli collections list -a 2>/dev/null | awk '/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+/ {for (i=1;i<=NF;i++) if ($i ~ /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/) print $i "\t"}' | sort -u
 }
 
+list_hub_items_by_type() {
+  local item_type="$1"
+  if cscli "${item_type}" list -o json >/tmp/crowdsec-hub-items.json 2>/dev/null; then
+    python3 - /tmp/crowdsec-hub-items.json <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as f:
+    data = json.load(f)
+if isinstance(data, dict):
+    for key in ("items", "data", "parsers", "scenarios", "collections", "postoverflows", "contexts"):
+        if isinstance(data.get(key), list):
+            data = data[key]
+            break
+rows = []
+for item in data if isinstance(data, list) else []:
+    if not isinstance(item, dict):
+        continue
+    name = item.get("name") or item.get("path") or item.get("full_path") or item.get("fullpath")
+    if not name:
+        continue
+    if "/" not in name:
+        name = f"{item.get('author') or item.get('source') or 'crowdsecurity'}/{name}"
+    desc = item.get("description") or item.get("status") or ""
+    rows.append((name, " ".join(str(desc).split())[:70]))
+for name, desc in sorted(set(rows)):
+    print(f"{name}\t{desc}")
+PY
+    return
+  fi
+  cscli "${item_type}" list -a 2>/dev/null | awk '/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+/ {for (i=1;i<=NF;i++) if ($i ~ /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/) print $i "\t"}' | sort -u
+}
+
 collection_is_suggested() {
   local collection="$1"
   local detected="$2"
@@ -483,6 +528,49 @@ install_collections() {
     cscli collections install "${collection}" || true
   done
   ok "Collections установлены или уже были установлены."
+}
+
+select_extra_hub_items() {
+  load_env_if_exists
+  [[ "${HUB_ITEM_SELECTION_MODE}" == "manual" ]] || return 0
+  local item_type file selected args tag item state
+  SELECTED_HUB_ITEMS=""
+  for item_type in scenarios parsers postoverflows appsec-configs appsec-rules contexts; do
+    tui_available || break
+    if ! tui_yesno " Hub: ${item_type} " "Показать список ${item_type} из CrowdSec Hub?\n\nCollections обычно уже подтягивают нужные ${item_type}."; then
+      continue
+    fi
+    file="$(mktemp)"
+    list_hub_items_by_type "${item_type}" >"${file}"
+    [[ -s "${file}" ]] || { rm -f "${file}"; continue; }
+    args=()
+    while IFS=$'\t' read -r tag item; do
+      [[ -n "${tag}" ]] || continue
+      state="off"
+      args+=("${tag}" "${item:-${tag}}" "${state}")
+    done <"${file}"
+    selected="$(whiptail --title " Hub: ${item_type} " --cancel-button "Назад" --ok-button "Добавить" --checklist "Выбери ${item_type} для установки." 30 110 18 "${args[@]}" 3>&1 1>&2 2>&3)" || selected=""
+    for item in ${selected}; do
+      item="${item//\"/}"
+      [[ -n "${item}" ]] && SELECTED_HUB_ITEMS="${SELECTED_HUB_ITEMS} ${item_type}:${item}"
+    done
+    rm -f "${file}"
+  done
+  SELECTED_HUB_ITEMS="$(tr ' ' '\n' <<<"${SELECTED_HUB_ITEMS}" | awk 'NF && !seen[$0]++' | tr '\n' ' ')"
+  save_env
+}
+
+install_extra_hub_items() {
+  load_env_if_exists
+  [[ -n "${SELECTED_HUB_ITEMS:-}" ]] || return 0
+  local entry item_type item_name
+  for entry in ${SELECTED_HUB_ITEMS}; do
+    item_type="${entry%%:*}"
+    item_name="${entry#*:}"
+    [[ -n "${item_type}" && -n "${item_name}" && "${item_type}" != "${item_name}" ]] || continue
+    log "Hub ${item_type}: ${item_name}"
+    cscli "${item_type}" install "${item_name}" || true
+  done
 }
 
 configure_acquisition() {
@@ -620,6 +708,7 @@ show_status() {
   echo "  Linux collection: базовые Linux-сценарии"
   echo "  SSHD collection: защита SSH"
   echo "  Collections: ${SELECTED_COLLECTIONS:-crowdsecurity/linux crowdsecurity/sshd}"
+  [[ -n "${SELECTED_HUB_ITEMS:-}" ]] && echo "  Дополнительные Hub elements: ${SELECTED_HUB_ITEMS}"
   echo "  Дополнительные источники логов: проверь через sudo cscli collections inspect <collection>"
   if [[ "${INSTALL_FIREWALL_BOUNCER}" == "yes" ]]; then
     echo "  Firewall bouncer: активная блокировка IP через ${FIREWALL_BOUNCER_MODE}"
@@ -664,7 +753,9 @@ main() {
     run_install_step "Подключаю репозиторий CrowdSec" install_crowdsec_repo
     run_install_step "Устанавливаю CrowdSec agent" install_crowdsec_agent
     select_hub_collections
+    select_extra_hub_items
     run_install_step "Устанавливаю collections" install_collections
+    run_install_step "Устанавливаю дополнительные Hub elements" install_extra_hub_items
     run_install_step "Настраиваю источники логов" configure_acquisition
     run_install_step "Регистрирую VPS на центральном LAPI" register_to_central_lapi
     run_install_step "Настраиваю CrowdSec node" configure_agent_as_node
@@ -677,7 +768,9 @@ main() {
     install_crowdsec_repo
     install_crowdsec_agent
     select_hub_collections
+    select_extra_hub_items
     install_collections
+    install_extra_hub_items
     configure_acquisition
     register_to_central_lapi
     configure_agent_as_node
