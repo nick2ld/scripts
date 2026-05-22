@@ -73,6 +73,20 @@ show_output() {
   if is_tui_session; then
     if [[ "${CROWDSEC_TUI_MODE}" =~ ^(whiptail|installer)$ ]] && command -v whiptail >/dev/null 2>&1; then
       whiptail --title " ${title} " --textbox "${tmp}" 30 110 </dev/tty >/dev/tty 2>&1 || true
+    elif [[ "${CROWDSEC_TUI_MODE}" == "fzf" ]] && command -v fzf >/dev/null 2>&1; then
+      clear || true
+      fzf \
+        --ansi \
+        --disabled \
+        --no-sort \
+        --height=90% \
+        --layout=reverse \
+        --border=rounded \
+        --prompt='' \
+        --pointer=' ' \
+        --header="${title} | Esc - назад" \
+        --color='fg:#d7e1ff,bg:#101827,hl:#7dd3fc,fg+:#ffffff,bg+:#26415f,hl+:#facc15,header:#93c5fd,border:#38bdf8' \
+        <"${tmp}" >/dev/tty || true
     elif command -v less >/dev/null 2>&1; then
       clear || true
       LESS='-R' less "${tmp}" </dev/tty >/dev/tty || true
@@ -241,7 +255,7 @@ install_base() {
   log "Устанавливаю базовые пакеты..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https openssl python3 python3-yaml sudo ufw nano jq iproute2 procps xz-utils whiptail fzf
+  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https openssl python3 python3-yaml sudo ufw nano jq iproute2 procps xz-utils whiptail fzf less
   ok "Базовые пакеты установлены."
 }
 
@@ -942,10 +956,10 @@ ensure_tui_tools() {
   command -v fzf >/dev/null 2>&1 && return 0
   command -v whiptail >/dev/null 2>&1 && return 0
   if command -v apt-get >/dev/null 2>&1; then
-    log "Устанавливаю TUI-зависимости меню: fzf, whiptail..."
+    log "Устанавливаю TUI-зависимости меню: fzf, whiptail, less..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y || return 1
-    apt-get install -y fzf whiptail || return 1
+    apt-get install -y fzf whiptail less || return 1
   fi
   command -v fzf >/dev/null 2>&1 || command -v whiptail >/dev/null 2>&1
 }
