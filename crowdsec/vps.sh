@@ -130,7 +130,7 @@ change_language() {
 CONFIG_DIR="/root/crowdsec-vps-node"
 ENV_FILE="${CONFIG_DIR}/node.env"
 FAIL2BAN_BACKUP_DIR="${CONFIG_DIR}/fail2ban-backup"
-SCRIPT_VERSION="v0.3-i18n"
+SCRIPT_VERSION="v0.4-i18n-unattended"
 SCRIPT_RELEASE_DATE="2026-05-22"
 LOCK_FILE="/var/lock/crowdsec-vps-node.lock"
 LOCK_FD=200
@@ -1249,6 +1249,15 @@ manage_existing_installation() {
 main() {
   require_root
   acquire_lock
+  if [[ "${1:-}" == "--unattended" || "${CROWDSEC_VPS_UNATTENDED:-no}" == "yes" ]]; then
+    export CROWDSEC_VPS_UNATTENDED="yes"
+    load_saved_language
+    load_env_if_exists
+    detect_debian
+    full_install yes
+    show_status
+    return 0
+  fi
   bootstrap_installer_tui || true
   choose_language_if_needed
   detect_debian

@@ -149,9 +149,10 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.5.2-i18n-cancel-back"
+SCRIPT_VERSION="v0.6.1-i18n-remote-vps-github-download"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
+VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
 
 log() { echo "==> $*"; }
 ok() { echo "$(T "ГОТОВО" "OK"): $*"; }
@@ -906,7 +907,288 @@ create_or_update_shared_bouncer_key() {
   ok "Bouncer key готов."
 }
 
+
+shell_quote() {
+  printf '%q' "${1:-}"
+}
+
 create_named_vps_bouncer_key() {
+  safe_source_env
+  local mode rc
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    set +e
+    mode="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" \
+      --title " $(T "Добавление VPS" "Add VPS") " \
+      --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags \
+      --menu "$(T "Выбери способ подключения VPS:\n\n1. Удалённая установка - central подключится к VPS по SSH, сам запустит установку и потом выполнит validate.\n2. Ручное добавление - как раньше: central покажет данные, а vps.sh запускается вручную на VPS." "Choose how to connect the VPS:\n\n1. Remote installation - central connects to the VPS over SSH, runs the installation, and then validates the machine.\n2. Manual setup - old behavior: central shows values and vps.sh is run manually on the VPS.")" \
+      18 96 2 \
+      "remote" "$(T "Подключиться по SSH и установить автоматически" "Connect over SSH and install automatically")" \
+      "manual" "$(T "Ручное добавление с ожиданием регистрации" "Manual setup with registration wait")" \
+      3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+  else
+    echo
+    echo "$(T "Способ добавления VPS:" "VPS add mode:")"
+    echo "1) $(T "Подключиться по SSH и установить автоматически" "Connect over SSH and install automatically")"
+    echo "2) $(T "Ручное добавление с ожиданием регистрации" "Manual setup with registration wait")"
+    read -rp "$(T "Выбор [1/2]: " "Choice [1/2]: ")" mode || return 0
+    case "${mode}" in
+      1|remote) mode="remote" ;;
+      *) mode="manual" ;;
+    esac
+  fi
+
+  case "${mode}" in
+    remote) create_named_vps_remote_install ;;
+    manual) create_named_vps_bouncer_key_manual ;;
+    *) return 0 ;;
+  esac
+}
+
+create_vps_connection_apply_common() {
+  echo "Удаление старого bouncer: ${node_name}"
+  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+    docker exec crowdsec cscli bouncers delete "${node_name}" || true
+    echo "Регистрация нового bouncer в Docker LAPI: ${node_name}"
+    docker exec crowdsec cscli bouncers add "${node_name}" --key "${bouncer_key}"
+  else
+    cscli bouncers delete "${node_name}" || true
+    echo "Регистрация нового bouncer в локальном LAPI: ${node_name}"
+    cscli bouncers add "${node_name}" --key "${bouncer_key}"
+  fi
+
+  echo "Сохранение central.env"
+  save_env
+
+  echo "Обновление config.yaml CrowdSec LAPI"
+  configure_docker_crowdsec_lapi
+
+  echo "Перезапуск контейнера CrowdSec"
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
+
+  echo "Обновление правил UFW"
+  configure_ufw_full
+
+  echo "Запись подключения в ${CONNECTIONS_FILE}"
+  mkdir -p "${CONFIG_DIR}"
+  chmod 700 "${CONFIG_DIR}"
+  touch "${CONNECTIONS_FILE}"
+  chmod 600 "${CONNECTIONS_FILE}"
+  awk -F'\t' -v name="${node_name}" '($2 != name)' "${CONNECTIONS_FILE}" >"${CONNECTIONS_FILE}.tmp" || true
+  mv "${CONNECTIONS_FILE}.tmp" "${CONNECTIONS_FILE}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -Is)" "${node_name}" "${vps_ip}" "${VPS_LAPI_URL}" "${AUTO_REG_TOKEN}" "${bouncer_key}" >>"${CONNECTIONS_FILE}"
+}
+
+ensure_remote_ssh_tools() {
+  if command -v ssh >/dev/null 2>&1 && command -v sshpass >/dev/null 2>&1; then
+    return 0
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  apt-get install -y openssh-client sshpass
+}
+
+build_remote_vps_installer_script() {
+  local out="$1"
+  cat > "${out}" <<REMOTE
+#!/usr/bin/env bash
+set -Eeuo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+mkdir -p /root/crowdsec-vps-node
+chmod 700 /root/crowdsec-vps-node
+
+cat > /root/crowdsec-vps-node/node.env <<ENV
+CENTRAL_LAPI_URL=$(shell_quote "${VPS_LAPI_URL}")
+AUTO_REG_TOKEN=$(shell_quote "${AUTO_REG_TOKEN}")
+SHARED_BOUNCER_KEY=$(shell_quote "${bouncer_key}")
+MACHINE_NAME=$(shell_quote "${node_name}")
+INSTALL_FIREWALL_BOUNCER=yes
+REMOVE_FAIL2BAN=yes
+COLLECTION_SELECTION_MODE=base
+SELECTED_COLLECTIONS=crowdsecurity/linux\ crowdsecurity/sshd
+HUB_ITEM_SELECTION_MODE=none
+SELECTED_HUB_ITEMS=
+FIREWALL_BOUNCER_PACKAGE=
+FIREWALL_BOUNCER_MODE=
+UI_LANG=$(shell_quote "${UI_LANG:-ru}")
+ENV
+chmod 600 /root/crowdsec-vps-node/node.env
+
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update -y
+  apt-get install -y curl ca-certificates
+fi
+
+curl -fsSL "$(shell_quote "${VPS_SCRIPT_RAW_URL}")" -o /root/crowdsec-vps-node/vps.sh
+chmod 700 /root/crowdsec-vps-node/vps.sh
+bash /root/crowdsec-vps-node/vps.sh --unattended
+REMOTE
+  chmod 600 "${out}"
+}
+
+remote_ssh_base() {
+  SSHPASS="${ssh_password}" sshpass -e ssh \
+    -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile=/root/.ssh/known_hosts \
+    -o ConnectTimeout=20 \
+    -p "${ssh_port}" \
+    "${ssh_user}@${ssh_host}" "$@"
+}
+
+remote_upload_runner() {
+  local runner="$1"
+  remote_ssh_base "cat > /tmp/crowdsec-vps-remote-install.sh && chmod 700 /tmp/crowdsec-vps-remote-install.sh" < "${runner}"
+}
+
+remote_run_runner() {
+  if [[ "${ssh_user}" == "root" ]]; then
+    remote_ssh_base "bash /tmp/crowdsec-vps-remote-install.sh"
+  else
+    printf '%s\n' "${ssh_password}" | remote_ssh_base "sudo -S -p '' bash /tmp/crowdsec-vps-remote-install.sh"
+  fi
+}
+
+create_named_vps_remote_install() {
+  safe_source_env
+  local rc tmp summary
+  local node_name_raw vps_ip_raw ssh_host_raw ssh_port_raw ssh_user_raw ssh_password_raw
+  local vps_cidr runner
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    set +e
+    node_name_raw="$(whiptail --title " $(T "Удалённая установка VPS" "Remote VPS installation") " --inputbox "$(T "Имя VPS.\n\nЭто же имя будет использовано как Machine name и bouncer name." "VPS name.\n\nThe same value will be used as Machine name and bouncer name.")" 12 92 "" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+
+    set +e
+    vps_ip_raw="$(whiptail --title " $(T "Удалённая установка VPS" "Remote VPS installation") " --inputbox "$(T "Внешний IP VPS, которому разрешить доступ к LAPI.\n\nСкрипт добавит его как /32 в LAPI и UFW." "Public VPS IP allowed to access LAPI.\n\nThe script will add it as /32 to LAPI and UFW.")" 12 92 "" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+
+    set +e
+    ssh_host_raw="$(whiptail --title " SSH " --inputbox "$(T "IP или hostname для SSH-подключения к VPS." "IP or hostname for SSH connection to the VPS.")" 10 92 "${vps_ip_raw}" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+
+    set +e
+    ssh_port_raw="$(whiptail --title " SSH " --inputbox "$(T "SSH порт" "SSH port")" 10 70 "22" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+
+    set +e
+    ssh_user_raw="$(whiptail --title " SSH " --inputbox "$(T "SSH логин.\n\nЛучше root. Если не root, у пользователя должен быть sudo." "SSH login.\n\nRoot is recommended. If not root, the user must have sudo.")" 12 80 "root" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+
+    set +e
+    ssh_password_raw="$(whiptail --title " SSH " --passwordbox "$(T "SSH пароль.\n\nПароль не сохраняется в central.env." "SSH password.\n\nThe password is not saved in central.env.")" 11 80 "" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+
+    summary="$(T "Central подключится к VPS по SSH и выполнит установку CrowdSec node.\n\nНа VPS будут установлены пакеты, CrowdSec agent, collections linux+sshd и firewall-bouncer.\nFail2Ban будет удалён с backup, если найден.\n\nПродолжить?" "Central will connect to the VPS over SSH and install the CrowdSec node.\n\nThe VPS will get packages, CrowdSec agent, linux+sshd collections and firewall-bouncer.\nFail2Ban will be removed with backup if found.\n\nContinue?")"
+    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Продолжить" "Continue")" --no-button "$(T "Отмена" "Cancel")" --yesno "${summary}" 16 92 || return 0
+  else
+    read -rp "$(T "Имя VPS/Machine name: " "VPS/Machine name: ")" node_name_raw || return 0
+    read -rp "$(T "Внешний IP VPS для LAPI: " "Public VPS IP for LAPI: ")" vps_ip_raw || return 0
+    read -rp "$(T "SSH host [${vps_ip_raw}]: " "SSH host [${vps_ip_raw}]: ")" ssh_host_raw || return 0
+    ssh_host_raw="${ssh_host_raw:-${vps_ip_raw}}"
+    read -rp "$(T "SSH порт [22]: " "SSH port [22]: ")" ssh_port_raw || return 0
+    ssh_port_raw="${ssh_port_raw:-22}"
+    read -rp "$(T "SSH логин [root]: " "SSH login [root]: ")" ssh_user_raw || return 0
+    ssh_user_raw="${ssh_user_raw:-root}"
+    read -rsp "$(T "SSH пароль: " "SSH password: ")" ssh_password_raw || return 0
+    echo
+  fi
+
+  node_name="$(printf '%s' "${node_name_raw:-}" | tr -cd 'A-Za-z0-9._:-')"
+  vps_ip="$(printf '%s' "${vps_ip_raw:-}" | tr -cd '0-9A-Fa-f:.')"
+  ssh_host="$(printf '%s' "${ssh_host_raw:-}" | tr -cd 'A-Za-z0-9._:-')"
+  ssh_port="$(printf '%s' "${ssh_port_raw:-22}" | tr -cd '0-9')"
+  ssh_user="$(printf '%s' "${ssh_user_raw:-root}" | tr -cd 'A-Za-z0-9._-')"
+  ssh_password="${ssh_password_raw:-}"
+
+  [[ -n "${node_name}" ]] || fail "$(T "Имя VPS не может быть пустым." "VPS name cannot be empty.")"
+  [[ -n "${vps_ip}" ]] || fail "$(T "IP VPS не может быть пустым." "VPS IP cannot be empty.")"
+  [[ -n "${ssh_host}" ]] || fail "$(T "SSH host не может быть пустым." "SSH host cannot be empty.")"
+  is_valid_port "${ssh_port}" || fail "$(T "SSH порт некорректен." "Invalid SSH port.")"
+  [[ -n "${ssh_user}" ]] || fail "$(T "SSH логин не может быть пустым." "SSH login cannot be empty.")"
+  [[ -n "${ssh_password}" ]] || fail "$(T "SSH пароль не может быть пустым." "SSH password cannot be empty.")"
+
+  if [[ "${vps_ip}" == *:* ]]; then
+    vps_cidr="${vps_ip}/128"
+  else
+    vps_cidr="${vps_ip}/32"
+  fi
+
+  if [[ -z "${ALLOWED_RANGES}" ]]; then
+    ALLOWED_RANGES="${vps_cidr}"
+  elif ! echo ",${ALLOWED_RANGES}," | grep -q ",${vps_cidr},"; then
+    ALLOWED_RANGES="${ALLOWED_RANGES},${vps_cidr}"
+  fi
+
+  bouncer_key="$(openssl rand -hex 32)"
+
+  if ! run_with_live_progress "$(T "Подготовка подключения VPS" "Preparing VPS connection")" create_vps_connection_apply_common; then
+    return 1
+  fi
+
+  runner="$(mktemp)"
+  build_remote_vps_installer_script "${runner}"
+
+  if ! run_with_live_progress "$(T "Установка SSH-клиента" "Installing SSH client tools")" ensure_remote_ssh_tools; then
+    rm -f "${runner}"
+    return 1
+  fi
+
+  remote_install_apply() {
+    echo "Проверка SSH-доступа к ${ssh_user}@${ssh_host}:${ssh_port}"
+    remote_ssh_base "echo ssh-ok"
+    echo "Загрузка установщика на VPS"
+    remote_upload_runner "${runner}"
+    echo "Запуск удалённой установки VPS"
+    remote_run_runner
+  }
+
+  if ! run_with_live_progress "$(T "Удалённая установка VPS node" "Remote VPS node installation")" remote_install_apply; then
+    rm -f "${runner}"
+    return 1
+  fi
+  rm -f "${runner}"
+
+  run_with_live_progress "$(T "Ожидание и validate ${node_name}" "Waiting and validating ${node_name}")" wait_for_machine_and_validate "${node_name}" 300 || true
+
+  tmp="$(mktemp)"
+  {
+    echo "$(T "Удалённая установка VPS завершена." "Remote VPS installation completed.")"
+    echo
+    echo "VPS name / Machine name:"
+    echo "${node_name}"
+    echo
+    echo "Allowed VPS IP:"
+    echo "${vps_ip} (${vps_cidr})"
+    echo
+    echo "Central LAPI URL:"
+    echo "${VPS_LAPI_URL}"
+    echo
+    echo "Remote SSH:"
+    echo "${ssh_user}@${ssh_host}:${ssh_port}"
+    echo
+    echo "$(T "Запись сохранена в:" "Record saved to:") ${CONNECTIONS_FILE}"
+  } >"${tmp}"
+  show_file "$(T "Удалённая установка VPS" "Remote VPS installation")" "${tmp}"
+  rm -f "${tmp}"
+}
+
+create_named_vps_bouncer_key_manual() {
   safe_source_env
   local node_name vps_ip vps_cidr bouncer_key tmp rc
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
