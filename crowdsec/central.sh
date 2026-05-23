@@ -4617,6 +4617,353 @@ run_menu_action() {
   esac
 }
 
+
+# -----------------------------------------------------------------------------
+# v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
+# -----------------------------------------------------------------------------
+SCRIPT_VERSION="v0.7.1-i18n-help-capi-menu"
+
+show_help_text() {
+  local title="$1" text="$2"
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]] && tui_available; then
+    whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" \
+      --title " ${title} " --msgbox "${text}" 18 96 || true
+  else
+    echo
+    echo "=== ${title} ==="
+    printf '%s\n' "${text}"
+    echo
+  fi
+}
+
+action_description() {
+  local key="$1"
+  case "${key}" in
+    status) T "Показывает состояние сервисов, открытые порты, контейнеры Docker, LAPI и основные параметры central. Используй это как первый пункт диагностики." "Shows service state, open ports, Docker containers, LAPI and main central settings. Use this as the first diagnostic step." ;;
+    connect) T "Показывает сохранённые подключения VPS, machines и bouncer/API устройств. Здесь можно повторно посмотреть LAPI URL, machine name и bouncer key." "Shows saved VPS, machine and bouncer/API device connections. Use it to view LAPI URL, machine name and bouncer key again." ;;
+    envfile) T "Показывает файл central.env с текущими настройками central. Там есть порты, URL, ranges и служебные ключи. Не публикуй этот вывод наружу." "Shows central.env with current central settings. It contains ports, URLs, ranges and secret keys. Do not publish this output." ;;
+    crowdsec_info) T "Показывает machines, bouncers, alerts, active decisions и metrics. Это общий экран понимания: кто подключён, кто блокирует и какие решения есть." "Shows machines, bouncers, alerts, active decisions and metrics. This is the overview: who is connected, who enforces and what decisions exist." ;;
+    protection_menu) T "Раздел настройки защиты central: бесплатные Hub collections, локальные rules/scenarios, ручные decisions, trusted IP и опциональное подключение к CrowdSec Console/CAPI." "Protection setup: free Hub collections, local rules/scenarios, manual decisions, trusted IPs and optional CrowdSec Console/CAPI connection." ;;
+    protection_baseline) T "Ставит базовую бесплатную защиту: обновляет Hub и устанавливает linux + sshd collections. Это минимальная база, чтобы central мог создавать local decisions из своих логов." "Installs the base free protection: updates Hub and installs linux + sshd collections. This is the minimum base for central to create local decisions from its own logs." ;;
+    protection_collections) T "Управление CrowdSec Hub collections. Collections ставят наборы parsers/scenarios для Linux, SSH, web-серверов и firewall/router логов." "Manage CrowdSec Hub collections. Collections install parser/scenario bundles for Linux, SSH, web servers and firewall/router logs." ;;
+    protection_decisions) T "Локальные ручные блокировки. Можно добавить ban для IP/CIDR, импортировать свой blacklist из файла, удалить decision или посмотреть active decisions." "Local manual blocks. Add an IP/CIDR ban, import your own blacklist from a file, delete a decision or show active decisions." ;;
+    protection_trusted) T "Локальный предохранитель скрипта: IP/CIDR из этого списка нельзя случайно забанить через ручные действия меню. Это не замена официальному allowlist CrowdSec." "Script safety list: IP/CIDR in this list cannot be accidentally banned through manual menu actions. This is not a replacement for the official CrowdSec allowlist." ;;
+    protection_capi|capi_enroll) T "Подключение к CrowdSec Console/CAPI. Сюда вводится Console enrollment key из app.crowdsec.net. Это опционально: локальная бесплатная защита работает и без него." "CrowdSec Console/CAPI connection. Enter the Console enrollment key from app.crowdsec.net here. This is optional: local free protection works without it." ;;
+    node_bouncer) T "Создаёт подключение VPS. Есть два режима: удалённая установка по SSH или ручная установка с ожиданием регистрации machine и последующим validate." "Creates a VPS connection. Two modes are available: remote SSH installation or manual installation with machine registration wait and validate." ;;
+    validate_machine) T "Подтверждает зарегистрированные VPS machines. Это нужно для VPS/agent, но не нужно для bouncer-only устройств вроде OpenWrt firewall-bouncer." "Validates registered VPS machines. Required for VPS/agent nodes, not required for bouncer-only devices such as OpenWrt firewall-bouncer." ;;
+    add_range) T "Добавляет IP/CIDR, которому разрешено обращаться к central LAPI. Обычно это IP VPS, роутера, NPM или другого доверенного источника." "Adds an IP/CIDR allowed to reach central LAPI. Usually this is a VPS, router, NPM or another trusted source IP." ;;
+    remove_range) T "Удаляет IP/CIDR из allowed ranges LAPI. После удаления этот источник может потерять доступ к central LAPI." "Removes an IP/CIDR from LAPI allowed ranges. After removal that source may lose access to central LAPI." ;;
+    replace_ranges) T "Полностью заменяет список allowed ranges LAPI. Используй осторожно: можно случайно отрезать доступ VPS, роутеру или NPM." "Completely replaces the LAPI allowed ranges list. Use carefully: you can cut off VPS, router or NPM access." ;;
+    device_manage) T "Управление устройствами, где установлен только bouncer/API key. Такие устройства не являются machines, не требуют validate и только забирают decisions из central." "Manage devices that only have a bouncer/API key. These devices are not machines, do not need validate and only pull decisions from central." ;;
+    device_events) T "Отдельная настройка событий от роутера/устройства. Bouncer сам логи не отправляет. Если нужны события, включается filtered syslog intake на central." "Separate router/device event intake setup. A bouncer does not send logs. If events are needed, enable filtered syslog intake on central." ;;
+    syslog_devices) T "Показывает устройства, для которых включён remote syslog intake: порт, режим filtered/full и файлы логов на central." "Shows devices with remote syslog intake enabled: port, filtered/full mode and log files on central." ;;
+    web_addr) T "Меняет LAN IP central и порт Web UI. Это влияет на адрес CrowdSec Manager в браузере." "Changes central LAN IP and Web UI port. This affects the CrowdSec Manager browser URL." ;;
+    lapi_port) T "Меняет порт central LAPI. После изменения нужно обновить настройки VPS, bouncers, NPM и пробросы портов." "Changes the central LAPI port. After changing it, update VPS, bouncers, NPM and port forwards." ;;
+    public_addr) T "Задаёт внешний IP/DDNS для прямого HTTP доступа к LAPI. Используй только если VPS ходят напрямую, без HTTPS reverse proxy." "Sets public IP/DDNS for direct HTTP LAPI access. Use only if VPS connect directly without an HTTPS reverse proxy." ;;
+    public_lapi_url) T "Задаёт публичный HTTPS URL LAPI через Nginx Proxy Manager. Это предпочтительно для удалённых VPS вместо прямого HTTP." "Sets the public HTTPS LAPI URL through Nginx Proxy Manager. This is preferred for remote VPS instead of direct HTTP." ;;
+    auto_token) T "Перегенерирует auto-registration token для регистрации machines. Новые установки VPS со старым token больше не смогут регистрироваться." "Regenerates the auto-registration token for machines. New VPS installs using the old token will no longer register." ;;
+    bouncer_key) T "Перегенерирует shared bouncer key. Индивидуальные bouncer keys устройств не меняет, но shared-key подключения потребуется обновить." "Regenerates the shared bouncer key. Individual device bouncer keys are not changed, but shared-key connections must be updated." ;;
+    firewall) T "Показывает текущие правила UFW/firewall central: SSH, Web UI, LAPI и syslog intake." "Shows current central UFW/firewall rules: SSH, Web UI, LAPI and syslog intake." ;;
+    test_lapi) T "Проверяет доступ CrowdSec Manager/Web UI к LAPI. Используй, если Manager показывает LAPI Offline." "Tests CrowdSec Manager/Web UI access to LAPI. Use it if Manager shows LAPI Offline." ;;
+    restart) T "Перезапускает CrowdSec, Docker контейнеры и Web UI. Используй после изменений или при зависании сервисов." "Restarts CrowdSec, Docker containers and Web UI. Use after changes or if services hang." ;;
+    update_webui) T "Обновляет только CrowdSec Manager/Web UI контейнер, не трогая весь сервер." "Updates only the CrowdSec Manager/Web UI container, without touching the whole server." ;;
+    logs) T "Показывает логи CrowdSec и Manager. Это основной пункт для поиска причин ошибок." "Shows CrowdSec and Manager logs. This is the main place to investigate errors." ;;
+    reapply) T "Повторно применяет сохранённые настройки: LAPI config, Docker, UFW и связанные параметры." "Reapplies saved settings: LAPI config, Docker, UFW and related parameters." ;;
+    update_all) T "Обновляет весь стек: системные пакеты, Docker, CrowdSec и Web UI. Используй для полного обслуживания." "Updates the full stack: system packages, Docker, CrowdSec and Web UI. Use for full maintenance." ;;
+    update_system) T "Обновляет пакеты Debian/Ubuntu через apt." "Updates Debian/Ubuntu packages through apt." ;;
+    update_docker) T "Обновляет Docker и docker compose plugin." "Updates Docker and the docker compose plugin." ;;
+    update_crowdsec) T "Обновляет CrowdSec engine и связанные пакеты из репозитория CrowdSec." "Updates CrowdSec engine and related packages from the CrowdSec repository." ;;
+    versions) T "Показывает версии ОС, Docker, CrowdSec, cscli и контейнеров." "Shows OS, Docker, CrowdSec, cscli and container versions." ;;
+    repair_menu) T "Переустанавливает команду crowdsec-central-menu из текущего файла скрипта." "Reinstalls the crowdsec-central-menu command from the current script file." ;;
+    language) T "Меняет язык интерфейса и сохраняет выбор в central.env." "Changes interface language and saves the choice to central.env." ;;
+    disable_autostart) T "Отключает автозапуск меню при входе root в shell." "Disables automatic menu start when root logs into shell." ;;
+    enable_autostart) T "Включает автозапуск меню при входе root в shell." "Enables automatic menu start when root logs into shell." ;;
+    *) T "Описание для этого пункта пока не задано. Действие будет выполнено без дополнительных изменений." "No description is defined for this item yet. The action will run without additional changes." ;;
+  esac
+}
+
+show_action_intro() {
+  local key="$1" desc
+  case "${CROWDSEC_SHOW_HELP:-1}" in 0|no|NO|false|FALSE) return 0 ;; esac
+  desc="$(action_description "${key}")"
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]] && tui_available; then
+    whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" \
+      --title " $(T "Описание пункта" "Menu item description") " \
+      --yes-button "$(T "Продолжить" "Continue")" --no-button "$(T "Назад" "Back")" \
+      --yesno "${desc}" 14 92
+    return $?
+  fi
+  echo
+  echo "--- $(T "Описание" "Description") ---"
+  printf '%s\n' "${desc}"
+  echo
+  if has_tty; then
+    read -rp "$(T "Enter - продолжить, Ctrl+C - отмена: " "Enter - continue, Ctrl+C - cancel: ")" _ </dev/tty || return 1
+  fi
+  return 0
+}
+
+console_enroll_with_key() {
+  local enroll_key enable_all rc
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    enroll_key="$(whiptail --title " $(T "CrowdSec Console" "CrowdSec Console") " --passwordbox "$(T "Вставь Console enrollment key из app.crowdsec.net.\n\nЭто НЕ bouncer key и НЕ auto-registration token. После enroll обычно нужно подтвердить engine в веб-консоли CrowdSec." "Paste the Console enrollment key from app.crowdsec.net.\n\nThis is NOT a bouncer key and NOT an auto-registration token. After enroll you usually need to validate the engine in the CrowdSec web console.")" 14 92 "" 3>&1 1>&2 2>&3)" || return 0
+    whiptail --title " $(T "Console options" "Console options") " --yes-button "$(T "Да" "Yes")" --no-button "$(T "Нет" "No")" --yesno "$(T "После enroll включить отправку всех Console options через: cscli console enable --all?\n\nЭто опционально. Если не уверен, выбери Нет." "After enroll, enable all Console options with: cscli console enable --all?\n\nThis is optional. If unsure, choose No.")" 13 88
+    rc=$?
+    [[ "${rc}" -eq 0 ]] && enable_all="yes" || enable_all="no"
+  else
+    read -rsp "$(T "Console enrollment key: " "Console enrollment key: ")" enroll_key || return 0
+    echo
+    read -rp "$(T "Включить cscli console enable --all? [y/N]: " "Enable cscli console enable --all? [y/N]: ")" enable_all || true
+    [[ "${enable_all:-N}" =~ ^[Yy]$ ]] && enable_all="yes" || enable_all="no"
+  fi
+  enroll_key="$(printf '%s' "${enroll_key:-}" | tr -cd 'A-Za-z0-9._:-')"
+  [[ -n "${enroll_key}" ]] || fail "$(T "Enrollment key пустой." "Enrollment key is empty.")"
+  console_enroll_apply() {
+    echo "Running: cscli console enroll <hidden>"
+    crowdsec_cscli console enroll "${enroll_key}"
+    if [[ "${enable_all}" == "yes" ]]; then
+      echo "Running: cscli console enable --all"
+      crowdsec_cscli console enable --all || true
+    fi
+    echo
+    echo "Console status:"
+    crowdsec_cscli console status || true
+    echo
+    echo "CAPI status:"
+    crowdsec_cscli capi status || true
+  }
+  run_with_live_progress "$(T "CrowdSec Console enroll" "CrowdSec Console enroll")" console_enroll_apply || return 1
+  show_help_text "$(T "CrowdSec Console" "CrowdSec Console")" "$(T "Enroll выполнен. Если статус показывает, что engine ожидает подтверждения, открой app.crowdsec.net и подтверди этот Security Engine.\n\nЛокальная защита и bouncer-only устройства работают и без Console/CAPI. Console нужна для внешней панели, community/premium-функций и централизованного управления." "Enroll completed. If status says the engine is waiting for validation, open app.crowdsec.net and validate this Security Engine.\n\nLocal protection and bouncer-only devices work without Console/CAPI. Console is used for the external dashboard, community/premium features and centralized management.")"
+}
+
+capi_register_free() {
+  capi_register_apply() {
+    echo "Running: cscli capi register"
+    crowdsec_cscli capi register || true
+    echo
+    echo "CAPI status:"
+    crowdsec_cscli capi status || true
+  }
+  run_with_live_progress "$(T "CrowdSec CAPI register" "CrowdSec CAPI register")" capi_register_apply || true
+}
+
+configure_cti_api_key() {
+  local key config_dir config_file
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    key="$(whiptail --title " $(T "CrowdSec CTI API key" "CrowdSec CTI API key") " --passwordbox "$(T "Вставь CTI API key из CrowdSec Console, если он у тебя есть.\n\nЭто отдельный ключ для CTI API. Для обычного подключения engine к Console чаще нужен enrollment key, а не CTI key." "Paste the CTI API key from CrowdSec Console, if you have one.\n\nThis is a separate key for the CTI API. To connect the engine to Console, you usually need an enrollment key, not a CTI key.")" 14 92 "" 3>&1 1>&2 2>&3)" || return 0
+  else
+    read -rsp "$(T "CTI API key: " "CTI API key: ")" key || return 0
+    echo
+  fi
+  key="$(printf '%s' "${key:-}" | tr -cd 'A-Za-z0-9._:-')"
+  [[ -n "${key}" ]] || return 0
+  config_dir="$(get_crowdsec_config_dir)"
+  config_file="${config_dir}/config.yaml"
+  [[ -f "${config_file}" ]] || fail "$(T "Не найден config.yaml CrowdSec." "CrowdSec config.yaml not found.")"
+  cp -a "${config_file}" "${config_file}.backup-cti-$(date +%F-%H%M%S)"
+  CTI_KEY="${key}" python3 - "${config_file}" <<'INNERPY'
+import os, sys, yaml
+path=sys.argv[1]
+with open(path, 'r', errors='replace') as f:
+    cfg=yaml.safe_load(f) or {}
+cti=cfg.setdefault('cti', {})
+cti['key']=os.environ['CTI_KEY']
+cti['enabled']=True
+cti.setdefault('cache_timeout', '60m')
+cti.setdefault('cache_size', 50)
+with open(path, 'w') as f:
+    yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+INNERPY
+  restart_crowdsec_runtime || true
+  ok "$(T "CTI API key сохранён в config.yaml." "CTI API key saved in config.yaml.")"
+}
+
+manage_capi_console_menu() {
+  local choice
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    choice="$(whiptail --title " $(T "CrowdSec Console / CAPI" "CrowdSec Console / CAPI") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Здесь вводится ключ CrowdSec Console.\n\nОбычно нужен Console enrollment key: его берут в app.crowdsec.net при добавлении Security Engine.\nCAPI register отдельный и обычно не требует ввода ключа. CTI API key нужен только для CTI API." "Enter CrowdSec Console keys here.\n\nUsually you need the Console enrollment key from app.crowdsec.net when adding a Security Engine.\nCAPI register is separate and usually does not ask for a key. CTI API key is only for CTI API.")" 23 100 6 \
+      "enroll" "$(T "Ввести Console enrollment key" "Enter Console enrollment key")" "$(T "Подключает этот central engine к CrowdSec Console через cscli console enroll <key>." "Connects this central engine to CrowdSec Console using cscli console enroll <key>.")" \
+      "capi" "$(T "CAPI register/status" "CAPI register/status")" "$(T "Выполняет cscli capi register и показывает статус. Не включает платные blocklists." "Runs cscli capi register and shows status. Does not enable paid blocklists.")" \
+      "cti" "$(T "Ввести CTI API key" "Enter CTI API key")" "$(T "Сохраняет CTI API key в config.yaml. Это отдельный ключ, не enrollment key." "Saves CTI API key to config.yaml. This is a separate key, not an enrollment key.")" \
+      "status" "$(T "Показать CAPI/Console статус" "Show CAPI/Console status")" "$(T "Показывает cscli console status и cscli capi status." "Shows cscli console status and cscli capi status.")" \
+      3>&1 1>&2 2>&3)" || return 0
+  else
+    echo "1) enroll - Console enrollment key"
+    echo "2) capi - CAPI register/status"
+    echo "3) cti - CTI API key"
+    echo "4) status"
+    read -rp "> " choice || return 0
+    case "${choice}" in 1) choice=enroll;; 2) choice=capi;; 3) choice=cti;; 4) choice=status;; esac
+  fi
+  case "${choice}" in
+    enroll) show_action_intro capi_enroll || return 0; console_enroll_with_key ;;
+    capi) capi_register_free ;;
+    cti) configure_cti_api_key ;;
+    status) capi_console_status ;;
+  esac
+}
+
+manage_protection_menu() {
+  local choice
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    choice="$(whiptail --title " $(T "Защита, правила и decisions" "Protection, rules and decisions") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Этот раздел отвечает за то, ОТКУДА central берёт decisions для всех bouncers.\n\nБесплатный режим: Hub collections + анализ своих логов + ручные local decisions.\nConsole/CAPI опциональны и не включают платные blocklists автоматически." "This section controls WHERE central gets decisions for all bouncers.\n\nFree mode: Hub collections + local log analysis + manual local decisions.\nConsole/CAPI are optional and do not enable paid blocklists automatically.")" 25 104 7 \
+      "baseline" "$(T "Базовая бесплатная защита" "Base free protection")" "$(T "Ставит linux + sshd collections. Минимальная база для local decisions." "Installs linux + sshd collections. Minimum base for local decisions.")" \
+      "collections" "$(T "Collections / rules / Hub" "Collections / rules / Hub")" "$(T "Установка и просмотр collections, scenarios, parsers из CrowdSec Hub." "Install and view collections, scenarios, parsers from CrowdSec Hub.")" \
+      "decisions" "$(T "Manual decisions / local blacklist" "Manual decisions / local blacklist")" "$(T "Ручные bans, удаление decisions и импорт своего списка IP/CIDR." "Manual bans, delete decisions and import your own IP/CIDR list.")" \
+      "trusted" "$(T "Доверенные IP/CIDR" "Trusted IP/CIDR")" "$(T "Предохранитель от случайного ручного бана своих адресов через это меню." "Safety guard against manually banning your own addresses through this menu.")" \
+      "capi" "$(T "CrowdSec Console / CAPI / API key" "CrowdSec Console / CAPI / API key")" "$(T "Здесь вводится Console enrollment key или CTI API key и проверяется CAPI status." "Enter Console enrollment key or CTI API key here and check CAPI status.")" \
+      "info" "$(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")" "$(T "Общий статус подключений, alerts, decisions и metrics." "Overall status of connections, alerts, decisions and metrics.")" \
+      3>&1 1>&2 2>&3)" || return 0
+  else
+    echo "1) baseline - базовая защита"
+    echo "2) collections - правила Hub"
+    echo "3) decisions - ручные bans/local blacklist"
+    echo "4) trusted - доверенные IP"
+    echo "5) capi - Console/CAPI/API key"
+    echo "6) info - общий статус"
+    read -rp "> " choice || return 0
+    case "${choice}" in 1) choice=baseline;; 2) choice=collections;; 3) choice=decisions;; 4) choice=trusted;; 5) choice=capi;; 6) choice=info;; esac
+  fi
+  case "${choice}" in
+    baseline) show_action_intro protection_baseline || return 0; run_with_live_progress "$(T "Базовая защита CrowdSec" "Base CrowdSec protection")" apply_initial_protection_baseline ;;
+    collections) show_action_intro protection_collections || return 0; manage_collections_menu ;;
+    decisions) show_action_intro protection_decisions || return 0; manage_decisions_menu ;;
+    trusted) show_action_intro protection_trusted || return 0; manage_trusted_ips_menu ;;
+    capi) show_action_intro protection_capi || return 0; manage_capi_console_menu ;;
+    info) show_action_intro crowdsec_info || return 0; show_crowdsec_info ;;
+  esac
+}
+
+run_menu_action() {
+  safe_source_env
+  show_action_intro "${1}" || return 0
+  case "${1}" in
+    status) show_status; pause ;;
+    connect) show_connection_info; pause ;;
+    envfile) show_tokens_file; pause ;;
+    add_range) add_allowed_range ;;
+    remove_range) remove_allowed_range ;;
+    replace_ranges) replace_allowed_ranges ;;
+    web_addr) change_lan_ip_or_web_port ;;
+    lapi_port) change_lapi_port ;;
+    public_addr) change_public_addr ;;
+    public_lapi_url) configure_public_lapi_url ;;
+    validate_machine) validate_machine_prompt ;;
+    auto_token) regenerate_auto_token ;;
+    bouncer_key) regenerate_bouncer_key ;;
+    firewall) show_firewall; pause ;;
+    test_lapi) test_webui_lapi; pause ;;
+    restart) restart_services ;;
+    update_webui) update_web_ui_only ;;
+    logs) show_logs; pause ;;
+    crowdsec_info) show_crowdsec_info; pause ;;
+    reapply) reapply_all_settings ;;
+    update_all) update_installed_stack ;;
+    update_system) update_system_only ;;
+    update_docker) update_docker_only ;;
+    update_crowdsec) update_crowdsec_only ;;
+    versions) show_versions; pause ;;
+    disable_autostart) disable_login_menu ;;
+    enable_autostart) enable_login_menu ;;
+    repair_menu) repair_menu_installation ;;
+    node_bouncer) create_named_vps_bouncer_key ;;
+    device_manage) manage_bouncer_devices_menu ;;
+    device_events) manage_device_events_menu ;;
+    syslog_devices) show_remote_syslog_devices ;;
+    language) change_language ;;
+    protection_menu) manage_protection_menu ;;
+    protection_baseline) run_with_live_progress "$(T "Базовая защита CrowdSec" "Base CrowdSec protection")" apply_initial_protection_baseline ;;
+    protection_collections) manage_collections_menu ;;
+    protection_decisions) manage_decisions_menu ;;
+    protection_trusted) manage_trusted_ips_menu ;;
+    protection_capi) manage_capi_console_menu ;;
+    capi_enroll) manage_capi_console_menu ;;
+    *) warn "$(T "Неизвестное действие меню." "Unknown menu action.")"; pause ;;
+  esac
+}
+
+menu_loop_whiptail() {
+  require_root
+  tui_theme
+  export CROWDSEC_TUI_MODE="whiptail"
+  safe_clear
+  while true; do
+    local category choice summary
+    summary="$(tui_summary)"
+    category="$(whiptail \
+      --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" \
+      --title "$(T " CrowdSec Central " " CrowdSec Central ")" \
+      --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help \
+      --menu "$(T "Выберите раздел. Внизу окна показывается подсказка по выбранному пункту.\n\n${summary}" "Choose a section. A hint for the selected item is shown at the bottom.\n\n${summary}")" 26 104 9 \
+      "status" "$(T "Статус и данные" "Status and data")" "$(T "Проверка состояния, подключений, токенов и общей информации." "Check state, connections, tokens and overview info.")" \
+      "protection" "$(T "Защита, правила, Console/CAPI" "Protection, rules, Console/CAPI")" "$(T "Откуда central берёт decisions: rules, collections, local blacklist, Console/CAPI key." "Where central gets decisions: rules, collections, local blacklist, Console/CAPI key.")" \
+      "vps" "$(T "VPS nodes / machines" "VPS nodes / machines")" "$(T "Полноценные CrowdSec agents на VPS: установка, регистрация и validate." "Full CrowdSec agents on VPS: installation, registration and validate.")" \
+      "devices" "$(T "Bouncer/API устройства" "Bouncer/API devices")" "$(T "OpenWrt/роутеры/firewall-bouncer: только получение decisions и блокировки." "OpenWrt/routers/firewall-bouncer: only pull decisions and block.")" \
+      "events" "$(T "События от роутера/устройства" "Router/device events")" "$(T "Отдельный filtered syslog intake, если нужно анализировать события устройства." "Separate filtered syslog intake if device events must be analyzed.")" \
+      "network" "$(T "Сеть, TLS и доступ к LAPI" "Network, TLS and LAPI access")" "$(T "Порты, HTTPS через NPM, allowed ranges, tokens и firewall." "Ports, HTTPS via NPM, allowed ranges, tokens and firewall.")" \
+      "service" "$(T "Обслуживание и диагностика" "Maintenance and diagnostics")" "$(T "Рестарт, обновления, логи, версии и повторное применение настроек." "Restart, updates, logs, versions and reapply settings.")" \
+      "menu" "$(T "Настройки меню" "Menu settings")" "$(T "Язык, автозапуск и переустановка команды меню." "Language, autostart and menu command repair.")" \
+      "exit" "$(T "Выход" "Exit")" "$(T "Закрыть меню." "Close menu.")" \
+      3>&1 1>&2 2>&3)" || continue
+    [[ "${category}" == "exit" ]] && exit 0
+    while true; do
+      case "${category}" in
+        status)
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" --title " $(T "Статус и данные" "Status and data") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Выберите действие. Подсказка по пункту показывается внизу." "Choose an action. A hint for the item is shown at the bottom.")" 20 96 5 \
+            "status" "$(T "Статус сервисов и портов" "Service and port status")" "$(action_description status)" \
+            "connect" "$(T "Показать созданные подключения" "Show saved connections")" "$(action_description connect)" \
+            "envfile" "$(T "Показать central.env" "Show central.env")" "$(action_description envfile)" \
+            "crowdsec_info" "$(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")" "$(action_description crowdsec_info)" \
+            3>&1 1>&2 2>&3)" || break ;;
+        protection) manage_protection_menu; break ;;
+        vps)
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" --title " $(T "VPS nodes / machines" "VPS nodes / machines") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "VPS nodes - это полноценные CrowdSec agents, которые регистрируются как machines." "VPS nodes are full CrowdSec agents that register as machines.")" 23 104 6 \
+            "node_bouncer" "$(T "Создать подключение VPS" "Create VPS connection")" "$(action_description node_bouncer)" \
+            "validate_machine" "$(T "Подтвердить machine VPS" "Validate VPS machine")" "$(action_description validate_machine)" \
+            "connect" "$(T "Показать созданные подключения" "Show saved connections")" "$(action_description connect)" \
+            "add_range" "$(T "Добавить IP/CIDR вручную" "Add IP/CIDR manually")" "$(action_description add_range)" \
+            "remove_range" "$(T "Удалить IP/CIDR из LAPI" "Remove IP/CIDR from LAPI")" "$(action_description remove_range)" \
+            "replace_ranges" "$(T "Заменить весь список IP/CIDR" "Replace full IP/CIDR list")" "$(action_description replace_ranges)" \
+            3>&1 1>&2 2>&3)" || break ;;
+        devices) manage_bouncer_devices_menu; break ;;
+        events) manage_device_events_menu; break ;;
+        network)
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" --title " $(T "Сеть, TLS и доступ к LAPI" "Network, TLS and LAPI access") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Настройки доступа к central LAPI и Web UI. Ошибка тут может отрезать VPS/bouncers от central." "Central LAPI and Web UI access settings. A mistake here can cut VPS/bouncers off from central.")" 25 104 8 \
+            "web_addr" "$(T "Изменить LAN IP или порт Web UI" "Change LAN IP or Web UI port")" "$(action_description web_addr)" \
+            "lapi_port" "$(T "Изменить порт LAPI" "Change LAPI port")" "$(action_description lapi_port)" \
+            "public_addr" "$(T "Внешний IP/DDNS для прямого HTTP" "Public IP/DDNS for direct HTTP")" "$(action_description public_addr)" \
+            "public_lapi_url" "$(T "HTTPS LAPI через Nginx Proxy Manager" "HTTPS LAPI through Nginx Proxy Manager")" "$(action_description public_lapi_url)" \
+            "auto_token" "$(T "Перегенерировать auto-registration token" "Regenerate auto-registration token")" "$(action_description auto_token)" \
+            "bouncer_key" "$(T "Перегенерировать shared bouncer key" "Regenerate shared bouncer key")" "$(action_description bouncer_key)" \
+            "firewall" "$(T "Показать firewall/UFW" "Show firewall/UFW")" "$(action_description firewall)" \
+            "test_lapi" "$(T "Проверить Web UI -> LAPI" "Test Web UI -> LAPI")" "$(action_description test_lapi)" \
+            3>&1 1>&2 2>&3)" || break ;;
+        service)
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" --title " $(T "Обслуживание и диагностика" "Maintenance and diagnostics") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Обслуживание, обновления и диагностика ошибок." "Maintenance, updates and error diagnostics.")" 26 104 10 \
+            "restart" "$(T "Перезапустить сервисы" "Restart services")" "$(action_description restart)" \
+            "update_webui" "$(T "Обновить CrowdSec Manager" "Update CrowdSec Manager")" "$(action_description update_webui)" \
+            "logs" "$(T "Показать логи" "Show logs")" "$(action_description logs)" \
+            "reapply" "$(T "Повторно применить настройки" "Reapply settings")" "$(action_description reapply)" \
+            "update_all" "$(T "Обновить весь стек" "Update full stack")" "$(action_description update_all)" \
+            "update_system" "$(T "Обновить Debian packages" "Update Debian packages")" "$(action_description update_system)" \
+            "update_docker" "$(T "Обновить Docker" "Update Docker")" "$(action_description update_docker)" \
+            "update_crowdsec" "$(T "Обновить CrowdSec" "Update CrowdSec")" "$(action_description update_crowdsec)" \
+            "versions" "$(T "Показать версии" "Show versions")" "$(action_description versions)" \
+            "syslog_devices" "$(T "Показать syslog intake" "Show syslog intake")" "$(action_description syslog_devices)" \
+            3>&1 1>&2 2>&3)" || break ;;
+        menu)
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" --title " $(T "Настройки меню" "Menu settings") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Настройки самого TUI-меню." "Settings of the TUI menu itself.")" 20 96 5 \
+            "disable_autostart" "$(T "Отключить автозапуск меню" "Disable menu autostart")" "$(action_description disable_autostart)" \
+            "enable_autostart" "$(T "Включить автозапуск меню" "Enable menu autostart")" "$(action_description enable_autostart)" \
+            "repair_menu" "$(T "Обновить/переустановить команду" "Update/reinstall command")" "$(action_description repair_menu)" \
+            "language" "$(T "Изменить язык интерфейса" "Change interface language")" "$(action_description language)" \
+            3>&1 1>&2 2>&3)" || break ;;
+      esac
+      run_menu_action "${choice}"
+    done
+  done
+}
+
 acquire_script_lock
 load_saved_language
 choose_language_if_needed
