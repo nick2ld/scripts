@@ -556,6 +556,8 @@ create_named_vps_bouncer_key() {
   fi
   save_env
   configure_docker_crowdsec_lapi
+# Принудительный перезапуск контейнера для применения ALLOWED_RANGES
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
   configure_ufw_full
   mkdir -p "${CONFIG_DIR}"
   chmod 700 "${CONFIG_DIR}"
@@ -1106,7 +1108,7 @@ add_allowed_range() {
   save_env
   configure_docker_crowdsec_lapi
   configure_ufw_full
-
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
     whiptail --title " Успех " --msgbox "IP/CIDR добавлен: ${new_range}" 8 78
   else
@@ -1163,7 +1165,7 @@ remove_allowed_range() {
   save_env
   configure_docker_crowdsec_lapi
   configure_ufw_full
-
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
     whiptail --title " Успех " --msgbox "Пункт удалён." 8 78
   else
@@ -1188,7 +1190,7 @@ replace_allowed_ranges() {
   save_env
   configure_docker_crowdsec_lapi
   configure_ufw_full
-
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
     whiptail --title " Успех " --msgbox "Список Allowed IP/CIDR обновлён." 8 78
   else
