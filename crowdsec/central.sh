@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.6.4-i18n-remote-vps-auto-collections"
+SCRIPT_VERSION="v0.6.5-i18n-openwrt-bouncer"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -920,22 +920,25 @@ create_named_vps_bouncer_key() {
     mode="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" \
       --title " $(T "Добавление VPS" "Add VPS") " \
       --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags \
-      --menu "$(T "Выбери способ подключения VPS:\n\n1. Удалённая установка - central подключится к VPS по SSH, сам запустит установку и потом выполнит validate.\n2. Ручное добавление - как раньше: central покажет данные, а vps.sh запускается вручную на VPS." "Choose how to connect the VPS:\n\n1. Remote installation - central connects to the VPS over SSH, runs the installation, and then validates the machine.\n2. Manual setup - old behavior: central shows values and vps.sh is run manually on the VPS.")" \
-      18 96 2 \
-      "remote" "$(T "Подключиться по SSH и установить автоматически" "Connect over SSH and install automatically")" \
-      "manual" "$(T "Ручное добавление с ожиданием регистрации" "Manual setup with registration wait")" \
+      --menu "$(T "Выбери способ подключения:\n\n1. Удалённая VPS - central подключится к VPS по SSH, сам запустит установку и потом выполнит validate.\n2. Ручная VPS - как раньше: central покажет данные, а vps.sh запускается вручную на VPS.\n3. Устройство только с bouncer/API - роутер, OpenWrt или другой хост без CrowdSec agent: central создаст bouncer key и покажет настройки." "Choose connection type:\n\n1. Remote VPS - central connects over SSH, runs the installation, and then validates the machine.\n2. Manual VPS - old behavior: central shows values and vps.sh is run manually on the VPS.\n3. Bouncer-only/API device - router, OpenWrt or another host without CrowdSec agent: central creates a bouncer key and shows settings.")" \
+      21 100 3 \
+      "remote" "$(T "VPS: подключиться по SSH и установить автоматически" "VPS: connect over SSH and install automatically")" \
+      "manual" "$(T "VPS: ручное добавление с ожиданием регистрации" "VPS: manual setup with registration wait")" \
+      "openwrt" "$(T "Устройство с bouncer/API: добавить bouncer key" "Bouncer/API device: add bouncer key")" \
       3>&1 1>&2 2>&3)"
     rc=$?
     set -e
     [[ "${rc}" -eq 0 ]] || return 0
   else
     echo
-    echo "$(T "Способ добавления VPS:" "VPS add mode:")"
-    echo "1) $(T "Подключиться по SSH и установить автоматически" "Connect over SSH and install automatically")"
-    echo "2) $(T "Ручное добавление с ожиданием регистрации" "Manual setup with registration wait")"
-    read -rp "$(T "Выбор [1/2]: " "Choice [1/2]: ")" mode || return 0
+    echo "$(T "Способ добавления:" "Add mode:")"
+    echo "1) $(T "VPS: подключиться по SSH и установить автоматически" "VPS: connect over SSH and install automatically")"
+    echo "2) $(T "VPS: ручное добавление с ожиданием регистрации" "VPS: manual setup with registration wait")"
+    echo "3) $(T "Устройство с bouncer/API: добавить bouncer key" "Bouncer/API device: add bouncer key")"
+    read -rp "$(T "Выбор [1/2/3]: " "Choice [1/2/3]: ")" mode || return 0
     case "${mode}" in
       1|remote) mode="remote" ;;
+      3|openwrt|router|bouncer|device) mode="openwrt" ;;
       *) mode="manual" ;;
     esac
   fi
@@ -943,6 +946,7 @@ create_named_vps_bouncer_key() {
   case "${mode}" in
     remote) create_named_vps_remote_install ;;
     manual) create_named_vps_bouncer_key_manual ;;
+    openwrt) create_openwrt_bouncer_connection ;;
     *) return 0 ;;
   esac
 }
@@ -1351,6 +1355,170 @@ create_named_vps_bouncer_key_manual() {
       pause
     fi
   fi
+}
+
+
+create_openwrt_bouncer_connection() {
+  safe_source_env
+  local router_name_raw router_ip_raw router_cidr lapi_url_raw rc tmp
+  local node_name vps_ip bouncer_key
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    set +e
+    router_name_raw="$(whiptail --title " $(T "Bouncer/API device" "Bouncer/API device") " --inputbox "$(T "Имя устройства / bouncer name.\n\nНапример: openwrt-router, home-router, gateway-1, edge-bouncer.\nЭто имя будет видно в CrowdSec Manager в списке bouncers." "Device name / bouncer name.\n\nExample: openwrt-router, home-router, gateway-1, edge-bouncer.\nThis name will be visible in CrowdSec Manager in the bouncers list.")" 13 92 "bouncer-device" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+
+    set +e
+    router_ip_raw="$(whiptail --title " $(T "Bouncer/API device" "Bouncer/API device") " --inputbox "$(T "IP или CIDR устройства, которому разрешить доступ к LAPI.\n\nЕсли устройство в одной LAN с central, обычно это его LAN IP как /32, например 192.168.1.1/32.\nЕсли доступ уже разрешён локальной подсетью, всё равно лучше указать конкретный IP." "Device IP or CIDR allowed to access LAPI.\n\nIf the device is in the same LAN as central, this is usually its LAN IP as /32, for example 192.168.1.1/32.\nEven if local subnet access is already allowed, a specific IP is better.")" 15 96 "" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+
+    local default_lapi="${LOCAL_LAPI_URL}"
+    if [[ -n "${PUBLIC_LAPI_URL:-}" ]]; then
+      default_lapi="${VPS_LAPI_URL}"
+    fi
+    set +e
+    lapi_url_raw="$(whiptail --title " $(T "Bouncer/API LAPI URL" "Bouncer/API LAPI URL") " --inputbox "$(T "Какой LAPI URL прописать на устройстве с bouncer/API?\n\nДля устройства в одной локальной сети обычно используй локальный URL central:\n${LOCAL_LAPI_URL}\n\nЕсли устройство ходит через Nginx Proxy Manager/TLS, используй:\n${VPS_LAPI_URL}" "Which LAPI URL should be configured on the bouncer/API device?\n\nFor a device in the same LAN, usually use the local central URL:\n${LOCAL_LAPI_URL}\n\nIf the device reaches central through Nginx Proxy Manager/TLS, use:\n${VPS_LAPI_URL}")" 17 96 "${default_lapi}" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+
+    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Создать" "Create")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Central создаст отдельный bouncer key и добавит IP/CIDR устройства в доступ к LAPI.\n\nНа самом устройстве нужно будет вставить API URL и key в его конфиг bouncer/API. Для OpenWrt будут показаны LuCI/UCI примеры.\n\nПродолжить?" "Central will create a dedicated bouncer key and add the device IP/CIDR to LAPI access.\n\nOn the device itself you will need to paste the API URL and key into its bouncer/API config. For OpenWrt, LuCI/UCI examples will be shown.\n\nContinue?")" 14 92 || return 0
+  else
+    read -rp "$(T "Имя устройства / bouncer name [bouncer-device]: " "Device / bouncer name [bouncer-device]: ")" router_name_raw || return 0
+    router_name_raw="${router_name_raw:-bouncer-device}"
+    read -rp "$(T "IP/CIDR устройства для доступа к LAPI, например 192.168.1.1/32: " "Device IP/CIDR for LAPI access, e.g. 192.168.1.1/32: ")" router_ip_raw || return 0
+    local default_lapi="${LOCAL_LAPI_URL}"
+    [[ -n "${PUBLIC_LAPI_URL:-}" ]] && default_lapi="${VPS_LAPI_URL}"
+    read -rp "$(T "LAPI URL для устройства [${default_lapi}]: " "LAPI URL for device [${default_lapi}]: ")" lapi_url_raw || return 0
+    lapi_url_raw="${lapi_url_raw:-${default_lapi}}"
+  fi
+
+  node_name="$(printf '%s' "${router_name_raw:-}" | tr -cd 'A-Za-z0-9._:-')"
+  [[ -n "${node_name}" ]] || fail "$(T "Имя bouncer не может быть пустым." "Bouncer name cannot be empty.")"
+
+  router_ip_raw="$(printf '%s' "${router_ip_raw:-}" | tr -cd '0-9A-Fa-f:.\/')"
+  [[ -n "${router_ip_raw}" ]] || fail "$(T "IP/CIDR устройства не может быть пустым." "Device IP/CIDR cannot be empty.")"
+  if [[ "${router_ip_raw}" == */* ]]; then
+    router_cidr="${router_ip_raw}"
+    vps_ip="${router_ip_raw%%/*}"
+  elif [[ "${router_ip_raw}" == *:* ]]; then
+    router_cidr="${router_ip_raw}/128"
+    vps_ip="${router_ip_raw}"
+  else
+    router_cidr="${router_ip_raw}/32"
+    vps_ip="${router_ip_raw}"
+  fi
+
+  lapi_url_raw="${lapi_url_raw%/}"
+  [[ "${lapi_url_raw}" =~ ^https?://[^[:space:]]+$ ]] || fail "$(T "LAPI URL должен начинаться с http:// или https://" "LAPI URL must start with http:// or https://")"
+
+  if [[ -z "${ALLOWED_RANGES}" ]]; then
+    ALLOWED_RANGES="${router_cidr}"
+  elif ! echo ",${ALLOWED_RANGES}," | grep -q ",${router_cidr},"; then
+    ALLOWED_RANGES="${ALLOWED_RANGES},${router_cidr}"
+  fi
+
+  bouncer_key="$(openssl rand -hex 32)"
+
+  create_openwrt_bouncer_apply() {
+    echo "Удаление старого bouncer: ${node_name}"
+    if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+      docker exec crowdsec cscli bouncers delete "${node_name}" || true
+      echo "Регистрация bouncer device в Docker LAPI: ${node_name}"
+      docker exec crowdsec cscli bouncers add "${node_name}" --key "${bouncer_key}"
+    else
+      cscli bouncers delete "${node_name}" || true
+      echo "Регистрация bouncer device в локальном LAPI: ${node_name}"
+      cscli bouncers add "${node_name}" --key "${bouncer_key}"
+    fi
+
+    echo "Сохранение central.env"
+    save_env
+
+    echo "Обновление config.yaml CrowdSec LAPI"
+    configure_docker_crowdsec_lapi
+
+    echo "Перезапуск контейнера CrowdSec"
+    if [[ -d "${MANAGER_COMPOSE_DIR}" && -f "${MANAGER_COMPOSE_FILE}" ]]; then
+      (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
+    else
+      systemctl restart crowdsec || true
+    fi
+
+    echo "Обновление правил UFW"
+    configure_ufw_full
+
+    echo "Запись подключения в ${CONNECTIONS_FILE}"
+    mkdir -p "${CONFIG_DIR}"
+    chmod 700 "${CONFIG_DIR}"
+    touch "${CONNECTIONS_FILE}"
+    chmod 600 "${CONNECTIONS_FILE}"
+    awk -F'\t' -v name="${node_name}" '($2 != name)' "${CONNECTIONS_FILE}" >"${CONNECTIONS_FILE}.tmp" || true
+    mv "${CONNECTIONS_FILE}.tmp" "${CONNECTIONS_FILE}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -Is)" "${node_name}" "${vps_ip}" "${lapi_url_raw}" "BOUNCER_ONLY_OPENWRT" "${bouncer_key}" >>"${CONNECTIONS_FILE}"
+  }
+
+  if ! run_with_live_progress "$(T "Регистрация bouncer/API device" "Registering bouncer/API device")" create_openwrt_bouncer_apply; then
+    return 1
+  fi
+
+  tmp="$(mktemp)"
+  {
+    echo "$(T "Данные для подключения устройства с bouncer/API:" "Bouncer/API device connection data:")"
+    echo
+    echo "Bouncer name:"
+    echo "${node_name}"
+    echo
+    echo "Allowed device IP/CIDR:"
+    echo "${router_cidr}"
+    echo
+    echo "API URL / LAPI URL:"
+    echo "${lapi_url_raw}"
+    echo
+    echo "API key / BOUNCER_KEY:"
+    echo "${bouncer_key}"
+    echo
+    echo "LuCI:"
+    echo "Services -> CrowdSec Firewall Bouncer"
+    echo "Enabled: on"
+    echo "API URL: ${lapi_url_raw}/"
+    echo "API key: ${bouncer_key}"
+    echo
+    echo "Generic bouncer/API settings:"
+    echo "api_url=${lapi_url_raw}/"
+    echo "api_key=${bouncer_key}"
+    echo
+    echo "OpenWrt UCI examples:"
+    echo
+    echo "UCI variant 1 (/etc/config/crowdsec):"
+    echo "uci set crowdsec.@bouncer[0].enabled='1'"
+    echo "uci set crowdsec.@bouncer[0].api_url='${lapi_url_raw}/'"
+    echo "uci set crowdsec.@bouncer[0].api_key='${bouncer_key}'"
+    echo "uci commit crowdsec"
+    echo "/etc/init.d/crowdsec-firewall-bouncer restart"
+    echo "/etc/init.d/crowdsec-firewall-bouncer status"
+    echo
+    echo "UCI variant 2 (/etc/config/crowdsec-firewall-bouncer):"
+    echo "uci set crowdsec-firewall-bouncer.@bouncer[0].enabled='1'"
+    echo "uci set crowdsec-firewall-bouncer.@bouncer[0].api_url='${lapi_url_raw}/'"
+    echo "uci set crowdsec-firewall-bouncer.@bouncer[0].api_key='${bouncer_key}'"
+    echo "uci commit crowdsec-firewall-bouncer"
+    echo "/etc/init.d/crowdsec-firewall-bouncer restart"
+    echo "/etc/init.d/crowdsec-firewall-bouncer status"
+    echo
+    echo "$(T "Проверка на central:" "Check on central:")"
+    echo "sudo docker exec crowdsec cscli bouncers list"
+    echo
+    echo "$(T "Важно: устройство, на котором установлен только bouncer/API без CrowdSec agent, не является machine и не требует validate. Это только bouncer, который забирает decisions с central LAPI и применяет их на своей стороне." "Important: a device with only bouncer/API and without CrowdSec agent is not a machine and does not need validate. It is only a bouncer that pulls decisions from central LAPI and applies them on its side.")"
+    echo "$(T "Запись сохранена в:" "Record saved to:") ${CONNECTIONS_FILE}"
+  } >"${tmp}"
+
+  show_file "$(T "Bouncer/API device" "Bouncer/API device")" "${tmp}"
+  rm -f "${tmp}"
 }
 
 
@@ -1919,13 +2087,13 @@ show_connection_info() {
   # Проверка наличия и непустоты файла базы данных подключений
   if [[ ! -f "${CONNECTIONS_FILE}" || ! -s "${CONNECTIONS_FILE}" ]]; then
     if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      whiptail --title " Подключения VPS " --msgbox "Пока нет сохранённых подключений.\n\nСоздай подключение через:\nПодключения VPS и LAPI -> Создать подключение VPS" 12 78
+      whiptail --title " Подключения VPS " --msgbox "Пока нет сохранённых подключений.\n\nСоздай подключение через:\nПодключения VPS и LAPI -> Создать подключение VPS/устройства/устройства" 12 78
     else
       print_header
       echo "Пока нет сохранённых подключений."
       echo
       echo "Создай подключение через:"
-      echo "  Подключения VPS и LAPI -> Создать подключение VPS"
+      echo "  Подключения VPS и LAPI -> Создать подключение VPS/устройства"
       echo
       echo "Мастер спросит имя VPS и его внешний IP, сам добавит доступ к LAPI и создаст bouncer key."
       pause
@@ -1994,13 +2162,42 @@ show_connection_info() {
     echo "Дата создания: ${created}"
     echo "IP-адрес VPS:  ${ip}"
     echo
-    echo "Данные для копирования в VPS-скрипт:"
-    echo "--------------------------------------------------"
-    echo "CENTRAL_LAPI_URL=${lapi}"
-    echo "AUTO_REG_TOKEN=${token}"
-    echo "BOUNCER_KEY=${key}"
-    echo "MACHINE_NAME=${name}"
-    echo "--------------------------------------------------"
+    if [[ "${token}" == "BOUNCER_ONLY_OPENWRT" ]]; then
+      echo "Тип подключения: bouncer/API device only"
+      echo "--------------------------------------------------"
+      echo "API URL=${lapi}/"
+      echo "API KEY=${key}"
+      echo "BOUNCER_NAME=${name}"
+      echo "--------------------------------------------------"
+      echo
+      echo "LuCI:"
+      echo "Services -> CrowdSec Firewall Bouncer"
+      echo "Enabled: on"
+      echo "API URL: ${lapi}/"
+      echo "API key: ${key}"
+      echo
+      echo "UCI variant 1:"
+      echo "uci set crowdsec.@bouncer[0].enabled='1'"
+      echo "uci set crowdsec.@bouncer[0].api_url='${lapi}/'"
+      echo "uci set crowdsec.@bouncer[0].api_key='${key}'"
+      echo "uci commit crowdsec"
+      echo "/etc/init.d/crowdsec-firewall-bouncer restart"
+      echo
+      echo "UCI variant 2:"
+      echo "uci set crowdsec-firewall-bouncer.@bouncer[0].enabled='1'"
+      echo "uci set crowdsec-firewall-bouncer.@bouncer[0].api_url='${lapi}/'"
+      echo "uci set crowdsec-firewall-bouncer.@bouncer[0].api_key='${key}'"
+      echo "uci commit crowdsec-firewall-bouncer"
+      echo "/etc/init.d/crowdsec-firewall-bouncer restart"
+    else
+      echo "Данные для копирования в VPS-скрипт:"
+      echo "--------------------------------------------------"
+      echo "CENTRAL_LAPI_URL=${lapi}"
+      echo "AUTO_REG_TOKEN=${token}"
+      echo "BOUNCER_KEY=${key}"
+      echo "MACHINE_NAME=${name}"
+      echo "--------------------------------------------------"
+    fi
     echo
     echo "Веб-морда доступна только из локальной сети: ${LOCAL_WEB_UI}"
   } >"${tmp}"
@@ -3122,7 +3319,7 @@ menu_loop_whiptail() {
           ;;
         access)
           choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " Подключения VPS и LAPI " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 18 80 6 \
-            "node_bouncer" "$(T "Создать подключение VPS" "Create VPS connection")" \
+            "node_bouncer" "$(T "Создать подключение VPS/устройства" "Create VPS/device connection")" \
             "validate_machine" "$(T "Подтвердить machine VPS" "Validate VPS machine")" \
             "connect" "$(T "Показать созданные подключения" "Show saved connections")" \
             "add_range" "$(T "Добавить IP/CIDR вручную" "Add IP/CIDR manually")" \
@@ -3191,7 +3388,7 @@ menu_loop_plain() {
     echo "  3) $(T "Показать файл настроек central.env" "Show central.env settings file")"
     echo
     echo "$(T "[ ПОДКЛЮЧЕНИЯ VPS И LAPI ]" "[ VPS AND LAPI CONNECTIONS ]")"
-    echo "  4) $(T "Создать подключение VPS" "Create VPS connection")"
+    echo "  4) $(T "Создать подключение VPS/устройства" "Create VPS/device connection")"
     echo "  5) $(T "Подтвердить machine VPS" "Validate VPS machine")"
     echo "  6) $(T "Удалить IP/CIDR из доступа к LAPI по номеру" "Remove IP/CIDR from LAPI access by number")"
     echo "  7) $(T "Полностью заменить список IP/CIDR" "Replace full IP/CIDR list")"
