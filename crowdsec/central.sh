@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.3-i18n-crowdsec-allowlist-fix"
+SCRIPT_VERSION="v0.7.4-console-options-no-return-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4802,8 +4802,10 @@ console_enroll_with_key() {
   local enroll_key enable_all rc
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
     enroll_key="$(whiptail --title " $(T "CrowdSec Console" "CrowdSec Console") " --passwordbox "$(T "Вставь Console enrollment key из app.crowdsec.net.\n\nЭто НЕ bouncer key и НЕ auto-registration token. После enroll обычно нужно подтвердить engine в веб-консоли CrowdSec." "Paste the Console enrollment key from app.crowdsec.net.\n\nThis is NOT a bouncer key and NOT an auto-registration token. After enroll you usually need to validate the engine in the CrowdSec web console.")" 14 92 "" 3>&1 1>&2 2>&3)" || return 0
+    set +e
     whiptail --title " $(T "Console options" "Console options") " --yes-button "$(T "Да" "Yes")" --no-button "$(T "Нет" "No")" --yesno "$(T "После enroll включить отправку всех Console options через: cscli console enable --all?\n\nЭто опционально. Если не уверен, выбери Нет." "After enroll, enable all Console options with: cscli console enable --all?\n\nThis is optional. If unsure, choose No.")" 13 88
     rc=$?
+    set -e
     [[ "${rc}" -eq 0 ]] && enable_all="yes" || enable_all="no"
   else
     read -rsp "$(T "Console enrollment key: " "Console enrollment key: ")" enroll_key || return 0
