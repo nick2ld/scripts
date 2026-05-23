@@ -1003,47 +1003,97 @@ show_status() {
 }
 
 show_connection_info() {
-  local tmp
-  tmp="$(mktemp)"
-  {
-    print_header
-    safe_source_env
-    echo "Созданные подключения VPS:"
-    echo
-    if [[ ! -s "${CONNECTIONS_FILE}" ]]; then
+  safe_source_env
+  if [[ ! -f "${CONNECTIONS_FILE}" || ! -s "${CONNECTIONS_FILE}" ]]; then
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+      whiptail --title " Подключения VPS " --msgbox "Пока нет сохранённых подключений.\n\nСоздай подключение через:\nПодключения VPS и LAPI -> Создать подключение VPS" 12 78
+    else
+      print_header
       echo "Пока нет сохранённых подключений."
       echo
       echo "Создай подключение через:"
       echo "  Подключения VPS и LAPI -> Создать подключение VPS"
       echo
       echo "Мастер спросит имя VPS и его внешний IP, сам добавит доступ к LAPI и создаст bouncer key."
-    else
-      echo "Краткий список:"
-      echo
-      while IFS=$'\t' read -r created name ip lapi token key; do
-        [[ -n "${name:-}" ]] || continue
-        echo "- ${name}"
-        echo "  дата: ${created}"
-        echo "  ip:   ${ip}"
-        echo "  lapi: ${lapi}"
-        echo
-      done <"${CONNECTIONS_FILE}"
-      echo
-      echo "Данные для копирования в VPS-скрипт:"
-      echo
-      while IFS=$'\t' read -r created name ip lapi token key; do
-        [[ -n "${name:-}" ]] || continue
-        echo "----- ${name} -----"
-        echo "CENTRAL_LAPI_URL=${lapi}"
-        echo "AUTO_REG_TOKEN=${token}"
-        echo "BOUNCER_KEY=${key}"
-        echo "MACHINE_NAME=${name}"
-        echo
-      done <"${CONNECTIONS_FILE}"
+      pause
     fi
+    return
+  fi
+
+  # Считываем строки базы данных
+  local lines=()
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] && lines+=("${line}")
+  done < "${CONNECTIONS_FILE}"
+
+  local choice_num
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    local menu_args=()
+    for i in "${!lines[@]}"; do
+      # Извлекаем IP (3-я колонка) и Имя VPS (2-я колонка) из вашего TSV
+      local name ip
+      name=$(echo "${lines[$i]}" | cut -f2)
+      ip=$(echo "${lines[$i]}" | cut -f3)
+      menu_args+=("$((i+1))" "${name} [${ip}]")
+    done
+
+    # Выводим интерактивный список. Если нажали Отмена/Esc — мягко выходим обратно
+    choice_num=$(whiptail --title " Список подключений VPS " --cancel-button "Назад" --ok-button "Выбрать" --menu "Выберите ноду для просмотра полных данных подключения:" 18 78 8 "${menu_args[@]}" 3>&1 1>&2 2>&3) || true
+    if [[ -z "${choice_num}" ]]; then
+      return
+    fi
+  else
+    print_header
+    echo "Список подключений VPS:"
+    for i in "${!lines[@]}"; do
+      local name ip
+      name=$(echo "${lines[$i]}" | cut -f2)
+      ip=$(echo "${lines[$i]}" | cut -f3)
+      echo "$((i+1)) - ${name} [${ip}]"
+    done
+    echo
+    read -rp "Введи номер VPS для просмотра параметров (или Enter для отмены): " choice_num
+    [[ -n "${choice_num}" ]] || return
+    [[ "${choice_num}" =~ ^[0-9]+$ ]] || { warn "Нужно ввести номер."; pause; return; }
+    if (( choice_num < 1 || choice_num > ${#lines[@]} )); then
+      warn "Номер вне диапазона."
+      pause
+      return
+    fi
+  fi
+
+  # Парсим выбранную строку по вашей оригинальной структуре TSV
+  local target_line="${lines[$((choice_num - 1))]}"
+  local created name ip lapi token key
+  created=$(echo "${target_line}" | cut -f1)
+  name=$(echo "${target_line}" | cut -f2)
+  ip=$(echo "${target_line}" | cut -f3)
+  lapi=$(echo "${target_line}" | cut -f4)
+  token=$(echo "${target_line}" | cut -f5)
+  key=$(echo "${target_line}" | cut -f6)
+
+  # Формируем карточку с данными конкретной VPS
+  local tmp
+  tmp="$(mktemp)"
+  {
+    echo "Параметры подключения для ноды: ${name}"
+    echo "=================================================="
+    echo "Дата создания: ${created}"
+    echo "IP-адрес VPS:  ${ip}"
+    echo
+    echo "Данные для копирования в VPS-скрипт:"
+    echo "--------------------------------------------------"
+    echo "CENTRAL_LAPI_URL=${lapi}"
+    echo "AUTO_REG_TOKEN=${token}"
+    echo "BOUNCER_KEY=${key}"
+    echo "MACHINE_NAME=${name}"
+    echo "--------------------------------------------------"
+    echo
     echo "Веб-морда доступна только из локальной сети: ${LOCAL_WEB_UI}"
   } >"${tmp}"
-  show_file "Подключения VPS" "${tmp}"
+
+  # Отображаем через вашу штатную функцию просмотра текстовых файлов
+  show_file "Настройки VPS: ${name}" "${tmp}"
   rm -f "${tmp}"
 }
 
