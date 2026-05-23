@@ -149,10 +149,13 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.6.5-i18n-openwrt-bouncer"
+SCRIPT_VERSION="v0.6.6-i18n-bouncer-syslog"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
+SYSLOG_DEVICES_FILE="${CONFIG_DIR}/bouncer-syslog-devices.tsv"
+REMOTE_SYSLOG_DIR="/var/log/crowdsec-remote"
+DEFAULT_REMOTE_SYSLOG_PORT="5140"
 
 log() { echo "==> $*"; }
 ok() { echo "$(T "ГОТОВО" "OK"): $*"; }
@@ -1358,9 +1361,133 @@ create_named_vps_bouncer_key_manual() {
 }
 
 
+get_crowdsec_config_dir() {
+  if [[ -f "${MANAGER_COMPOSE_DIR}/crowdsec-config/config.yaml" ]]; then
+    printf '%s' "${MANAGER_COMPOSE_DIR}/crowdsec-config"
+  elif [[ -f "${COMPOSE_DIR}/crowdsec-config/config.yaml" ]]; then
+    printf '%s' "${COMPOSE_DIR}/crowdsec-config"
+  elif [[ -d /etc/crowdsec ]]; then
+    printf '%s' "/etc/crowdsec"
+  else
+    printf '%s' "${COMPOSE_DIR}/crowdsec-config"
+  fi
+}
+
+restart_crowdsec_runtime() {
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
+    docker restart crowdsec
+  elif systemctl list-unit-files crowdsec.service >/dev/null 2>&1; then
+    systemctl restart crowdsec
+  else
+    return 0
+  fi
+}
+
+install_or_update_remote_syslog_receiver() {
+  local port="${1:-${DEFAULT_REMOTE_SYSLOG_PORT}}"
+  local proto="${2:-udp}"
+  local cfg_dir acquis_file rsyslog_conf logrotate_conf
+
+  [[ "${port}" =~ ^[0-9]+$ ]] || fail "$(T "Некорректный порт syslog." "Invalid syslog port.")"
+
+  echo "Установка rsyslog и подготовка каталога удалённых логов..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  apt-get install -y rsyslog
+
+  mkdir -p "${REMOTE_SYSLOG_DIR}"
+  chmod 750 "${REMOTE_SYSLOG_DIR}"
+
+  rsyslog_conf="/etc/rsyslog.d/30-crowdsec-remote-devices.conf"
+  cat > "${rsyslog_conf}" <<EOF
+# Managed by crowdsec-central-menu.
+# Receives syslog from bouncer-only/API devices and writes it to files readable by CrowdSec.
+module(load="imudp")
+input(type="imudp" port="${port}" ruleset="crowdsec_remote_devices")
+
+module(load="imtcp")
+input(type="imtcp" port="${port}" ruleset="crowdsec_remote_devices")
+
+template(name="CrowdSecRemoteDeviceFile" type="string" string="${REMOTE_SYSLOG_DIR}/%fromhost-ip%.log")
+
+ruleset(name="crowdsec_remote_devices") {
+  action(type="omfile" dynaFile="CrowdSecRemoteDeviceFile" FileCreateMode="0640" DirCreateMode="0750")
+  stop
+}
+EOF
+
+  logrotate_conf="/etc/logrotate.d/crowdsec-remote-devices"
+  cat > "${logrotate_conf}" <<EOF
+${REMOTE_SYSLOG_DIR}/*.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 root adm
+    sharedscripts
+    postrotate
+        systemctl reload rsyslog >/dev/null 2>&1 || true
+    endscript
+}
+EOF
+
+  systemctl enable --now rsyslog
+  systemctl restart rsyslog
+
+  cfg_dir="$(get_crowdsec_config_dir)"
+  mkdir -p "${cfg_dir}/acquis.d"
+  acquis_file="${cfg_dir}/acquis.d/remote-syslog-devices.yaml"
+  cat > "${acquis_file}" <<EOF
+# Managed by crowdsec-central-menu.
+# Logs received by host rsyslog from routers/firewalls/bouncer-only devices.
+source: file
+filename: ${REMOTE_SYSLOG_DIR}/*.log
+labels:
+  type: syslog
+  service: remote-device
+EOF
+
+  echo "Acquisition создан: ${acquis_file}"
+  restart_crowdsec_runtime || true
+  echo "Syslog intake готов на порту ${port}/udp и ${port}/tcp."
+}
+
+record_remote_syslog_device() {
+  local name="$1" cidr="$2" port="$3" proto="$4"
+  mkdir -p "${CONFIG_DIR}"
+  chmod 700 "${CONFIG_DIR}"
+  touch "${SYSLOG_DEVICES_FILE}"
+  chmod 600 "${SYSLOG_DEVICES_FILE}"
+  awk -F'\t' -v name="${name}" '($1 != name)' "${SYSLOG_DEVICES_FILE}" >"${SYSLOG_DEVICES_FILE}.tmp" || true
+  mv "${SYSLOG_DEVICES_FILE}.tmp" "${SYSLOG_DEVICES_FILE}"
+  printf '%s\t%s\t%s\t%s\t%s\n' "${name}" "${cidr}" "${port}" "${proto}" "$(date -Is)" >>"${SYSLOG_DEVICES_FILE}"
+}
+
+show_remote_syslog_devices() {
+  local tmp
+  tmp="$(mktemp)"
+  {
+    echo "$(T "Устройства, которым открыт syslog intake на central:" "Devices allowed to send syslog to central:")"
+    echo
+    if [[ -s "${SYSLOG_DEVICES_FILE}" ]]; then
+      awk -F'\t' 'BEGIN {printf "%-28s %-24s %-8s %-8s %s\n", "NAME", "CIDR", "PORT", "PROTO", "ADDED"} {printf "%-28s %-24s %-8s %-8s %s\n", $1, $2, $3, $4, $5}' "${SYSLOG_DEVICES_FILE}"
+    else
+      echo "$(T "Пока нет устройств syslog." "No syslog devices yet.")"
+    fi
+    echo
+    echo "$(T "Важно: bouncer сам не отправляет события в CrowdSec. Для событий в CrowdSec Manager устройство должно отправлять syslog на central, а central должен читать эти логи через acquis." "Important: a bouncer does not send events to CrowdSec. To see events in CrowdSec Manager, the device must send syslog to central and central must read those logs through acquis.")"
+  } > "${tmp}"
+  show_file "$(T "Syslog устройства" "Syslog devices")" "${tmp}"
+  rm -f "${tmp}"
+}
+
+
+
 create_openwrt_bouncer_connection() {
   safe_source_env
-  local router_name_raw router_ip_raw router_cidr lapi_url_raw rc tmp
+  local router_name_raw router_ip_raw router_cidr lapi_url_raw rc tmp syslog_enable_raw syslog_port_raw syslog_proto_raw
   local node_name vps_ip bouncer_key
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
@@ -1386,7 +1513,21 @@ create_openwrt_bouncer_connection() {
     set -e
     [[ "${rc}" -eq 0 ]] || return 0
 
-    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Создать" "Create")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Central создаст отдельный bouncer key и добавит IP/CIDR устройства в доступ к LAPI.\n\nНа самом устройстве нужно будет вставить API URL и key в его конфиг bouncer/API. Для OpenWrt будут показаны LuCI/UCI примеры.\n\nПродолжить?" "Central will create a dedicated bouncer key and add the device IP/CIDR to LAPI access.\n\nOn the device itself you will need to paste the API URL and key into its bouncer/API config. For OpenWrt, LuCI/UCI examples will be shown.\n\nContinue?")" 14 92 || return 0
+    if whiptail --title " $(T "Syslog в CrowdSec Manager" "Syslog in CrowdSec Manager") " --yes-button "$(T "Да" "Yes")" --no-button "$(T "Нет" "No")" --yesno "$(T "Bouncer сам не отправляет события в CrowdSec. Он только забирает decisions.\n\nЧтобы в CrowdSec Manager появились события от роутера/устройства, central должен принимать syslog от этого устройства.\n\nНастроить syslog intake на central и показать команды для устройства?" "A bouncer does not send events to CrowdSec. It only pulls decisions.\n\nTo see events from the router/device in CrowdSec Manager, central must receive syslog from that device.\n\nConfigure syslog intake on central and show device commands?")" 15 94; then
+      syslog_enable_raw="yes"
+      set +e
+      syslog_port_raw="$(whiptail --title " $(T "Syslog порт" "Syslog port") " --inputbox "$(T "Порт syslog на central.\n\n5140 выбран специально, чтобы не занимать привилегированный 514." "Syslog port on central.\n\n5140 is used to avoid the privileged 514 port.")" 11 86 "${DEFAULT_REMOTE_SYSLOG_PORT}" 3>&1 1>&2 2>&3)"
+      rc=$?
+      set -e
+      [[ "${rc}" -eq 0 ]] || return 0
+      syslog_proto_raw="both"
+    else
+      syslog_enable_raw="no"
+      syslog_port_raw="${DEFAULT_REMOTE_SYSLOG_PORT}"
+      syslog_proto_raw="both"
+    fi
+
+    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Создать" "Create")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Central создаст отдельный bouncer key и добавит IP/CIDR устройства в доступ к LAPI.\n\nЕсли включён syslog intake, central также настроит rsyslog и CrowdSec acquisition для удалённых логов.\n\nПродолжить?" "Central will create a dedicated bouncer key and add the device IP/CIDR to LAPI access.\n\nIf syslog intake is enabled, central will also configure rsyslog and CrowdSec acquisition for remote logs.\n\nContinue?")" 15 92 || return 0
   else
     read -rp "$(T "Имя устройства / bouncer name [bouncer-device]: " "Device / bouncer name [bouncer-device]: ")" router_name_raw || return 0
     router_name_raw="${router_name_raw:-bouncer-device}"
@@ -1395,6 +1536,11 @@ create_openwrt_bouncer_connection() {
     [[ -n "${PUBLIC_LAPI_URL:-}" ]] && default_lapi="${VPS_LAPI_URL}"
     read -rp "$(T "LAPI URL для устройства [${default_lapi}]: " "LAPI URL for device [${default_lapi}]: ")" lapi_url_raw || return 0
     lapi_url_raw="${lapi_url_raw:-${default_lapi}}"
+    read -rp "$(T "Настроить syslog intake на central для событий в Manager? [Y/n]: " "Configure syslog intake on central for events in Manager? [Y/n]: ")" syslog_enable_raw || syslog_enable_raw="yes"
+    case "${syslog_enable_raw:-yes}" in n|N|no|NO|No) syslog_enable_raw="no" ;; *) syslog_enable_raw="yes" ;; esac
+    read -rp "$(T "Syslog port на central [${DEFAULT_REMOTE_SYSLOG_PORT}]: " "Syslog port on central [${DEFAULT_REMOTE_SYSLOG_PORT}]: ")" syslog_port_raw || syslog_port_raw="${DEFAULT_REMOTE_SYSLOG_PORT}"
+    syslog_port_raw="${syslog_port_raw:-${DEFAULT_REMOTE_SYSLOG_PORT}}"
+    syslog_proto_raw="both"
   fi
 
   node_name="$(printf '%s' "${router_name_raw:-}" | tr -cd 'A-Za-z0-9._:-')"
@@ -1415,6 +1561,15 @@ create_openwrt_bouncer_connection() {
 
   lapi_url_raw="${lapi_url_raw%/}"
   [[ "${lapi_url_raw}" =~ ^https?://[^[:space:]]+$ ]] || fail "$(T "LAPI URL должен начинаться с http:// или https://" "LAPI URL must start with http:// or https://")"
+
+  case "${syslog_enable_raw:-no}" in
+    yes|y|Y|YES|Yes|да|Да) syslog_enable_raw="yes" ;;
+    *) syslog_enable_raw="no" ;;
+  esac
+  syslog_port_raw="$(printf '%s' "${syslog_port_raw:-${DEFAULT_REMOTE_SYSLOG_PORT}}" | tr -cd '0-9')"
+  syslog_port_raw="${syslog_port_raw:-${DEFAULT_REMOTE_SYSLOG_PORT}}"
+  is_valid_port "${syslog_port_raw}" || fail "$(T "Некорректный syslog port." "Invalid syslog port.")"
+  case "${syslog_proto_raw:-both}" in udp|tcp|both) ;; *) syslog_proto_raw="both" ;; esac
 
   if [[ -z "${ALLOWED_RANGES}" ]]; then
     ALLOWED_RANGES="${router_cidr}"
@@ -1442,6 +1597,12 @@ create_openwrt_bouncer_connection() {
     echo "Обновление config.yaml CrowdSec LAPI"
     configure_docker_crowdsec_lapi
 
+    if [[ "${syslog_enable_raw:-no}" == "yes" ]]; then
+      echo "Настройка syslog intake для устройства ${node_name}"
+      install_or_update_remote_syslog_receiver "${syslog_port_raw}" "${syslog_proto_raw}"
+      record_remote_syslog_device "${node_name}" "${router_cidr}" "${syslog_port_raw}" "${syslog_proto_raw}"
+    fi
+
     echo "Перезапуск контейнера CrowdSec"
     if [[ -d "${MANAGER_COMPOSE_DIR}" && -f "${MANAGER_COMPOSE_FILE}" ]]; then
       (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
@@ -1459,7 +1620,7 @@ create_openwrt_bouncer_connection() {
     chmod 600 "${CONNECTIONS_FILE}"
     awk -F'\t' -v name="${node_name}" '($2 != name)' "${CONNECTIONS_FILE}" >"${CONNECTIONS_FILE}.tmp" || true
     mv "${CONNECTIONS_FILE}.tmp" "${CONNECTIONS_FILE}"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -Is)" "${node_name}" "${vps_ip}" "${lapi_url_raw}" "BOUNCER_ONLY_OPENWRT" "${bouncer_key}" >>"${CONNECTIONS_FILE}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -Is)" "${node_name}" "${vps_ip}" "${lapi_url_raw}" "BOUNCER_ONLY_DEVICE" "${bouncer_key}" >>"${CONNECTIONS_FILE}"
   }
 
   if ! run_with_live_progress "$(T "Регистрация bouncer/API device" "Registering bouncer/API device")" create_openwrt_bouncer_apply; then
@@ -1482,6 +1643,30 @@ create_openwrt_bouncer_connection() {
     echo "API key / BOUNCER_KEY:"
     echo "${bouncer_key}"
     echo
+    if [[ "${syslog_enable_raw:-no}" == "yes" ]]; then
+      echo "$(T "Syslog intake на central:" "Syslog intake on central:")"
+      echo "central_syslog_host=${LAN_IP}"
+      echo "central_syslog_port=${syslog_port_raw}"
+      echo "central_syslog_protocol=${syslog_proto_raw}"
+      echo "central_log_files=${REMOTE_SYSLOG_DIR}/*.log"
+      echo
+      echo "$(T "Важно: именно syslog нужен для появления событий/метрик устройства в CrowdSec Manager. Один bouncer показывает только Connected/Last Pull и не отправляет логи." "Important: syslog is required for the device events/metrics to appear in CrowdSec Manager. A bouncer alone only shows Connected/Last Pull and does not send logs.")"
+      echo
+      echo "OpenWrt syslog UCI example:"
+      echo "uci set system.@system[0].log_ip='${LAN_IP}'"
+      echo "uci set system.@system[0].log_port='${syslog_port_raw}'"
+      echo "uci set system.@system[0].log_proto='udp'"
+      echo "uci commit system"
+      echo "/etc/init.d/log restart"
+      echo
+      echo "$(T "Проверка поступления логов на central:" "Check log flow on central:")"
+      echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/${vps_ip}.log"
+      echo "sudo docker exec crowdsec cscli metrics"
+      echo
+    else
+      echo "$(T "Syslog intake не включён. В CrowdSec Manager это устройство будет видно только как bouncer Connected/Last Pull, без событий и метрик логов." "Syslog intake is not enabled. In CrowdSec Manager this device will only appear as a bouncer Connected/Last Pull, without log events and metrics.")"
+      echo
+    fi
     echo "LuCI:"
     echo "Services -> CrowdSec Firewall Bouncer"
     echo "Enabled: on"
@@ -1863,6 +2048,25 @@ configure_ufw_full_apply() {
     ufw allow from "${r}" to any port "${LAPI_PORT}" proto tcp
   done
   IFS="${old_ifs}"
+
+  if [[ -s "${SYSLOG_DEVICES_FILE}" ]]; then
+    echo "Открытие syslog intake для устройств с bouncer/API..."
+    while IFS=$'\t' read -r syslog_name syslog_cidr syslog_port syslog_proto _; do
+      [[ -n "${syslog_cidr:-}" && -n "${syslog_port:-}" ]] || continue
+      case "${syslog_proto:-both}" in
+        udp)
+          ufw allow from "${syslog_cidr}" to any port "${syslog_port}" proto udp comment "crowdsec syslog ${syslog_name}" || true
+          ;;
+        tcp)
+          ufw allow from "${syslog_cidr}" to any port "${syslog_port}" proto tcp comment "crowdsec syslog ${syslog_name}" || true
+          ;;
+        *)
+          ufw allow from "${syslog_cidr}" to any port "${syslog_port}" proto udp comment "crowdsec syslog ${syslog_name}" || true
+          ufw allow from "${syslog_cidr}" to any port "${syslog_port}" proto tcp comment "crowdsec syslog ${syslog_name}" || true
+          ;;
+      esac
+    done < "${SYSLOG_DEVICES_FILE}"
+  fi
 
   echo "Включение UFW..."
   ufw --force enable
@@ -3267,6 +3471,7 @@ run_menu_action() {
     logs) show_logs ;;
     crowdsec_info) show_crowdsec_info ;;
     firewall) show_firewall ;;
+    syslog_devices) show_remote_syslog_devices ;;
     reapply) reapply_all_settings ;;
     disable_autostart) disable_login_menu ;;
     enable_autostart) enable_login_menu ;;
@@ -3318,10 +3523,11 @@ menu_loop_whiptail() {
             3>&1 1>&2 2>&3)" || break
           ;;
         access)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " Подключения VPS и LAPI " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 18 80 6 \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " Подключения VPS и LAPI " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 20 86 8 \
             "node_bouncer" "$(T "Создать подключение VPS/устройства" "Create VPS/device connection")" \
             "validate_machine" "$(T "Подтвердить machine VPS" "Validate VPS machine")" \
             "connect" "$(T "Показать созданные подключения" "Show saved connections")" \
+            "syslog_devices" "$(T "Показать syslog-устройства" "Show syslog devices")" \
             "add_range" "$(T "Добавить IP/CIDR вручную" "Add IP/CIDR manually")" \
             "remove_range" "$(T "Удалить IP/CIDR из LAPI" "Remove IP/CIDR from LAPI")" \
             "replace_ranges" "$(T "Заменить весь список IP/CIDR" "Replace the full IP/CIDR list")" \
