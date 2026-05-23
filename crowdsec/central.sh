@@ -17,6 +17,7 @@ set -Eeuo pipefail
 # - Removes CIDR entries by number, not by typing the exact string.
 # - Keeps system/Docker/CrowdSec/Web UI update actions in the menu.
 # - Installs the menu command by copying this script when available and keeps all functions intact.
+# - v0.2-secure: safer env parsing, UFW backup/SSH preservation, update confirmation, single-instance lock.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -33,13 +34,14 @@ MANAGER_COMPOSE_DIR="/opt/crowdsec-manager"
 MANAGER_COMPOSE_FILE="${MANAGER_COMPOSE_DIR}/docker-compose.yml"
 INSTALLED_SCRIPT="/usr/local/sbin/crowdsec-central-menu"
 PROFILE_FILE="/etc/profile.d/crowdsec-central-menu.sh"
+LOCK_FILE="/tmp/crowdsec-central-menu.lock"
 DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.1"
-SCRIPT_RELEASE_DATE="2026-05-22"
+SCRIPT_VERSION="v0.2-secure"
+SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 
 log() { echo "==> $*"; }
@@ -259,6 +261,93 @@ require_root() {
   [[ "${EUID}" -eq 0 ]] || fail "Запусти от root: sudo bash $0"
 }
 
+
+acquire_script_lock() {
+  exec 9>"${LOCK_FILE}"
+  if command -v flock >/dev/null 2>&1; then
+    if ! flock -n 9 2>/dev/null; then
+      fail "Уже запущен другой экземпляр CrowdSec Central menu. Если это ошибка, проверь: ${LOCK_FILE}"
+    fi
+    return 0
+  fi
+  # Fallback для минимальных контейнеров без flock.
+  if ! mkdir "${LOCK_FILE}.dir" 2>/dev/null; then
+    fail "Уже запущен другой экземпляр CrowdSec Central menu. Если это ошибка, удали: ${LOCK_FILE}.dir"
+  fi
+  trap 'rm -rf "${LOCK_FILE}.dir"; cleanup_runtime_files' EXIT
+}
+
+cleanup_runtime_files() {
+  # Зарезервировано для будущей очистки общих временных ресурсов.
+  true
+}
+
+trap cleanup_runtime_files EXIT
+
+read_env_key() {
+  local key="$1" value=""
+  [[ -f "${ENV_FILE}" ]] || return 0
+  while IFS='=' read -r k v; do
+    [[ -n "${k:-}" ]] || continue
+    [[ "${k}" == \#* ]] && continue
+    if [[ "${k}" == "${key}" ]]; then
+      value="${v//$'\r'/}"
+      printf '%s' "${value}"
+      return 0
+    fi
+  done < "${ENV_FILE}"
+}
+
+sanitize_token_value() {
+  printf '%s' "${1:-}" | tr -cd 'A-Za-z0-9._:@/%+=,-'
+}
+
+sanitize_plain_value() {
+  printf '%s' "${1:-}" | tr -cd 'A-Za-z0-9._:@/%+=, -'
+}
+
+get_sshd_ports() {
+  local ports=() file port
+  for file in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
+    [[ -f "${file}" ]] || continue
+    while read -r _ port _; do
+      [[ "${port:-}" =~ ^[0-9]+$ ]] || continue
+      ports+=("${port}")
+    done < <(grep -E '^[[:space:]]*Port[[:space:]]+[0-9]+' "${file}" 2>/dev/null || true)
+  done
+  ports+=("22")
+  printf '%s\n' "${ports[@]}" | awk '!seen[$0]++'
+}
+
+backup_ufw_state() {
+  local backup_dir="${CONFIG_DIR}/ufw-backup-$(date +%F-%H%M%S)"
+  mkdir -p "${backup_dir}"
+  chmod 700 "${backup_dir}"
+  ufw status verbose >"${backup_dir}/ufw-status-before.txt" 2>&1 || true
+  [[ -d /etc/ufw ]] && cp -a /etc/ufw "${backup_dir}/etc-ufw" 2>/dev/null || true
+  echo "${backup_dir}"
+}
+
+confirm_dangerous_action() {
+  local title="$1" text="$2"
+  if [[ "${CROWDSEC_ASSUME_YES:-0}" == "1" ]]; then
+    return 0
+  fi
+  if [[ "${CROWDSEC_TUI_MODE:-}" =~ ^(whiptail|installer)$ ]] && tui_available; then
+    whiptail --title " ${title} " --yes-button "Продолжить" --no-button "Отмена" --yesno "${text}" 14 88
+    return $?
+  fi
+  if has_tty; then
+    echo
+    echo "${title}"
+    echo "${text}"
+    read -rp "Продолжить? [y/N]: " ans </dev/tty || return 1
+    [[ "${ans:-N}" =~ ^[Yy]$ ]]
+    return $?
+  fi
+  return 1
+}
+
 detect_debian() {
   [[ -f /etc/debian_version ]] || fail "Это должен быть Debian/Ubuntu/Debian-based контейнер."
   if [[ -f /etc/os-release ]]; then
@@ -287,23 +376,43 @@ PY
 }
 
 safe_source_env() {
-  if [[ -f "${ENV_FILE}" ]]; then
-    set +u
-    # shellcheck disable=SC1090
-    source "${ENV_FILE}"
-    set -u
+  # Безопасно читаем central.env как данные, а не как shell-код.
+  # Старый вариант `source central.env` мог выполнить произвольную команду от root,
+  # если файл был повреждён или изменён злоумышленником.
+  local env_lan env_web env_lapi env_public env_ranges env_token env_bouncer env_pass env_type
+  env_lan="$(read_env_key LAN_IP)"
+  env_web="$(read_env_key WEB_PORT)"
+  env_lapi="$(read_env_key LAPI_PORT)"
+  env_public="$(read_env_key PUBLIC_ADDR)"
+  env_ranges="$(read_env_key ALLOWED_RANGES)"
+  env_token="$(read_env_key AUTO_REG_TOKEN)"
+  env_bouncer="$(read_env_key SHARED_BOUNCER_KEY)"
+  env_pass="$(read_env_key WEBUI_PASSWORD)"
+  env_type="$(read_env_key WEB_UI_TYPE)"
+
+  LAN_IP="${LAN_IP:-${env_lan:-$(get_lan_ip)}}"
+  WEB_PORT="${WEB_PORT:-${env_web:-${DEFAULT_WEB_PORT}}}"
+  LAPI_PORT="${LAPI_PORT:-${env_lapi:-${DEFAULT_LAPI_PORT}}}"
+  PUBLIC_ADDR="${PUBLIC_ADDR:-${env_public:-}}"
+  ALLOWED_RANGES="${ALLOWED_RANGES:-${env_ranges:-}}"
+  AUTO_REG_TOKEN="${AUTO_REG_TOKEN:-${env_token:-}}"
+  SHARED_BOUNCER_KEY="${SHARED_BOUNCER_KEY:-${env_bouncer:-}}"
+  WEBUI_PASSWORD="${WEBUI_PASSWORD:-${env_pass:-}}"
+  WEB_UI_TYPE="${WEB_UI_TYPE:-${env_type:-manager}}"
+
+  LAN_IP="$(sanitize_plain_value "${LAN_IP}")"
+  PUBLIC_ADDR="$(sanitize_plain_value "${PUBLIC_ADDR}")"
+  AUTO_REG_TOKEN="$(sanitize_token_value "${AUTO_REG_TOKEN}")"
+  SHARED_BOUNCER_KEY="$(sanitize_token_value "${SHARED_BOUNCER_KEY}")"
+  WEBUI_PASSWORD="$(sanitize_token_value "${WEBUI_PASSWORD}")"
+  WEB_UI_TYPE="$(sanitize_plain_value "${WEB_UI_TYPE}")"
+
+  if ! is_valid_port "${WEB_PORT}"; then
+    WEB_PORT="${DEFAULT_WEB_PORT}"
   fi
-
-  LAN_IP="${LAN_IP:-$(get_lan_ip)}"
-  WEB_PORT="${WEB_PORT:-${DEFAULT_WEB_PORT}}"
-  LAPI_PORT="${LAPI_PORT:-${DEFAULT_LAPI_PORT}}"
-  PUBLIC_ADDR="${PUBLIC_ADDR:-}"
-  ALLOWED_RANGES="${ALLOWED_RANGES:-}"
-  AUTO_REG_TOKEN="${AUTO_REG_TOKEN:-}"
-  SHARED_BOUNCER_KEY="${SHARED_BOUNCER_KEY:-}"
-  WEBUI_PASSWORD="${WEBUI_PASSWORD:-}"
-  WEB_UI_TYPE="manager"
-
+  if ! is_valid_port "${LAPI_PORT}"; then
+    LAPI_PORT="${DEFAULT_LAPI_PORT}"
+  fi
   if [[ -z "${LAN_IP}" ]]; then
     LAN_IP="127.0.0.1"
   fi
@@ -318,7 +427,6 @@ safe_source_env() {
     VPS_LAPI_URL="http://YOUR_PUBLIC_IP_OR_DDNS:${LAPI_PORT}"
   fi
 }
-
 save_env() {
   LAN_IP="${LAN_IP:-$(get_lan_ip)}"
   [[ -n "${LAN_IP:-}" ]] || LAN_IP="127.0.0.1"
@@ -467,7 +575,16 @@ install_or_update_docker() {
 
 install_or_update_crowdsec_repo() {
   log "Проверяю репозиторий CrowdSec..."
-  curl -fsSL https://install.crowdsec.net | sh
+  command -v curl >/dev/null 2>&1 || fail "Не найден curl. Установи curl перед настройкой репозитория CrowdSec."
+  local tmp
+  tmp="$(mktemp)"
+  curl -fsSL https://install.crowdsec.net -o "${tmp}"
+  bash -n "${tmp}"
+  if [[ "${CROWDSEC_ASSUME_YES:-0}" != "1" ]]; then
+    confirm_dangerous_action "Удалённый установщик CrowdSec" "Скрипт скачал официальный install.crowdsec.net во временный файл и проверил синтаксис. Следующий шаг выполнит этот файл от root для настройки apt-репозитория CrowdSec. Это безопаснее, чем curl | sh, но всё равно остаётся выполнением удалённого кода."
+  fi
+  bash "${tmp}"
+  rm -f "${tmp}"
   apt-get update -y
   ok "Репозиторий CrowdSec готов."
 }
@@ -1019,87 +1136,76 @@ COMPOSE
   ok "Веб-морда запущена или обновлена."
 }
 
+configure_ufw_full_apply() {
+  safe_source_env
+  if ! command -v ufw >/dev/null 2>&1; then
+    echo "ufw не найден, пропускаю настройку firewall."
+    return 0
+  fi
+
+  local backup_dir ssh_port client_ip old_ifs r
+  backup_dir="$(backup_ufw_state)"
+  echo "Backup текущего UFW сохранён: ${backup_dir}"
+
+  echo "Сброс текущей конфигурации UFW..."
+  ufw --force reset
+
+  echo "Установка базовых политик UFW..."
+  ufw default deny incoming
+  ufw default allow outgoing
+
+  echo "Сохранение SSH-доступа..."
+  client_ip="${SSH_CONNECTION%% *}"
+  while IFS= read -r ssh_port; do
+    [[ -n "${ssh_port}" ]] || continue
+    ufw allow "${ssh_port}/tcp" comment "keep SSH port ${ssh_port}" || true
+    if [[ -n "${client_ip}" && "${client_ip}" != "${SSH_CONNECTION}" ]]; then
+      ufw allow from "${client_ip}" to any port "${ssh_port}" proto tcp comment "keep current SSH client" || true
+    fi
+  done < <(get_sshd_ports)
+
+  echo "Открытие Web UI только для приватных диапазонов..."
+  ufw allow from 10.0.0.0/8 to any port "${WEB_PORT}" proto tcp
+  ufw allow from 172.16.0.0/12 to any port "${WEB_PORT}" proto tcp
+  ufw allow from 192.168.0.0/16 to any port "${WEB_PORT}" proto tcp
+
+  echo "Открытие LAPI для Docker и разрешённых VPS/IP..."
+  ufw allow from 172.16.0.0/12 to any port "${LAPI_PORT}" proto tcp
+  ufw allow from 172.17.0.0/12 to any port "${LAPI_PORT}" proto tcp
+  ufw allow from 172.16.238.0/24 to any port "${LAPI_PORT}" proto tcp
+
+  old_ifs="${IFS}"
+  IFS=','
+  for r in ${ALLOWED_RANGES}; do
+    IFS="${old_ifs}"
+    r="$(echo "${r}" | xargs)"
+    [[ -n "${r}" ]] || continue
+    echo "Разрешаю доступ к LAPI для ${r}..."
+    ufw allow from "${r}" to any port "${LAPI_PORT}" proto tcp
+  done
+  IFS="${old_ifs}"
+
+  echo "Включение UFW..."
+  ufw --force enable
+  ufw status verbose || true
+  ok "UFW настроен и включен. Backup: ${backup_dir}"
+}
+
 configure_ufw_full() {
   safe_source_env
   if ! command -v ufw >/dev/null 2>&1; then
     return 0
   fi
 
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    local fifo
-    fifo=$(mktemp -u)
-    mkfifo "${fifo}"
-
-    whiptail --title " Настройка Брандмауэра " --gauge "Инициализация правил UFW..." 8 78 0 < "${fifo}" &
-    local gauge_pid=$!
-    exec 3> "${fifo}"
-
-    echo -e "XXX\n20\nСброс текущей конфигурации таблиц UFW...\nXXX" >&3
-    ufw --force reset >/dev/null 2>&1
-
-    echo -e "XXX\n40\nУстановка глобальных политик (Deny Incoming / Allow Outgoing)...\nXXX" >&3
-    ufw default deny incoming >/dev/null 2>&1
-    ufw default allow outgoing >/dev/null 2>&1
-    ufw allow ssh >/dev/null 2>&1 || true
-
-    echo -e "XXX\n60\nОткрытие доверенных приватных диапазонов для Web UI...\nXXX" >&3
-    ufw allow from 10.0.0.0/8 to any port "${WEB_PORT}" proto tcp >/dev/null 2>&1
-    ufw allow from 172.16.0.0/12 to any port "${WEB_PORT}" proto tcp >/dev/null 2>&1
-    ufw allow from 192.168.0.0/16 to any port "${WEB_PORT}" proto tcp >/dev/null 2>&1
-
-    echo -e "XXX\n75\nАвторизация подсети Docker-моста для LAPI...\nXXX" >&3
-    ufw allow from 172.16.0.0/12 to any port "${LAPI_PORT}" proto tcp >/dev/null 2>&1
-    ufw allow from 172.17.0.0/12 to any port "${LAPI_PORT}" proto tcp >/dev/null 2>&1
-    ufw allow from 172.16.238.0/24 to any port "${LAPI_PORT}" proto tcp >/dev/null 2>&1
-
-    echo -e "XXX\n90\nИмпорт разрешенных диапазонов (ALLOWED_RANGES)...\nXXX" >&3
-    local old_ifs="${IFS}"
-    IFS=','
-    for r in ${ALLOWED_RANGES}; do
-      IFS="${old_ifs}"
-      r="$(echo "${r}" | xargs)"
-      [[ -n "${r}" ]] || continue
-      ufw allow from "${r}" to any port "${LAPI_PORT}" proto tcp >/dev/null 2>&1
-    done
-    IFS="${old_ifs}"
-
-    echo -e "XXX\n100\nВключение брандмауэра UFW...\nXXX" >&3
-    ufw --force enable >/dev/null 2>&1
-    sleep 0.2
-
-    exec 3>&-
-    wait "${gauge_pid}" 2>/dev/null || true
-    rm -f "${fifo}"
-  else
-    log "Полная настройка UFW (reset -> rules -> enable)..."
-    ufw --force reset
-    ufw default deny incoming
-    ufw default allow outgoing
-    ufw allow ssh || true
-
-    ufw allow from 10.0.0.0/8 to any port "${WEB_PORT}" proto tcp
-    ufw allow from 172.16.0.0/12 to any port "${WEB_PORT}" proto tcp
-    ufw allow from 192.168.0.0/16 to any port "${WEB_PORT}" proto tcp
-
-    ufw allow from 172.16.0.0/12 to any port "${LAPI_PORT}" proto tcp
-    ufw allow from 172.17.0.0/12 to any port "${LAPI_PORT}" proto tcp
-    ufw allow from 172.16.238.0/24 to any port "${LAPI_PORT}" proto tcp
-
-    local old_ifs="${IFS}"
-    IFS=','
-    for r in ${ALLOWED_RANGES}; do
-      IFS="${old_ifs}"
-      r="$(echo "${r}" | xargs)"
-      [[ -n "${r}" ]] || continue
-      ufw allow from "${r}" to any port "${LAPI_PORT}" proto tcp
-    done
-    IFS="${old_ifs}"
-
-    ufw --force enable
-    ok "UFW настроен и включен."
+  if [[ "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    if ! confirm_dangerous_action "Настройка UFW" "Скрипт сделает backup текущих правил, затем выполнит ufw --force reset и пересоздаст правила для SSH, Web UI и LAPI. Если SSH использует нестандартную схему доступа, проверь правила после выполнения."; then
+      warn "Настройка UFW отменена пользователем."
+      return 1
+    fi
   fi
-}
 
+  run_with_live_progress "Настройка UFW firewall" configure_ufw_full_apply
+}
 find_this_script() {
   local src=""
   if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
@@ -1156,15 +1262,35 @@ update_menu_from_github() {
   require_root
   log "Скачиваю актуальную версию меню из GitHub..."
   command -v curl >/dev/null 2>&1 || fail "Не найден curl. Установи: apt-get update && apt-get install -y curl"
-  local tmp
+  local tmp diff_file
   tmp="$(mktemp)"
+  diff_file="$(mktemp)"
   curl -fsSL -H "Cache-Control: no-cache" "${SCRIPT_RAW_URL}?$(date +%s)" -o "${tmp}"
   bash -n "${tmp}"
+
+  if [[ -f "${INSTALLED_SCRIPT}" ]]; then
+    diff -u "${INSTALLED_SCRIPT}" "${tmp}" >"${diff_file}" 2>/dev/null || true
+  else
+    echo "${INSTALLED_SCRIPT} отсутствует, будет установлен новый файл." >"${diff_file}"
+  fi
+
+  if [[ "${CROWDSEC_ASSUME_YES:-0}" != "1" ]]; then
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]] && tui_available; then
+      whiptail --title " Diff обновления меню " --textbox "${diff_file}" 30 120 || true
+    elif has_tty; then
+      ${PAGER:-less} "${diff_file}" </dev/tty >/dev/tty 2>&1 || cat "${diff_file}"
+    fi
+    if ! confirm_dangerous_action "Обновление меню из GitHub" "Скачанный файл прошёл bash -n. Установить его в ${INSTALLED_SCRIPT}? Без SHA256/подписи это всё равно доверие к содержимому GitHub raw."; then
+      rm -f "${tmp}" "${diff_file}"
+      warn "Обновление меню отменено."
+      return 1
+    fi
+  fi
+
   install -m 0755 "${tmp}" "${INSTALLED_SCRIPT}"
-  rm -f "${tmp}"
+  rm -f "${tmp}" "${diff_file}"
   ok "Меню обновлено: ${INSTALLED_SCRIPT}"
 }
-
 run_install_step() {
   local title="$1"
   shift
@@ -1368,6 +1494,11 @@ show_connection_info() {
 }
 
 show_tokens_file() {
+  if [[ "${CROWDSEC_ASSUME_YES:-0}" != "1" ]]; then
+    if ! confirm_dangerous_action "Показ central.env" "Файл central.env содержит токены, пароли и bouncer keys. Не показывай его при записи экрана, демонстрации терминала или постороннем доступе к консоли."; then
+      return 0
+    fi
+  fi
   local tmp
   tmp="$(mktemp)"
   {
@@ -1377,7 +1508,6 @@ show_tokens_file() {
   show_file "central.env" "${tmp}"
   rm -f "${tmp}"
 }
-
 add_allowed_range() {
   safe_source_env
   local new_range
@@ -2304,6 +2434,8 @@ menu_loop() {
     menu_loop_plain
   fi
 }
+
+acquire_script_lock
 
 case "${1:-}" in
   --install) full_install ;;
