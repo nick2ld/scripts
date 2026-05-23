@@ -1004,6 +1004,8 @@ show_status() {
 
 show_connection_info() {
   safe_source_env
+
+  # Проверка наличия и непустоты файла базы данных подключений
   if [[ ! -f "${CONNECTIONS_FILE}" || ! -s "${CONNECTIONS_FILE}" ]]; then
     if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
       whiptail --title " Подключения VPS " --msgbox "Пока нет сохранённых подключений.\n\nСоздай подключение через:\nПодключения VPS и LAPI -> Создать подключение VPS" 12 78
@@ -1020,7 +1022,7 @@ show_connection_info() {
     return
   fi
 
-  # Считываем строки базы данных
+  # Чтение строк из файла TSV в индексированный массив
   local lines=()
   while IFS= read -r line; do
     [[ -n "${line}" ]] && lines+=("${line}")
@@ -1030,14 +1032,14 @@ show_connection_info() {
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
     local menu_args=()
     for i in "${!lines[@]}"; do
-      # Извлекаем IP (3-я колонка) и Имя VPS (2-я колонка) из вашего TSV
+      # Извлечение полей Name (2) и IP (3) для формирования списка выбора
       local name ip
       name=$(echo "${lines[$i]}" | cut -f2)
       ip=$(echo "${lines[$i]}" | cut -f3)
       menu_args+=("$((i+1))" "${name} [${ip}]")
     done
 
-    # Выводим интерактивный список. Если нажали Отмена/Esc — мягко выходим обратно
+    # Инициализация интерактивного меню выбора ноды
     choice_num=$(whiptail --title " Список подключений VPS " --cancel-button "Назад" --ok-button "Выбрать" --menu "Выберите ноду для просмотра полных данных подключения:" 18 78 8 "${menu_args[@]}" 3>&1 1>&2 2>&3) || true
     if [[ -z "${choice_num}" ]]; then
       return
@@ -1062,7 +1064,7 @@ show_connection_info() {
     fi
   fi
 
-  # Парсим выбранную строку по вашей оригинальной структуре TSV
+  # Парсинг выбранной записи по TSV-структуре: Created(1), Name(2), IP(3), LAPI(4), Token(5), Key(6)
   local target_line="${lines[$((choice_num - 1))]}"
   local created name ip lapi token key
   created=$(echo "${target_line}" | cut -f1)
@@ -1072,7 +1074,7 @@ show_connection_info() {
   token=$(echo "${target_line}" | cut -f5)
   key=$(echo "${target_line}" | cut -f6)
 
-  # Формируем карточку с данными конкретной VPS
+  # Генерация временного конфигурационного дампа для выбранной ноды
   local tmp
   tmp="$(mktemp)"
   {
@@ -1092,7 +1094,7 @@ show_connection_info() {
     echo "Веб-морда доступна только из локальной сети: ${LOCAL_WEB_UI}"
   } >"${tmp}"
 
-  # Отображаем через вашу штатную функцию просмотра текстовых файлов
+  # Вывод сформированных данных через встроенный обработчик просмотра файлов
   show_file "Настройки VPS: ${name}" "${tmp}"
   rm -f "${tmp}"
 }
