@@ -1153,12 +1153,24 @@ remove_allowed_range() {
     fi
   fi
 
-  # --- НОВАЯ ЛОГИКА: Определяем удаляемый IP-адрес до перезаписи списка ---
+  # 1. Определяем удаляемый IP-адрес
   local target_idx=$((remove_num - 1))
   local removed_cidr="${items[target_idx]}"
-  local removed_ip="${removed_cidr%%/*}" # Удаляет маску подсети (например, /32), оставляя чистый IP
-  # -----------------------------------------------------------------------
+  local removed_ip="${removed_cidr%%/*}"
 
+  # 2. НОВАЯ ЛОГИКА: Находим имя машины и баунсера в базе до удаления строки
+  local machine_name=""
+  local bouncer_name=""
+  if [[ -f "${CONNECTIONS_FILE}" && -n "${removed_ip}" ]]; then
+    # Файл TSV имеет структуру: Дата | IP | Имя_VPS | Токен | Ключ_Баунсера
+    # Имя машины в CrowdSec совпадает с Именем_VPS, а баунсер называется bouncer_<Имя_VPS>
+    machine_name=$(grep "${removed_ip}" "${CONNECTIONS_FILE}" | cut -f3 | xargs)
+    if [[ -n "${machine_name}" ]]; then
+      bouncer_name="bouncer_${machine_name}"
+    fi
+  fi
+
+  # 3. Пересобираем список ALLOWED_RANGES (оригинальный код)
   local new_list=""
   for i in "${!items[@]}"; do
     if [[ $((i+1)) -ne ${remove_num} ]]; then
@@ -1172,24 +1184,31 @@ remove_allowed_range() {
   configure_docker_crowdsec_lapi
   configure_ufw_full
   
-  # Принудительный перезапуск контейнера для применения ALLOWED_RANGES
+  # Принудительный перезапуск контейнера для применения сети
   (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
 
-  # --- НОВАЯ ЛОГИКА: Удаление информации об аккаунте/подключении VPS ---
+  # 4. НОВАЯ ЛОГИКА: Удаляем из самого CrowdSec Manager (LAPI)
+  if [[ -n "${machine_name}" ]]; then
+    # Вызываем команды удаления внутри работающего контейнера docker
+    docker exec -t crowdsec cscli machines delete "${machine_name}" >/dev/null 2>&1 || true
+    if [[ -n "${bouncer_name}" ]]; then
+      docker exec -t crowdsec cscli bouncers delete "${bouncer_name}" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  # 5. Очистка файла vps-connections.tsv
   if [[ -f "${CONNECTIONS_FILE}" && -n "${removed_ip}" ]]; then
     local tmp_file
     tmp_file=$(mktemp)
-    # Фильтруем файл vps-connections.tsv, исключая строку, которая содержит наш IP
     grep -v "${removed_ip}" "${CONNECTIONS_FILE}" > "${tmp_file}" || true
     mv "${tmp_file}" "${CONNECTIONS_FILE}"
     chmod 600 "${CONNECTIONS_FILE}"
   fi
-  # -----------------------------------------------------------------------
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
-    whiptail --title " Успех " --msgbox "Пункт удалён и история подключения очищена." 8 78
+    whiptail --title " Успех " --msgbox "Пункт удалён, VPS стерта из CrowdSec Manager и история очищена." 8 78
   else
-    ok "Пункт удалён и история подключения очищена."
+    ok "Пункт удалён, VPS стерта из CrowdSec Manager и история очищена."
     pause
   fi
 }
