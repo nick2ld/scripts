@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.2-i18n-menu-command-label-fix"
+SCRIPT_VERSION="v0.7.3-i18n-crowdsec-allowlist-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -157,6 +157,8 @@ SYSLOG_DEVICES_FILE="${CONFIG_DIR}/bouncer-syslog-devices.tsv"
 REMOTE_SYSLOG_DIR="/var/log/crowdsec-remote"
 REMOTE_SYSLOG_DIAG_DIR="/var/log/crowdsec-remote-diagnostic"
 DEFAULT_REMOTE_SYSLOG_PORT="5140"
+CROWDSEC_ALLOWLIST_FILE="${CONFIG_DIR}/crowdsec-allowlist.tsv"
+# Legacy variable kept only for migration from older script versions.
 TRUSTED_IP_FILE="${CONFIG_DIR}/trusted-ip-allowlist.tsv"
 
 log() { echo "==> $*"; }
@@ -3638,7 +3640,7 @@ menu_loop_plain() {
     echo "  6) $(T "Базовая бесплатная защита" "Base free protection")"
     echo "  7) $(T "Collections / Hub / rules" "Collections / Hub / rules")"
     echo "  8) $(T "Manual decisions / local blacklist" "Manual decisions / local blacklist")"
-    echo "  9) $(T "Доверенные IP/CIDR" "Trusted IP/CIDR")"
+    echo "  9) $(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR")"
     echo
     echo "$(T "[ VPS / MACHINES ]" "[ VPS / MACHINES ]")"
     echo " 10) $(T "Создать подключение VPS" "Create VPS connection")"
@@ -4179,37 +4181,128 @@ show_device_event_logs() {
 }
 
 
-trusted_ip_is_listed() {
-  local value="$1"
-  [[ -s "${TRUSTED_IP_FILE}" ]] || return 1
-  awk -F'\t' -v v="${value}" '($1==v){found=1} END{exit found?0:1}' "${TRUSTED_IP_FILE}"
+crowdsec_allowlist_data_file() {
+  mkdir -p "${CONFIG_DIR}"
+  chmod 700 "${CONFIG_DIR}"
+  if [[ ! -s "${CROWDSEC_ALLOWLIST_FILE}" && -s "${TRUSTED_IP_FILE:-}" ]]; then
+    cp -a "${TRUSTED_IP_FILE}" "${CROWDSEC_ALLOWLIST_FILE}" 2>/dev/null || true
+    chmod 600 "${CROWDSEC_ALLOWLIST_FILE}" 2>/dev/null || true
+  fi
+  printf '%s' "${CROWDSEC_ALLOWLIST_FILE}"
+}
+
+crowdsec_allowlist_parser_path() {
+  local cfg_dir
+  cfg_dir="$(get_crowdsec_config_dir)"
+  mkdir -p "${cfg_dir}/parsers/s02-enrich"
+  printf '%s' "${cfg_dir}/parsers/s02-enrich/nick-local-allowlist.yaml"
+}
+
+crowdsec_allowlist_is_listed() {
+  local value="$1" data_file
+  data_file="$(crowdsec_allowlist_data_file)"
+  [[ -s "${data_file}" ]] || return 1
+  awk -F'\t' -v v="${value}" '($1==v){found=1} END{exit found?0:1}' "${data_file}"
+}
+
+apply_crowdsec_allowlist() {
+  local data_file parser_file
+  data_file="$(crowdsec_allowlist_data_file)"
+  parser_file="$(crowdsec_allowlist_parser_path)"
+
+  if [[ ! -s "${data_file}" ]]; then
+    rm -f "${parser_file}"
+    echo "CrowdSec allowlist is empty. Removed parser: ${parser_file}"
+  else
+    DATA_FILE="${data_file}" PARSER_FILE="${parser_file}" python3 - <<'PY'
+import os, re, yaml
+data_file = os.environ["DATA_FILE"]
+parser_file = os.environ["PARSER_FILE"]
+ips, cidrs = [], []
+with open(data_file, "r", errors="replace") as f:
+    for line in f:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        value = line.split("\t", 1)[0].strip()
+        value = re.sub(r"[^0-9A-Fa-f:.\/]", "", value)
+        if not value:
+            continue
+        if "/" in value:
+            if value not in cidrs:
+                cidrs.append(value)
+        else:
+            if value not in ips:
+                ips.append(value)
+
+doc = {
+    "name": "nick/local-allowlist",
+    "description": "Local CrowdSec allowlist managed by crowdsec-central-menu",
+    "whitelist": {
+        "reason": "local-crowdsec-allowlist",
+    },
+}
+if ips:
+    doc["whitelist"]["ip"] = ips
+if cidrs:
+    doc["whitelist"]["cidr"] = cidrs
+
+with open(parser_file, "w") as f:
+    yaml.safe_dump(doc, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+PY
+    chmod 640 "${parser_file}" 2>/dev/null || true
+    echo "CrowdSec allowlist parser written: ${parser_file}"
+  fi
+
+  echo "Testing CrowdSec configuration..."
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
+    docker exec crowdsec crowdsec -c /etc/crowdsec/config.yaml -t
+  elif command -v crowdsec >/dev/null 2>&1; then
+    crowdsec -c /etc/crowdsec/config.yaml -t
+  fi
+
+  echo "Restarting CrowdSec runtime..."
+  restart_crowdsec_runtime
 }
 
 show_trusted_ip_list() {
-  local tmp
+  local tmp data_file parser_file
+  data_file="$(crowdsec_allowlist_data_file)"
+  parser_file="$(crowdsec_allowlist_parser_path)"
   tmp="$(mktemp)"
   {
-    echo "$(T "Локальный список доверенных IP/CIDR скрипта:" "Script local trusted IP/CIDR list:")"
+    echo "$(T "CrowdSec allowlist IP/CIDR:" "CrowdSec allowlist IP/CIDR:")"
     echo
-    if [[ -s "${TRUSTED_IP_FILE}" ]]; then
-      awk -F'\t' 'BEGIN {printf "%-32s %-24s %s\n", "IP/CIDR", "ADDED", "COMMENT"} {printf "%-32s %-24s %s\n", $1, $2, $3}' "${TRUSTED_IP_FILE}"
+    if [[ -s "${data_file}" ]]; then
+      awk -F'\t' 'BEGIN {printf "%-32s %-24s %s\n", "IP/CIDR", "ADDED", "COMMENT"} {printf "%-32s %-24s %s\n", $1, $2, $3}' "${data_file}"
     else
       echo "$(T "Список пуст." "The list is empty.")"
     fi
     echo
-    echo "$(T "Важно: это защитный список для действий скрипта и ручных decisions. Он не заменяет полноценные allowlists CrowdSec Console/CAPI. Скрипт не будет добавлять manual ban для значений из этого списка и может удалить активные decisions для них." "Important: this is a safety list for script actions and manual decisions. It does not replace full CrowdSec Console/CAPI allowlists. The script will not add manual bans for values in this list and can delete active decisions for them.")"
+    echo "$(T "Это реальная настройка CrowdSec allowlist, а не отдельный список скрипта." "This is a real CrowdSec allowlist configuration, not a separate script-only list.")"
+    echo "$(T "Скрипт записывает parser:" "The script writes parser:")"
+    echo "  ${parser_file}"
+    echo
+    if [[ -f "${parser_file}" ]]; then
+      echo "$(T "Текущий parser:" "Current parser:")"
+      echo
+      cat "${parser_file}"
+    else
+      echo "$(T "Parser ещё не создан. Добавь IP/CIDR и примени allowlist." "Parser has not been created yet. Add IP/CIDR and apply the allowlist.")"
+    fi
   } >"${tmp}"
-  show_file "$(T "Доверенные IP/CIDR" "Trusted IP/CIDR")" "${tmp}"
+  show_file "$(T "CrowdSec allowlist" "CrowdSec allowlist")" "${tmp}"
   rm -f "${tmp}"
 }
 
 add_trusted_ip() {
-  local value comment tmp
+  local value comment tmp data_file
+  data_file="$(crowdsec_allowlist_data_file)"
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    value="$(whiptail --title " $(T "Доверенный IP/CIDR" "Trusted IP/CIDR") " --inputbox "$(T "IP или CIDR, который скрипт не должен банить вручную.\n\nНапример: 192.168.1.1 или 192.168.1.0/24" "IP or CIDR that the script must not manually ban.\n\nExample: 192.168.1.1 or 192.168.1.0/24")" 12 86 "" 3>&1 1>&2 2>&3)" || return 0
+    value="$(whiptail --title " $(T "CrowdSec allowlist" "CrowdSec allowlist") " --inputbox "$(T "IP или CIDR, который нужно добавить в allowlist CrowdSec.\n\nНапример: 192.168.1.1 или 192.168.1.0/24" "IP or CIDR to add to the CrowdSec allowlist.\n\nExample: 192.168.1.1 or 192.168.1.0/24")" 12 86 "" 3>&1 1>&2 2>&3)" || return 0
     comment="$(whiptail --title " $(T "Комментарий" "Comment") " --inputbox "$(T "Комментарий, например: router, npm, home-vpn" "Comment, for example: router, npm, home-vpn")" 10 86 "" 3>&1 1>&2 2>&3)" || return 0
   else
-    read -rp "$(T "IP/CIDR: " "IP/CIDR: ")" value || return 0
+    read -rp "$(T "IP/CIDR для CrowdSec allowlist: " "IP/CIDR for CrowdSec allowlist: ")" value || return 0
     read -rp "$(T "Комментарий: " "Comment: ")" comment || true
   fi
   value="$(printf '%s' "${value:-}" | tr -cd '0-9A-Fa-f:.\/')"
@@ -4217,27 +4310,28 @@ add_trusted_ip() {
   comment="$(printf '%s' "${comment:-}" | tr -cd 'A-Za-z0-9А-Яа-яёЁ ._:@/%+=,-')"
   mkdir -p "${CONFIG_DIR}"
   chmod 700 "${CONFIG_DIR}"
-  touch "${TRUSTED_IP_FILE}"
-  chmod 600 "${TRUSTED_IP_FILE}"
+  touch "${data_file}"
+  chmod 600 "${data_file}"
   tmp="$(mktemp)"
-  awk -F'\t' -v v="${value}" '($1!=v)' "${TRUSTED_IP_FILE}" >"${tmp}" || true
-  mv "${tmp}" "${TRUSTED_IP_FILE}"
-  printf '%s\t%s\t%s\n' "${value}" "$(date -Is)" "${comment}" >>"${TRUSTED_IP_FILE}"
-  ok "$(T "Доверенный IP/CIDR сохранён." "Trusted IP/CIDR saved.")"
+  awk -F'\t' -v v="${value}" '($1!=v)' "${data_file}" >"${tmp}" || true
+  mv "${tmp}" "${data_file}"
+  printf '%s\t%s\t%s\n' "${value}" "$(date -Is)" "${comment}" >>"${data_file}"
+  run_with_live_progress "$(T "Применение CrowdSec allowlist" "Applying CrowdSec allowlist")" apply_crowdsec_allowlist || true
 }
 
 remove_trusted_ip() {
-  local lines=() line choice tmp i value
-  [[ -s "${TRUSTED_IP_FILE}" ]] || { warn "$(T "Список доверенных IP/CIDR пуст." "Trusted IP/CIDR list is empty.")"; pause; return 0; }
+  local lines=() line choice tmp i value data_file
+  data_file="$(crowdsec_allowlist_data_file)"
+  [[ -s "${data_file}" ]] || { warn "$(T "CrowdSec allowlist пуст." "CrowdSec allowlist is empty.")"; pause; return 0; }
   while IFS= read -r line || [[ -n "${line}" ]]; do
     [[ -n "${line}" ]] && lines+=("${line}")
-  done < "${TRUSTED_IP_FILE}"
+  done < "${data_file}"
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
     local args=()
     for i in "${!lines[@]}"; do
       args+=("$((i+1))" "$(printf '%s' "${lines[$i]}" | cut -f1,3 | tr '\t' ' ')")
     done
-    choice="$(whiptail --title " $(T "Удалить доверенный IP/CIDR" "Remove trusted IP/CIDR") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Удалить" "Remove")" --notags --menu "$(T "Выберите запись:" "Choose an entry:")" 18 92 10 "${args[@]}" 3>&1 1>&2 2>&3)" || return 0
+    choice="$(whiptail --title " $(T "Удалить из CrowdSec allowlist" "Remove from CrowdSec allowlist") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Удалить" "Remove")" --notags --menu "$(T "Выберите запись:" "Choose an entry:")" 18 92 10 "${args[@]}" 3>&1 1>&2 2>&3)" || return 0
   else
     for i in "${!lines[@]}"; do echo "$((i+1))) ${lines[$i]}"; done
     read -rp "$(T "Номер: " "Number: ")" choice || return 0
@@ -4246,23 +4340,24 @@ remove_trusted_ip() {
   ((choice >= 1 && choice <= ${#lines[@]})) || return 0
   value="$(printf '%s' "${lines[$((choice-1))]}" | cut -f1)"
   tmp="$(mktemp)"
-  awk -F'\t' -v v="${value}" '($1!=v)' "${TRUSTED_IP_FILE}" >"${tmp}" || true
-  mv "${tmp}" "${TRUSTED_IP_FILE}"
-  ok "$(T "Запись удалена." "Entry removed.")"
+  awk -F'\t' -v v="${value}" '($1!=v)' "${data_file}" >"${tmp}" || true
+  mv "${tmp}" "${data_file}"
+  run_with_live_progress "$(T "Применение CrowdSec allowlist" "Applying CrowdSec allowlist")" apply_crowdsec_allowlist || true
 }
 
 remove_decisions_for_trusted_ips() {
-  local value
-  [[ -s "${TRUSTED_IP_FILE}" ]] || { warn "$(T "Список доверенных IP/CIDR пуст." "Trusted IP/CIDR list is empty.")"; return 0; }
+  local value data_file
+  data_file="$(crowdsec_allowlist_data_file)"
+  [[ -s "${data_file}" ]] || { warn "$(T "CrowdSec allowlist пуст." "CrowdSec allowlist is empty.")"; return 0; }
   while IFS=$'\t' read -r value _ _; do
     [[ -n "${value:-}" ]] || continue
-    echo "Remove decisions for trusted: ${value}"
+    echo "Remove active decisions for allowlisted value: ${value}"
     if [[ "${value}" == */* ]]; then
       crowdsec_cscli decisions delete --range "${value}" || true
     else
       crowdsec_cscli decisions delete --ip "${value}" || true
     fi
-  done < "${TRUSTED_IP_FILE}"
+  done < "${data_file}"
 }
 
 protection_install_collection_group() {
@@ -4355,8 +4450,8 @@ add_manual_decision() {
   fi
   target="$(printf '%s' "${target:-}" | tr -cd '0-9A-Fa-f:.\/')"
   [[ -n "${target}" ]] || fail "$(T "Цель блокировки не может быть пустой." "Decision target cannot be empty.")"
-  if trusted_ip_is_listed "${target}"; then
-    fail "$(T "Этот IP/CIDR находится в доверенном списке скрипта. Ручной ban отменён." "This IP/CIDR is in the script trusted list. Manual ban cancelled.")"
+  if crowdsec_allowlist_is_listed "${target}"; then
+    fail "$(T "Этот IP/CIDR находится в CrowdSec allowlist. Ручной ban отменён." "This IP/CIDR is in the CrowdSec allowlist. Manual ban cancelled.")"
   fi
   duration="$(printf '%s' "${duration:-24h}" | tr -cd '0-9smhdw')"
   reason="$(printf '%s' "${reason:-manual-central-ban}" | tr -cd 'A-Za-z0-9._:@/%+=,-')"
@@ -4404,8 +4499,8 @@ import_decisions_from_file() {
       line="${line%%#*}"
       target="$(printf '%s' "${line}" | tr -cd '0-9A-Fa-f:.\/')"
       [[ -n "${target}" ]] || continue
-      if trusted_ip_is_listed "${target}"; then
-        echo "SKIP trusted: ${target}"
+      if crowdsec_allowlist_is_listed "${target}"; then
+        echo "SKIP allowlisted: ${target}"
         continue
       fi
       if [[ "${target}" == */* ]]; then
@@ -4482,11 +4577,11 @@ manage_decisions_menu() {
 manage_trusted_ips_menu() {
   local choice
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    choice="$(whiptail --title " $(T "Доверенные IP/CIDR" "Trusted IP/CIDR") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 19 92 5 \
+    choice="$(whiptail --title " $(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 19 92 5 \
       "show" "$(T "Показать список" "Show list")" \
       "add" "$(T "Добавить IP/CIDR" "Add IP/CIDR")" \
       "remove" "$(T "Удалить IP/CIDR" "Remove IP/CIDR")" \
-      "clean" "$(T "Удалить active decisions для доверенных IP" "Remove active decisions for trusted IPs")" \
+      "clean" "$(T "Удалить active decisions для CrowdSec allowlist" "Remove active decisions for allowlist")" \
       3>&1 1>&2 2>&3)" || return 0
   else
     echo "1) show  2) add  3) remove  4) clean"
@@ -4497,7 +4592,7 @@ manage_trusted_ips_menu() {
     show) show_trusted_ip_list ;;
     add) add_trusted_ip ;;
     remove) remove_trusted_ip ;;
-    clean) run_with_live_progress "$(T "Очистка decisions для доверенных IP" "Cleaning decisions for trusted IPs")" remove_decisions_for_trusted_ips ;;
+    clean) run_with_live_progress "$(T "Удаление active decisions для CrowdSec allowlist" "Removing active decisions for allowlist")" remove_decisions_for_trusted_ips ;;
   esac
 }
 
@@ -4508,7 +4603,7 @@ manage_protection_menu() {
       "baseline" "$(T "Применить базовую бесплатную защиту" "Apply base free protection")" \
       "collections" "$(T "Collections / rules / Hub" "Collections / rules / Hub")" \
       "decisions" "$(T "Manual decisions / local blacklists" "Manual decisions / local blacklists")" \
-      "trusted" "$(T "Доверенные IP/CIDR для скрипта" "Script trusted IP/CIDR")" \
+      "trusted" "$(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR")" \
       "capi" "$(T "CAPI/Console статус (опционально)" "CAPI/Console status (optional)")" \
       "info" "$(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")" \
       3>&1 1>&2 2>&3)" || return 0
@@ -4643,11 +4738,11 @@ action_description() {
     connect) T "Показывает сохранённые подключения VPS, machines и bouncer/API устройств. Здесь можно повторно посмотреть LAPI URL, machine name и bouncer key." "Shows saved VPS, machine and bouncer/API device connections. Use it to view LAPI URL, machine name and bouncer key again." ;;
     envfile) T "Показывает файл central.env с текущими настройками central. Там есть порты, URL, ranges и служебные ключи. Не публикуй этот вывод наружу." "Shows central.env with current central settings. It contains ports, URLs, ranges and secret keys. Do not publish this output." ;;
     crowdsec_info) T "Показывает machines, bouncers, alerts, active decisions и metrics. Это общий экран понимания: кто подключён, кто блокирует и какие решения есть." "Shows machines, bouncers, alerts, active decisions and metrics. This is the overview: who is connected, who enforces and what decisions exist." ;;
-    protection_menu) T "Раздел настройки защиты central: бесплатные Hub collections, локальные rules/scenarios, ручные decisions, trusted IP и опциональное подключение к CrowdSec Console/CAPI." "Protection setup: free Hub collections, local rules/scenarios, manual decisions, trusted IPs and optional CrowdSec Console/CAPI connection." ;;
+    protection_menu) T "Раздел настройки защиты central: бесплатные Hub collections, локальные rules/scenarios, ручные decisions, trusted IP и опциональное подключение к CrowdSec Console/CAPI." "Protection setup: free Hub collections, local rules/scenarios, manual decisions, CrowdSec allowlist and optional CrowdSec Console/CAPI connection." ;;
     protection_baseline) T "Ставит базовую бесплатную защиту: обновляет Hub и устанавливает linux + sshd collections. Это минимальная база, чтобы central мог создавать local decisions из своих логов." "Installs the base free protection: updates Hub and installs linux + sshd collections. This is the minimum base for central to create local decisions from its own logs." ;;
     protection_collections) T "Управление CrowdSec Hub collections. Collections ставят наборы parsers/scenarios для Linux, SSH, web-серверов и firewall/router логов." "Manage CrowdSec Hub collections. Collections install parser/scenario bundles for Linux, SSH, web servers and firewall/router logs." ;;
     protection_decisions) T "Локальные ручные блокировки. Можно добавить ban для IP/CIDR, импортировать свой blacklist из файла, удалить decision или посмотреть active decisions." "Local manual blocks. Add an IP/CIDR ban, import your own blacklist from a file, delete a decision or show active decisions." ;;
-    protection_trusted) T "Локальный предохранитель скрипта: IP/CIDR из этого списка нельзя случайно забанить через ручные действия меню. Это не замена официальному allowlist CrowdSec." "Script safety list: IP/CIDR in this list cannot be accidentally banned through manual menu actions. This is not a replacement for the official CrowdSec allowlist." ;;
+    protection_trusted) T "CrowdSec allowlist: IP/CIDR из этого списка записываются в parser s02-enrich и применяются самим CrowdSec." "CrowdSec allowlist: IP/CIDR from this list are written to an s02-enrich parser and applied by CrowdSec itself." ;;
     protection_capi|capi_enroll) T "Подключение к CrowdSec Console/CAPI. Сюда вводится Console enrollment key из app.crowdsec.net. Это опционально: локальная бесплатная защита работает и без него." "CrowdSec Console/CAPI connection. Enter the Console enrollment key from app.crowdsec.net here. This is optional: local free protection works without it." ;;
     node_bouncer) T "Создаёт подключение VPS. Есть два режима: удалённая установка по SSH или ручная установка с ожиданием регистрации machine и последующим validate." "Creates a VPS connection. Two modes are available: remote SSH installation or manual installation with machine registration wait and validate." ;;
     validate_machine) T "Подтверждает зарегистрированные VPS machines. Это нужно для VPS/agent, но не нужно для bouncer-only устройств вроде OpenWrt firewall-bouncer." "Validates registered VPS machines. Required for VPS/agent nodes, not required for bouncer-only devices such as OpenWrt firewall-bouncer." ;;
@@ -4810,7 +4905,7 @@ manage_protection_menu() {
       "baseline" "$(T "Базовая бесплатная защита" "Base free protection")" "$(T "Ставит linux + sshd collections. Минимальная база для local decisions." "Installs linux + sshd collections. Minimum base for local decisions.")" \
       "collections" "$(T "Collections / rules / Hub" "Collections / rules / Hub")" "$(T "Установка и просмотр collections, scenarios, parsers из CrowdSec Hub." "Install and view collections, scenarios, parsers from CrowdSec Hub.")" \
       "decisions" "$(T "Manual decisions / local blacklist" "Manual decisions / local blacklist")" "$(T "Ручные bans, удаление decisions и импорт своего списка IP/CIDR." "Manual bans, delete decisions and import your own IP/CIDR list.")" \
-      "trusted" "$(T "Доверенные IP/CIDR" "Trusted IP/CIDR")" "$(T "Предохранитель от случайного ручного бана своих адресов через это меню." "Safety guard against manually banning your own addresses through this menu.")" \
+      "trusted" "$(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR")" "$(T "Реальная allowlist-настройка CrowdSec для IP/CIDR, которые не должны обрабатываться как атакующие." "Real CrowdSec allowlist configuration for IP/CIDR that must not be treated as attackers.")" \
       "capi" "$(T "CrowdSec Console / CAPI / API key" "CrowdSec Console / CAPI / API key")" "$(T "Здесь вводится Console enrollment key или CTI API key и проверяется CAPI status." "Enter Console enrollment key or CTI API key here and check CAPI status.")" \
       "info" "$(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")" "$(T "Общий статус подключений, alerts, decisions и metrics." "Overall status of connections, alerts, decisions and metrics.")" \
       3>&1 1>&2 2>&3)" || return 0
@@ -4818,7 +4913,7 @@ manage_protection_menu() {
     echo "1) baseline - базовая защита"
     echo "2) collections - правила Hub"
     echo "3) decisions - ручные bans/local blacklist"
-    echo "4) trusted - доверенные IP"
+    echo "4) trusted - CrowdSec allowlist"
     echo "5) capi - Console/CAPI/API key"
     echo "6) info - общий статус"
     read -rp "> " choice || return 0
@@ -4999,7 +5094,7 @@ manage_decisions_menu() {
     if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
       choice="$(whiptail --title " $(T "Decisions и локальные blacklist" "Decisions and local blacklist") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Ручные decisions применяются к central LAPI и будут выдаваться bouncers. После действия вы вернётесь сюда." "Manual decisions are applied to central LAPI and will be pulled by bouncers. After an action you will return here.")" 22 100 6 \
         "list" "$(T "Показать active decisions" "Show active decisions")" "$(T "Показывает текущие bans/decisions." "Shows current bans/decisions.")" \
-        "add" "$(T "Добавить manual ban decision" "Add manual ban decision")" "$(T "Ручной ban IP/CIDR. Доверенные IP/CIDR скрипт не даст забанить." "Manual ban for IP/CIDR. Trusted IP/CIDR are protected.")" \
+        "add" "$(T "Добавить manual ban decision" "Add manual ban decision")" "$(T "Ручной ban IP/CIDR. CrowdSec allowlist IP/CIDR скрипт не даст забанить." "Manual ban for IP/CIDR. CrowdSec allowlist IP/CIDR are protected.")" \
         "delete" "$(T "Удалить decision по IP/CIDR" "Delete decision by IP/CIDR")" "$(T "Удаляет активный decision для указанного IP/CIDR." "Deletes active decision for a given IP/CIDR.")" \
         "import" "$(T "Импортировать локальный blacklist из файла" "Import local blacklist from file")" "$(T "Добавляет decisions из файла со списком IP/CIDR." "Adds decisions from a file with IP/CIDR list.")" \
         3>&1 1>&2 2>&3)" || return 0
@@ -5021,11 +5116,11 @@ manage_trusted_ips_menu() {
   local choice
   while true; do
     if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      choice="$(whiptail --title " $(T "Доверенные IP/CIDR" "Trusted IP/CIDR") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Это локальный предохранитель скрипта от случайного ручного бана своих адресов. После ввода или отмены вы вернётесь сюда." "This is a local script safety guard against accidentally banning your own addresses. After input or cancel you will return here.")" 22 100 5 \
-        "show" "$(T "Показать список" "Show list")" "$(T "Показывает локальный список доверенных IP/CIDR." "Shows local trusted IP/CIDR list.")" \
-        "add" "$(T "Добавить IP/CIDR" "Add IP/CIDR")" "$(T "Добавляет адрес или подсеть в доверенный список скрипта." "Adds address or subnet to the script trusted list.")" \
-        "remove" "$(T "Удалить IP/CIDR" "Remove IP/CIDR")" "$(T "Удаляет запись из доверенного списка скрипта." "Removes entry from the script trusted list.")" \
-        "clean" "$(T "Удалить active decisions для доверенных IP" "Remove active decisions for trusted IPs")" "$(T "Снимает bans с адресов, которые сейчас в доверенном списке." "Removes bans from addresses currently in trusted list.")" \
+      choice="$(whiptail --title " $(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Это реальная настройка CrowdSec allowlist. Адреса из списка записываются в parser s02-enrich и применяются самим CrowdSec. После ввода или отмены вы вернётесь сюда." "This is a real CrowdSec allowlist configuration. Values are written to an s02-enrich parser and applied by CrowdSec itself. After input or cancel you will return here.")" 22 100 5 \
+        "show" "$(T "Показать список" "Show list")" "$(T "Показывает текущий CrowdSec allowlist и созданный parser." "Shows current CrowdSec allowlist and the generated parser.")" \
+        "add" "$(T "Добавить IP/CIDR" "Add IP/CIDR")" "$(T "Добавляет адрес или подсеть в CrowdSec allowlist." "Adds address or subnet to the CrowdSec allowlist and applies it.")" \
+        "remove" "$(T "Удалить IP/CIDR" "Remove IP/CIDR")" "$(T "Удаляет запись из CrowdSec allowlist." "Removes entry from the CrowdSec allowlist and applies it.")" \
+        "clean" "$(T "Удалить active decisions для CrowdSec allowlist" "Remove active decisions for allowlist")" "$(T "Удаляет active decisions для адресов, которые сейчас находятся в CrowdSec allowlist." "Removes active decisions for addresses currently in the CrowdSec allowlist.")" \
         3>&1 1>&2 2>&3)" || return 0
     else
       echo "1) show  2) add  3) remove  4) clean  0) back"
@@ -5036,7 +5131,7 @@ manage_trusted_ips_menu() {
       show) show_trusted_ip_list ;;
       add) add_trusted_ip ;;
       remove) remove_trusted_ip ;;
-      clean) run_with_live_progress "$(T "Очистка decisions для доверенных IP" "Cleaning decisions for trusted IPs")" remove_decisions_for_trusted_ips || true ;;
+      clean) run_with_live_progress "$(T "Удаление active decisions для CrowdSec allowlist" "Removing active decisions for allowlist")" remove_decisions_for_trusted_ips || true ;;
     esac
   done
 }
@@ -5077,7 +5172,7 @@ manage_protection_menu() {
         "baseline" "$(T "Базовая бесплатная защита" "Base free protection")" "$(T "Ставит linux + sshd collections. Минимальная база для local decisions." "Installs linux + sshd collections. Minimum base for local decisions.")" \
         "collections" "$(T "Collections / rules / Hub" "Collections / rules / Hub")" "$(T "Установка и просмотр collections, scenarios, parsers из CrowdSec Hub." "Install and view collections, scenarios, parsers from CrowdSec Hub.")" \
         "decisions" "$(T "Manual decisions / local blacklist" "Manual decisions / local blacklist")" "$(T "Ручные bans, удаление decisions и импорт своего списка IP/CIDR." "Manual bans, delete decisions and import your own IP/CIDR list.")" \
-        "trusted" "$(T "Доверенные IP/CIDR" "Trusted IP/CIDR")" "$(T "Предохранитель от случайного ручного бана своих адресов через это меню." "Safety guard against manually banning your own addresses through this menu.")" \
+        "trusted" "$(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR")" "$(T "Реальная allowlist-настройка CrowdSec для IP/CIDR, которые не должны обрабатываться как атакующие." "Real CrowdSec allowlist configuration for IP/CIDR that must not be treated as attackers.")" \
         "capi" "$(T "CrowdSec Console / CAPI / API key" "CrowdSec Console / CAPI / API key")" "$(T "Здесь вводится Console enrollment key или CTI API key и проверяется CAPI status." "Enter Console enrollment key or CTI API key here and check CAPI status.")" \
         "info" "$(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")" "$(T "Общий статус подключений, alerts, decisions и metrics." "Overall status of connections, alerts, decisions and metrics.")" \
         3>&1 1>&2 2>&3)" || return 0
@@ -5085,7 +5180,7 @@ manage_protection_menu() {
       echo "1) baseline - базовая защита"
       echo "2) collections - правила Hub"
       echo "3) decisions - ручные bans/local blacklist"
-      echo "4) trusted - доверенные IP"
+      echo "4) trusted - CrowdSec allowlist"
       echo "5) capi - Console/CAPI/API key"
       echo "6) info - общий статус"
       echo "0) back"
