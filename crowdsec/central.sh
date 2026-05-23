@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.6.3-i18n-remote-vps-restart-trap-fix"
+SCRIPT_VERSION="v0.6.4-i18n-remote-vps-auto-collections"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -1009,8 +1009,8 @@ SHARED_BOUNCER_KEY=$(shell_quote "${bouncer_key}")
 MACHINE_NAME=$(shell_quote "${node_name}")
 INSTALL_FIREWALL_BOUNCER=yes
 REMOVE_FAIL2BAN=yes
-COLLECTION_SELECTION_MODE=base
-SELECTED_COLLECTIONS=crowdsecurity/linux\ crowdsecurity/sshd
+COLLECTION_SELECTION_MODE=$(shell_quote "${remote_collection_mode:-auto}")
+SELECTED_COLLECTIONS=$(shell_quote "${remote_selected_collections:-}")
 HUB_ITEM_SELECTION_MODE=none
 SELECTED_HUB_ITEMS=
 FIREWALL_BOUNCER_PACKAGE=
@@ -1070,7 +1070,7 @@ remote_restart_vps_services_after_validate() {
 create_named_vps_remote_install() {
   safe_source_env
   local rc tmp summary
-  local node_name_raw vps_ip_raw ssh_host_raw ssh_port_raw ssh_user_raw ssh_password_raw
+  local node_name_raw vps_ip_raw ssh_host_raw ssh_port_raw ssh_user_raw ssh_password_raw remote_collection_mode_raw
   local vps_cidr runner
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
@@ -1110,7 +1110,13 @@ create_named_vps_remote_install() {
     set -e
     [[ "${rc}" -eq 0 ]] || return 0
 
-    summary="$(T "Central подключится к VPS по SSH и выполнит установку CrowdSec node.\n\nНа VPS будут установлены пакеты, CrowdSec agent, collections linux+sshd и firewall-bouncer.\nFail2Ban будет удалён с backup, если найден.\n\nПродолжить?" "Central will connect to the VPS over SSH and install the CrowdSec node.\n\nThe VPS will get packages, CrowdSec agent, linux+sshd collections and firewall-bouncer.\nFail2Ban will be removed with backup if found.\n\nContinue?")"
+    set +e
+    remote_collection_mode_raw="$(whiptail --title " $(T "Collections VPS" "VPS collections") "       --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags       --menu "$(T "Как ставить CrowdSec collections на удалённой VPS?\n\nАвтоопределение проверит установленные сервисы на VPS и поставит базовые collections плюс подходящие для найденного софта. Это рекомендуемый режим для установки через SSH." "How to install CrowdSec collections on the remote VPS?\n\nAuto-detect checks installed services on the VPS and installs base collections plus matches for detected software. This is recommended for SSH installation.")"       18 96 2       "auto" "$(T "Автоопределить сервисы и поставить подходящие collections" "Auto-detect services and install matching collections")"       "base" "$(T "Поставить только базовые linux + sshd" "Install only base linux + sshd")"       3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+
+    summary="$(T "Central подключится к VPS по SSH и выполнит установку CrowdSec node.\n\nНа VPS будут установлены пакеты, CrowdSec agent, firewall-bouncer и collections в выбранном режиме.\nFail2Ban будет удалён с backup, если найден.\n\nПродолжить?" "Central will connect to the VPS over SSH and install the CrowdSec node.\n\nThe VPS will get packages, CrowdSec agent, firewall-bouncer and collections in the selected mode.\nFail2Ban will be removed with backup if found.\n\nContinue?")"
     whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Продолжить" "Continue")" --no-button "$(T "Отмена" "Cancel")" --yesno "${summary}" 16 92 || return 0
   else
     read -rp "$(T "Имя VPS/Machine name: " "VPS/Machine name: ")" node_name_raw || return 0
@@ -1123,6 +1129,14 @@ create_named_vps_remote_install() {
     ssh_user_raw="${ssh_user_raw:-root}"
     read -rsp "$(T "SSH пароль: " "SSH password: ")" ssh_password_raw || return 0
     echo
+    echo "$(T "Collections на удалённой VPS:" "Collections on remote VPS:")"
+    echo "1) $(T "Автоопределить сервисы и поставить подходящие collections" "Auto-detect services and install matching collections")"
+    echo "2) $(T "Поставить только базовые linux + sshd" "Install only base linux + sshd")"
+    read -rp "$(T "Выбор [1/2]: " "Choice [1/2]: ")" remote_collection_mode_raw || return 0
+    case "${remote_collection_mode_raw}" in
+      2|base) remote_collection_mode_raw="base" ;;
+      *) remote_collection_mode_raw="auto" ;;
+    esac
   fi
 
   node_name="$(printf '%s' "${node_name_raw:-}" | tr -cd 'A-Za-z0-9._:-')"
@@ -1131,6 +1145,16 @@ create_named_vps_remote_install() {
   ssh_port="$(printf '%s' "${ssh_port_raw:-22}" | tr -cd '0-9')"
   ssh_user="$(printf '%s' "${ssh_user_raw:-root}" | tr -cd 'A-Za-z0-9._-')"
   ssh_password="${ssh_password_raw:-}"
+  case "${remote_collection_mode_raw:-auto}" in
+    base)
+      remote_collection_mode="base"
+      remote_selected_collections="crowdsecurity/linux crowdsecurity/sshd"
+      ;;
+    *)
+      remote_collection_mode="auto"
+      remote_selected_collections=""
+      ;;
+  esac
 
   [[ -n "${node_name}" ]] || fail "$(T "Имя VPS не может быть пустым." "VPS name cannot be empty.")"
   [[ -n "${vps_ip}" ]] || fail "$(T "IP VPS не может быть пустым." "VPS IP cannot be empty.")"
@@ -1198,6 +1222,9 @@ create_named_vps_remote_install() {
     echo
     echo "Central LAPI URL:"
     echo "${VPS_LAPI_URL}"
+    echo
+    echo "Collections mode:"
+    echo "${remote_collection_mode}"
     echo
     echo "Remote SSH:"
     echo "${ssh_user}@${ssh_host}:${ssh_port}"
