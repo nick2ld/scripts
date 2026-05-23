@@ -40,7 +40,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.2-secure"
+SCRIPT_VERSION="v0.4-tls-validate"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 
@@ -379,7 +379,7 @@ safe_source_env() {
   # Безопасно читаем central.env как данные, а не как shell-код.
   # Старый вариант `source central.env` мог выполнить произвольную команду от root,
   # если файл был повреждён или изменён злоумышленником.
-  local env_lan env_web env_lapi env_public env_ranges env_token env_bouncer env_pass env_type
+  local env_lan env_web env_lapi env_public env_ranges env_token env_bouncer env_pass env_type env_public_lapi_url env_public_lapi_mode env_npm_cidr
   env_lan="$(read_env_key LAN_IP)"
   env_web="$(read_env_key WEB_PORT)"
   env_lapi="$(read_env_key LAPI_PORT)"
@@ -389,6 +389,9 @@ safe_source_env() {
   env_bouncer="$(read_env_key SHARED_BOUNCER_KEY)"
   env_pass="$(read_env_key WEBUI_PASSWORD)"
   env_type="$(read_env_key WEB_UI_TYPE)"
+  env_public_lapi_url="$(read_env_key PUBLIC_LAPI_URL)"
+  env_public_lapi_mode="$(read_env_key PUBLIC_LAPI_MODE)"
+  env_npm_cidr="$(read_env_key NPM_ALLOWED_CIDR)"
 
   LAN_IP="${LAN_IP:-${env_lan:-$(get_lan_ip)}}"
   WEB_PORT="${WEB_PORT:-${env_web:-${DEFAULT_WEB_PORT}}}"
@@ -399,9 +402,15 @@ safe_source_env() {
   SHARED_BOUNCER_KEY="${SHARED_BOUNCER_KEY:-${env_bouncer:-}}"
   WEBUI_PASSWORD="${WEBUI_PASSWORD:-${env_pass:-}}"
   WEB_UI_TYPE="${WEB_UI_TYPE:-${env_type:-manager}}"
+  PUBLIC_LAPI_URL="${PUBLIC_LAPI_URL:-${env_public_lapi_url:-}}"
+  PUBLIC_LAPI_MODE="${PUBLIC_LAPI_MODE:-${env_public_lapi_mode:-direct}}"
+  NPM_ALLOWED_CIDR="${NPM_ALLOWED_CIDR:-${env_npm_cidr:-}}"
 
   LAN_IP="$(sanitize_plain_value "${LAN_IP}")"
   PUBLIC_ADDR="$(sanitize_plain_value "${PUBLIC_ADDR}")"
+  PUBLIC_LAPI_URL="$(sanitize_token_value "${PUBLIC_LAPI_URL}")"
+  PUBLIC_LAPI_MODE="$(sanitize_plain_value "${PUBLIC_LAPI_MODE}")"
+  NPM_ALLOWED_CIDR="$(printf '%s' "${NPM_ALLOWED_CIDR}" | tr -cd '0-9A-Fa-f:.\/')"
   AUTO_REG_TOKEN="$(sanitize_token_value "${AUTO_REG_TOKEN}")"
   SHARED_BOUNCER_KEY="$(sanitize_token_value "${SHARED_BOUNCER_KEY}")"
   WEBUI_PASSWORD="$(sanitize_token_value "${WEBUI_PASSWORD}")"
@@ -421,7 +430,9 @@ safe_source_env() {
 
   LOCAL_WEB_UI="http://${LAN_IP}:${WEB_PORT}"
   LOCAL_LAPI_URL="http://${LAN_IP}:${LAPI_PORT}"
-  if [[ -n "${PUBLIC_ADDR}" ]]; then
+  if [[ -n "${PUBLIC_LAPI_URL:-}" && "${PUBLIC_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]]; then
+    VPS_LAPI_URL="${PUBLIC_LAPI_URL%/}"
+  elif [[ -n "${PUBLIC_ADDR}" ]]; then
     VPS_LAPI_URL="http://${PUBLIC_ADDR}:${LAPI_PORT}"
   else
     VPS_LAPI_URL="http://YOUR_PUBLIC_IP_OR_DDNS:${LAPI_PORT}"
@@ -438,6 +449,9 @@ save_env() {
   SHARED_BOUNCER_KEY="${SHARED_BOUNCER_KEY:-}"
   WEBUI_PASSWORD="${WEBUI_PASSWORD:-}"
   WEB_UI_TYPE="manager"
+  PUBLIC_LAPI_URL="${PUBLIC_LAPI_URL:-}"
+  PUBLIC_LAPI_MODE="${PUBLIC_LAPI_MODE:-direct}"
+  NPM_ALLOWED_CIDR="${NPM_ALLOWED_CIDR:-}"
 
   mkdir -p "${CONFIG_DIR}"
   chmod 700 "${CONFIG_DIR}"
@@ -448,9 +462,15 @@ save_env() {
 
   RAW_RANGES="${ALLOWED_RANGES:-}" ALLOWED_RANGES="$(RAW_RANGES="${ALLOWED_RANGES:-}" sanitize_ranges)"
 
+  PUBLIC_LAPI_URL="$(sanitize_token_value "${PUBLIC_LAPI_URL}")"
+  PUBLIC_LAPI_MODE="$(sanitize_plain_value "${PUBLIC_LAPI_MODE}")"
+  NPM_ALLOWED_CIDR="$(printf '%s' "${NPM_ALLOWED_CIDR}" | tr -cd '0-9A-Fa-f:.\/')"
+
   LOCAL_WEB_UI="http://${LAN_IP}:${WEB_PORT}"
   LOCAL_LAPI_URL="http://${LAN_IP}:${LAPI_PORT}"
-  if [[ -n "${PUBLIC_ADDR:-}" ]]; then
+  if [[ -n "${PUBLIC_LAPI_URL:-}" && "${PUBLIC_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]]; then
+    VPS_LAPI_URL="${PUBLIC_LAPI_URL%/}"
+  elif [[ -n "${PUBLIC_ADDR:-}" ]]; then
     VPS_LAPI_URL="http://${PUBLIC_ADDR}:${LAPI_PORT}"
   else
     VPS_LAPI_URL="http://YOUR_PUBLIC_IP_OR_DDNS:${LAPI_PORT}"
@@ -469,6 +489,9 @@ SHARED_BOUNCER_KEY=${SHARED_BOUNCER_KEY}
 ALLOWED_RANGES=${ALLOWED_RANGES}
 WEBUI_PASSWORD=${WEBUI_PASSWORD}
 WEB_UI_TYPE=${WEB_UI_TYPE}
+PUBLIC_LAPI_MODE=${PUBLIC_LAPI_MODE}
+PUBLIC_LAPI_URL=${PUBLIC_LAPI_URL}
+NPM_ALLOWED_CIDR=${NPM_ALLOWED_CIDR}
 ENV
   chmod 600 "${ENV_FILE}"
 }
@@ -493,6 +516,9 @@ print_current_settings() {
   echo
   echo "LAPI для удалённых серверов:"
   echo "  ${VPS_LAPI_URL}"
+  if [[ -n "${PUBLIC_LAPI_URL:-}" ]]; then
+    echo "  режим: ${PUBLIC_LAPI_MODE:-direct}"
+  fi
   echo
   echo "Файл настроек:"
   echo "  ${ENV_FILE}"
@@ -615,8 +641,22 @@ ask_initial_settings() {
   LAPI_PORT="${input_lapi_port}"
   echo
   echo "Внешний адрес нужен для готовой команды подключения VPS. Можно оставить пустым."
-  prompt_default input_public "Внешний адрес для удалённых серверов [можно пусто]: " "${PUBLIC_ADDR:-}"
-  PUBLIC_ADDR="${input_public:-${PUBLIC_ADDR:-}}"
+  echo "Если LAPI будет доступен через Nginx Proxy Manager, ниже можно указать полный HTTPS URL."
+  prompt_default input_public_lapi_url "Публичный HTTPS URL LAPI через NPM [можно пусто, пример https://lapi.example.com]: " "${PUBLIC_LAPI_URL:-}"
+  PUBLIC_LAPI_URL="${input_public_lapi_url:-${PUBLIC_LAPI_URL:-}}"
+  if [[ -n "${PUBLIC_LAPI_URL}" ]]; then
+    PUBLIC_LAPI_MODE="npm"
+    PUBLIC_ADDR=""
+    prompt_default input_npm_cidr "IP/CIDR Nginx Proxy Manager для доступа к LAPI [можно пусто]: " "${NPM_ALLOWED_CIDR:-}"
+    NPM_ALLOWED_CIDR="${input_npm_cidr:-${NPM_ALLOWED_CIDR:-}}"
+    if [[ -n "${NPM_ALLOWED_CIDR}" && ! ",${ALLOWED_RANGES}," =~ ,${NPM_ALLOWED_CIDR}, ]]; then
+      ALLOWED_RANGES="${ALLOWED_RANGES:+${ALLOWED_RANGES},}${NPM_ALLOWED_CIDR}"
+    fi
+  else
+    PUBLIC_LAPI_MODE="direct"
+    prompt_default input_public "Внешний адрес для удалённых серверов [можно пусто]: " "${PUBLIC_ADDR:-}"
+    PUBLIC_ADDR="${input_public:-${PUBLIC_ADDR:-}}"
+  fi
   WEB_UI_TYPE="manager"
   [[ -n "${AUTO_REG_TOKEN:-}" ]] || AUTO_REG_TOKEN="$(openssl rand -hex 32)"
   [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || SHARED_BOUNCER_KEY="$(openssl rand -hex 32)"
@@ -656,7 +696,18 @@ ask_initial_settings_tui() {
   LAN_IP="$(tui_input "Начальная настройка" "LAN IP для Web UI и локального LAPI" "${DETECTED_IP}")" || exit 1
   WEB_PORT="$(tui_input "Начальная настройка" "Порт Web UI" "${WEB_PORT:-3000}")" || exit 1
   LAPI_PORT="$(tui_input "Начальная настройка" "Порт центрального LAPI" "${LAPI_PORT:-8080}")" || exit 1
-  PUBLIC_ADDR="$(tui_input "Внешний адрес" "Внешний IP или DDNS для готовой команды подключения VPS. Можно оставить пустым." "${PUBLIC_ADDR:-}")" || exit 1
+  PUBLIC_LAPI_URL="$(tui_input "Публичный LAPI" "Публичный HTTPS URL LAPI через Nginx Proxy Manager.\n\nПример: https://lapi.example.com\n\nЕсли NPM не используется, оставь пустым." "${PUBLIC_LAPI_URL:-}")" || exit 1
+  if [[ -n "${PUBLIC_LAPI_URL:-}" ]]; then
+    PUBLIC_LAPI_MODE="npm"
+    PUBLIC_ADDR=""
+    NPM_ALLOWED_CIDR="$(tui_input "Nginx Proxy Manager" "IP/CIDR Nginx Proxy Manager, которому разрешить доступ к LAPI.\n\nМожно оставить пустым, если доступ уже разрешён локальной сетью." "${NPM_ALLOWED_CIDR:-}")" || exit 1
+    if [[ -n "${NPM_ALLOWED_CIDR:-}" && ! ",${ALLOWED_RANGES}," =~ ,${NPM_ALLOWED_CIDR}, ]]; then
+      ALLOWED_RANGES="${ALLOWED_RANGES:+${ALLOWED_RANGES},}${NPM_ALLOWED_CIDR}"
+    fi
+  else
+    PUBLIC_LAPI_MODE="direct"
+    PUBLIC_ADDR="$(tui_input "Внешний адрес" "Внешний IP или DDNS для готовой команды подключения VPS. Можно оставить пустым." "${PUBLIC_ADDR:-}")" || exit 1
+  fi
   WEB_UI_TYPE="manager"
 
   [[ -n "${AUTO_REG_TOKEN:-}" ]] || AUTO_REG_TOKEN="$(openssl rand -hex 32)"
@@ -844,6 +895,19 @@ create_named_vps_bouncer_key() {
 
   show_file "Индивидуальный bouncer key VPS" "${tmp}"
   rm -f "${tmp}"
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    if whiptail --title " Validate VPS machine " --yes-button "Ждать и подтвердить" --no-button "Позже" --yesno "После запуска vps.sh на VPS machine должна появиться на central LAPI.\n\nЖдать регистрацию '${node_name}' и автоматически выполнить validate?" 12 86; then
+      run_with_live_progress "Ожидание и validate ${node_name}" wait_for_machine_and_validate "${node_name}" 300 || true
+    fi
+  else
+    echo
+    read -rp "Ждать регистрацию '${node_name}' и автоматически выполнить validate? [y/N]: " wait_confirm
+    if [[ "${wait_confirm:-N}" =~ ^[Yy]$ ]]; then
+      run_with_live_progress "Ожидание и validate ${node_name}" wait_for_machine_and_validate "${node_name}" 300 || true
+      pause
+    fi
+  fi
 }
 
 
@@ -1169,10 +1233,14 @@ configure_ufw_full_apply() {
   ufw allow from 172.16.0.0/12 to any port "${WEB_PORT}" proto tcp
   ufw allow from 192.168.0.0/16 to any port "${WEB_PORT}" proto tcp
 
-  echo "Открытие LAPI для Docker и разрешённых VPS/IP..."
+  echo "Открытие LAPI для Docker, Nginx Proxy Manager и разрешённых VPS/IP..."
   ufw allow from 172.16.0.0/12 to any port "${LAPI_PORT}" proto tcp
   ufw allow from 172.17.0.0/12 to any port "${LAPI_PORT}" proto tcp
   ufw allow from 172.16.238.0/24 to any port "${LAPI_PORT}" proto tcp
+  if [[ -n "${NPM_ALLOWED_CIDR:-}" ]]; then
+    echo "Разрешаю доступ Nginx Proxy Manager к LAPI: ${NPM_ALLOWED_CIDR}"
+    ufw allow from "${NPM_ALLOWED_CIDR}" to any port "${LAPI_PORT}" proto tcp
+  fi
 
   old_ifs="${IFS}"
   IFS=','
@@ -1312,7 +1380,13 @@ show_install_result() {
   echo "Центральный LAPI для VPS: ${VPS_LAPI_URL}"
   echo "Файл настроек и токенов: ${ENV_FILE}"
   echo "Открыть меню: sudo crowdsec-central-menu"
-  echo "Проброс на роутере, если LAPI должен быть доступен VPS: WAN TCP ${LAPI_PORT} -> ${LAN_IP}:${LAPI_PORT}"
+  if [[ -n "${PUBLIC_LAPI_URL:-}" ]]; then
+    echo "Публичный LAPI через Nginx Proxy Manager: ${PUBLIC_LAPI_URL}"
+    echo "В NPM Proxy Host укажи: http://${LAN_IP}:${LAPI_PORT}"
+    echo "Наружу не открывай LAPI ${LAPI_PORT}, если VPS ходят через NPM."
+  else
+    echo "Проброс на роутере, если LAPI должен быть доступен VPS: WAN TCP ${LAPI_PORT} -> ${LAN_IP}:${LAPI_PORT}"
+  fi
   echo "Не пробрасывать наружу: WAN TCP ${WEB_PORT}"
   echo "============================================================"
 }
@@ -1777,6 +1851,153 @@ change_lapi_port() {
   fi
 }
 
+configure_public_lapi_url() {
+  safe_source_env
+  local new_url new_npm_cidr
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    new_url=$(whiptail --title " Публичный LAPI через Nginx Proxy Manager " --inputbox "Введите полный публичный URL LAPI, который проксируется через Nginx Proxy Manager.\n\nПример: https://lapi.example.com\n\nОставь пустым, чтобы отключить этот режим и вернуться к прямому http://IP:PORT." 14 92 "${PUBLIC_LAPI_URL:-}" 3>&1 1>&2 2>&3) || return
+    if [[ -n "${new_url}" ]]; then
+      new_npm_cidr=$(whiptail --title " Доступ NPM к LAPI " --inputbox "IP/CIDR Nginx Proxy Manager, которому разрешить доступ к локальному LAPI.\n\nПример: 192.168.1.10/32\nМожно оставить пустым, если NPM уже попадает в разрешённые локальные сети." 14 92 "${NPM_ALLOWED_CIDR:-}" 3>&1 1>&2 2>&3) || return
+    else
+      new_npm_cidr=""
+    fi
+  else
+    print_header
+    echo "Публичный LAPI через Nginx Proxy Manager"
+    echo
+    echo "Сейчас: ${PUBLIC_LAPI_URL:-не задан}"
+    read -rp "Новый HTTPS URL LAPI через NPM или Enter чтобы отключить: " new_url
+    if [[ -n "${new_url}" ]]; then
+      read -rp "IP/CIDR Nginx Proxy Manager для доступа к LAPI [можно пусто]: " new_npm_cidr
+    else
+      new_npm_cidr=""
+    fi
+  fi
+
+  new_url="${new_url%/}"
+  if [[ -n "${new_url}" && ! "${new_url}" =~ ^https://[^[:space:]]+$ ]]; then
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+      whiptail --title " Ошибка " --msgbox "Для Nginx Proxy Manager нужен URL вида https://domain.example\n\nHTTP здесь не нужен: TLS должен завершаться на NPM." 10 84
+    else
+      warn "Для Nginx Proxy Manager нужен URL вида https://domain.example"
+      pause
+    fi
+    return 1
+  fi
+
+  if [[ -n "${new_npm_cidr:-}" ]]; then
+    new_npm_cidr="$(printf '%s' "${new_npm_cidr}" | tr -cd '0-9A-Fa-f:.\/')"
+    if [[ ! "${new_npm_cidr}" =~ ^[0-9A-Fa-f:.]+/[0-9]{1,3}$ ]]; then
+      if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+        whiptail --title " Ошибка " --msgbox "IP/CIDR NPM должен быть в формате 192.168.1.10/32 или IPv6/128." 9 84
+      else
+        warn "IP/CIDR NPM должен быть в формате 192.168.1.10/32 или IPv6/128."
+        pause
+      fi
+      return 1
+    fi
+  fi
+
+  PUBLIC_LAPI_URL="${new_url:-}"
+  NPM_ALLOWED_CIDR="${new_npm_cidr:-}"
+  if [[ -n "${PUBLIC_LAPI_URL}" ]]; then
+    PUBLIC_LAPI_MODE="npm"
+    PUBLIC_ADDR=""
+    if [[ -n "${NPM_ALLOWED_CIDR}" && ! ",${ALLOWED_RANGES}," =~ ,${NPM_ALLOWED_CIDR}, ]]; then
+      ALLOWED_RANGES="${ALLOWED_RANGES:+${ALLOWED_RANGES},}${NPM_ALLOWED_CIDR}"
+    fi
+  else
+    PUBLIC_LAPI_MODE="direct"
+    NPM_ALLOWED_CIDR=""
+  fi
+
+  save_env
+  configure_docker_crowdsec_lapi || true
+  configure_ufw_full || true
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    whiptail --title " Готово " --msgbox "LAPI URL для VPS теперь:\n${VPS_LAPI_URL}\n\nВ Nginx Proxy Manager Proxy Host должен вести на:\nhttp://${LAN_IP}:${LAPI_PORT}" 12 86
+  else
+    ok "LAPI URL для VPS: ${VPS_LAPI_URL}"
+    echo "В Nginx Proxy Manager Proxy Host должен вести на: http://${LAN_IP}:${LAPI_PORT}"
+    pause
+  fi
+}
+
+crowdsec_cscli() {
+  safe_source_env
+  if [[ "${WEB_UI_TYPE:-manager}" == "manager" ]] && command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^crowdsec$'; then
+    docker exec crowdsec cscli "$@"
+  else
+    cscli "$@"
+  fi
+}
+
+machine_exists_on_central() {
+  local machine_name="$1"
+  crowdsec_cscli machines list 2>/dev/null | grep -Fq "${machine_name}"
+}
+
+validate_machine_on_central() {
+  local machine_name="$1"
+  [[ -n "${machine_name:-}" ]] || fail "Имя machine не может быть пустым."
+  echo "Проверяю machine: ${machine_name}"
+  crowdsec_cscli machines list || true
+  echo
+  echo "Подтверждаю machine: ${machine_name}"
+  crowdsec_cscli machines validate "${machine_name}"
+  ok "Machine подтверждена: ${machine_name}"
+}
+
+wait_for_machine_and_validate() {
+  local machine_name="$1"
+  local timeout="${2:-300}"
+  local elapsed=0
+  [[ -n "${machine_name:-}" ]] || fail "Имя machine не может быть пустым."
+  echo "Ожидаю регистрацию machine '${machine_name}' на central LAPI."
+  echo "Запусти vps.sh на VPS и вставь данные, которые показал мастер central."
+  while (( elapsed < timeout )); do
+    if machine_exists_on_central "${machine_name}"; then
+      echo "Machine найдена: ${machine_name}"
+      validate_machine_on_central "${machine_name}"
+      return 0
+    fi
+    echo "Machine пока не появилась. Ожидание... ${elapsed}/${timeout} сек"
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  fail "Machine '${machine_name}' не появилась за ${timeout} секунд. Позже подтверди её через меню: Подключения VPS и LAPI -> Подтвердить machine VPS."
+}
+
+validate_machine_prompt() {
+  safe_source_env
+  local machine_name
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    local tmp
+    tmp="$(mktemp)"
+    crowdsec_cscli machines list >"${tmp}" 2>&1 || true
+    whiptail --title " Machines на central " --textbox "${tmp}" 24 110 || true
+    rm -f "${tmp}"
+    machine_name=$(whiptail --title " Подтвердить machine VPS " --inputbox "Введите имя machine для validate.\n\nЭто имя должно совпадать с Machine name, который вводился в vps.sh." 12 86 "" 3>&1 1>&2 2>&3) || return
+  else
+    print_header
+    echo "Machines на central:"
+    crowdsec_cscli machines list || true
+    echo
+    read -rp "Имя machine для validate: " machine_name
+  fi
+  machine_name="$(printf '%s' "${machine_name:-}" | tr -cd 'A-Za-z0-9._:-')"
+  [[ -n "${machine_name}" ]] || { warn "Имя machine не задано."; pause; return; }
+  if run_with_live_progress "Подтверждение machine ${machine_name}" validate_machine_on_central "${machine_name}"; then
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+      whiptail --title " Успех " --msgbox "Machine подтверждена:\n${machine_name}" 9 76
+    else
+      ok "Machine подтверждена: ${machine_name}"
+      pause
+    fi
+  fi
+}
+
 change_public_addr() {
   safe_source_env
   local new_public
@@ -1789,6 +2010,11 @@ change_public_addr() {
   fi
 
   PUBLIC_ADDR="${new_public:-}"
+  if [[ -n "${PUBLIC_ADDR}" ]]; then
+    PUBLIC_LAPI_MODE="direct"
+    PUBLIC_LAPI_URL=""
+    NPM_ALLOWED_CIDR=""
+  fi
   save_env
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
@@ -2231,6 +2457,8 @@ run_menu_action() {
     web_addr) change_lan_ip_or_web_port ;;
     lapi_port) change_lapi_port ;;
     public_addr) change_public_addr ;;
+    public_lapi_url) configure_public_lapi_url ;;
+    validate_machine) validate_machine_prompt ;;
     auto_token) regenerate_auto_token ;;
     bouncer_key) regenerate_bouncer_key ;;
     node_bouncer) create_named_vps_bouncer_key ;;
@@ -2291,6 +2519,7 @@ menu_loop_whiptail() {
         access)
           choice="$(whiptail --backtitle "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" --title " Подключения VPS и LAPI " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 80 6 \
             "node_bouncer" "Создать подключение VPS" \
+            "validate_machine" "Подтвердить machine VPS" \
             "connect" "Показать созданные подключения" \
             "add_range" "Добавить IP/CIDR вручную" \
             "remove_range" "Удалить IP/CIDR из LAPI" \
@@ -2303,6 +2532,7 @@ menu_loop_whiptail() {
             "web_addr" "Изменить LAN IP или порт Web UI" \
             "lapi_port" "Изменить порт LAPI" \
             "public_addr" "Изменить внешний IP/DDNS для VPS" \
+            "public_lapi_url" "HTTPS LAPI через Nginx Proxy Manager" \
             "auto_token" "Перегенерировать auto-registration token" \
             "bouncer_key" "Перегенерировать shared bouncer key" \
             "test_lapi" "Проверить доступ Web UI к LAPI" \
@@ -2357,37 +2587,39 @@ menu_loop_plain() {
     echo
     echo "[ ПОДКЛЮЧЕНИЯ VPS И LAPI ]"
     echo "  4) Создать подключение VPS"
-    echo "  5) Удалить IP/CIDR из доступа к LAPI по номеру"
-    echo "  6) Полностью заменить список IP/CIDR"
+    echo "  5) Подтвердить machine VPS"
+    echo "  6) Удалить IP/CIDR из доступа к LAPI по номеру"
+    echo "  7) Полностью заменить список IP/CIDR"
     echo
     echo "[ СЕТЬ И КЛЮЧИ ]"
-    echo "  7) Изменить LAN IP или порт веб-морды"
-    echo "  8) Изменить порт LAPI"
-    echo "  9) Изменить внешний адрес или DDNS для VPS"
-    echo " 10) Перегенерировать auto-registration token"
-    echo " 11) Создать новый shared bouncer key"
-    echo " 12) Добавить IP/CIDR вручную"
+    echo "  8) Изменить LAN IP или порт веб-морды"
+    echo "  9) Изменить порт LAPI"
+    echo " 10) Изменить внешний адрес или DDNS для VPS"
+    echo " 11) HTTPS LAPI через Nginx Proxy Manager"
+    echo " 12) Перегенерировать auto-registration token"
+    echo " 13) Создать новый shared bouncer key"
+    echo " 14) Добавить IP/CIDR вручную"
     echo
     echo "[ ОБСЛУЖИВАНИЕ ]"
-    echo " 13) Перезапустить CrowdSec, Docker и Web UI"
-    echo " 14) Обновить CrowdSec Manager"
-    echo " 15) Показать логи Manager и CrowdSec"
-    echo " 16) Показать machines, bouncers, alerts и decisions"
-    echo " 17) Показать firewall"
-    echo " 18) Повторно применить все настройки"
-    echo " 19) Отключить автозапуск меню при входе"
-    echo " 20) Включить автозапуск меню при входе"
-    echo " 21) Обновить всё установленное ПО"
-    echo " 22) Обновить только системные пакеты Debian"
-    echo " 23) Обновить только Docker"
-    echo " 24) Обновить только CrowdSec"
-    echo " 25) Показать версии установленного ПО"
-    echo " 26) Починить или переустановить команду меню"
-    echo " 27) Проверить доступ Web UI к LAPI"
+    echo " 15) Перезапустить CrowdSec, Docker и Web UI"
+    echo " 16) Обновить CrowdSec Manager"
+    echo " 17) Показать логи Manager и CrowdSec"
+    echo " 18) Показать machines, bouncers, alerts и decisions"
+    echo " 19) Показать firewall"
+    echo " 20) Повторно применить все настройки"
+    echo " 21) Отключить автозапуск меню при входе"
+    echo " 22) Включить автозапуск меню при входе"
+    echo " 23) Обновить всё установленное ПО"
+    echo " 24) Обновить только системные пакеты Debian"
+    echo " 25) Обновить только Docker"
+    echo " 26) Обновить только CrowdSec"
+    echo " 27) Показать версии установленного ПО"
+    echo " 28) Починить или переустановить команду меню"
+    echo " 29) Проверить доступ Web UI к LAPI"
     echo
     echo "  0) Выход"
     echo
-    if ! read -rp "Выбери действие [0-27]: " choice; then
+    if ! read -rp "Выбери действие [0-29]: " choice; then
       echo
       exit 0
     fi
@@ -2396,29 +2628,31 @@ menu_loop_plain() {
       2) show_connection_info; pause ;;
       3) show_tokens_file; pause ;;
       4) create_named_vps_bouncer_key ;;
-      5) remove_allowed_range ;;
-      6) replace_allowed_ranges ;;
-      7) change_lan_ip_or_web_port ;;
-      8) change_lapi_port ;;
-      9) change_public_addr ;;
-      10) regenerate_auto_token ;;
-      11) regenerate_bouncer_key ;;
-      12) add_allowed_range ;;
-      13) restart_services ;;
-      14) update_web_ui_only ;;
-      15) show_logs ;;
-      16) show_crowdsec_info ;;
-      17) show_firewall ;;
-      18) reapply_all_settings ;;
-      19) disable_login_menu ;;
-      20) enable_login_menu ;;
-      21) update_installed_stack ;;
-      22) update_system_only ;;
-      23) update_docker_only ;;
-      24) update_crowdsec_only ;;
-      25) show_versions ;;
-      26) repair_menu_installation ;;
-      27) test_webui_lapi ;;
+      5) validate_machine_prompt ;;
+      6) remove_allowed_range ;;
+      7) replace_allowed_ranges ;;
+      8) change_lan_ip_or_web_port ;;
+      9) change_lapi_port ;;
+      10) change_public_addr ;;
+      11) configure_public_lapi_url ;;
+      12) regenerate_auto_token ;;
+      13) regenerate_bouncer_key ;;
+      14) add_allowed_range ;;
+      15) restart_services ;;
+      16) update_web_ui_only ;;
+      17) show_logs ;;
+      18) show_crowdsec_info ;;
+      19) show_firewall ;;
+      20) reapply_all_settings ;;
+      21) disable_login_menu ;;
+      22) enable_login_menu ;;
+      23) update_installed_stack ;;
+      24) update_system_only ;;
+      25) update_docker_only ;;
+      26) update_crowdsec_only ;;
+      27) show_versions ;;
+      28) repair_menu_installation ;;
+      29) test_webui_lapi ;;
       0) exit 0 ;;
       *) echo "Неизвестный пункт меню."; pause ;;
     esac
