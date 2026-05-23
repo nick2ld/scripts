@@ -1062,11 +1062,18 @@ add_allowed_range() {
   safe_source_env
   local new_range
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
-    new_range=$(whiptail --title " Добавление IP/CIDR " --inputbox "Введите IP/CIDR для добавления к LAPI (например, 11.22.33.44/32):" 10 78 3>&1 1>&2 2>&3) || return
+    # Добавляем || true, чтобы whiptail не ронял скрипт при нажатии Отмена/Esc
+    new_range=$(whiptail --title " Добавление IP/CIDR " --inputbox "Введите IP/CIDR для добавления к LAPI (например, 11.22.33.44/32):" 10 78 3>&1 1>&2 2>&3) || true
+    
+    # Если переменная пустая (нажали Отмена, Esc или ничего не ввели) — выходим обратно в меню
+    if [[ -z "${new_range}" ]]; then
+      return
+    fi
   else
     print_header
     echo "Добавление IP/CIDR для доступа к LAPI. Пример: 11.22.33.44/32"
-    read -rp "Введи IP/CIDR: " new_range
+    read -rp "Введи IP/CIDR (или Enter для отмены): " new_range
+    [[ -n "${new_range}" ]] || { echo "Отменено."; pause; return; }
   fi
 
   new_range="$(printf '%s' "${new_range}" | tr -cd '0-9A-Za-z.:/_-')"
@@ -1082,7 +1089,12 @@ add_allowed_range() {
 
   if [[ ! "${new_range}" =~ ^[0-9a-fA-F:.]+/[0-9]{1,3}$ ]]; then
     if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
-      whiptail --title " Предупреждение " --yes-button "Добавить" --no-button "Отмена" --yesno "Похоже, это не CIDR.\nВсё равно добавить?" 10 78 || return
+      # Перехватываем Отмена/Esc через || true, а выбор пользователя проверяем по коду выхода ($?)
+      whiptail --title " Предупреждение " --yes-button "Добавить" --no-button "Отмена" --yesno "Похоже, это не CIDR.\nВсё равно добавить?" 10 78 || true
+      # Если код выхода равен 1 (нажали Отмена) или 255 (нажали Esc) — мягко выходим в меню
+      if [[ $? -ne 0 ]]; then
+        return
+      fi
     else
       warn "Похоже, это не CIDR."
       read -rp "Всё равно добавить? [y/N]: " confirm
