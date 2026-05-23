@@ -1,3 +1,5 @@
+[Русский](#ru) | [English](#en)
+
 # CrowdSec Central + VPS Scripts
 
 <a id="ru"></a>
@@ -5,527 +7,453 @@
 
 [English](#en)
 
-### Оглавление
-
-- [Назначение](#ru-purpose)
-- [Быстрый запуск](#ru-quick-start)
-- [Правильный порядок установки](#ru-flow)
-- [Что делает central.sh](#ru-central)
-- [Что делает vps.sh](#ru-vps)
-- [CrowdSec Hub](#ru-hub)
-- [Повторный запуск и переустановка](#ru-rerun)
-- [Файлы и команды](#ru-files)
-- [Важно по безопасности](#ru-security)
-
-<a id="ru-purpose"></a>
 ### Назначение
 
-В каталоге находятся два Bash-скрипта для схемы с одним центральным CrowdSec LAPI и несколькими VPS/node:
+В этом каталоге находятся два скрипта для установки CrowdSec в схеме с одним центральным сервером и несколькими VPS.
 
-- `central.sh` устанавливает центральный сервер: Docker, CrowdSec в Docker, CrowdSec Manager, LAPI и меню управления.
-- `vps.sh` подключает VPS/node к центральному LAPI, устанавливает CrowdSec agent, firewall bouncer и выбранные элементы CrowdSec Hub.
+`central.sh` устанавливает центральный сервер CrowdSec: Docker, CrowdSec в контейнере, CrowdSec Manager, LAPI и меню управления.
 
-Имена файлов и пути остаются прежними:
+`vps.sh` подключает отдельную VPS к центральному CrowdSec LAPI, устанавливает CrowdSec agent, firewall bouncer и выбранные элементы CrowdSec Hub.
 
-- `central.sh`
-- `vps.sh`
+Имена файлов и пути запуска остаются прежними:
 
-Актуальные версии:
+```bash
+crowdsec/central.sh
+crowdsec/vps.sh
+```
 
-- `central.sh`: `v0.2-secure`
-- `vps.sh`: `v0.2-secure-live`
-
-<a id="ru-quick-start"></a>
 ### Быстрый запуск
 
-Central:
+Сначала запускается `central.sh` на центральном сервере.
 
 ```bash
 sh -c 'tmp="$(mktemp -t crowdsec-central.XXXXXX)" && curl -fsSL "https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh" -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; exit "$rc"'
 ```
 
-VPS/node:
+После настройки central-сервера запускается `vps.sh` на каждой VPS, которую нужно подключить.
 
 ```bash
 sh -c 'tmp="$(mktemp -t crowdsec-vps.XXXXXX)" && curl -fsSL "https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/vps.sh" -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; exit "$rc"'
 ```
 
-Старые root-level URL без `/crowdsec/` использовать не нужно. Скрипты находятся в каталоге `crowdsec/`.
-
-<a id="ru-flow"></a>
 ### Правильный порядок установки
 
-1. На central-сервере запусти установку `central.sh`.
-2. После установки открой меню:
+1. Запусти `central.sh` на центральном сервере.
+2. После установки открой меню central-сервера:
 
 ```bash
 sudo crowdsec-central-menu
 ```
 
-3. В меню открой:
-
-```text
-Подключения VPS и LAPI -> Создать подключение VPS
-```
-
-4. Введи имя VPS и внешний IP этой VPS.
-
-Скрипт сам добавит IP в доступ к LAPI:
-
-- для IPv4 как `/32`;
-- для IPv6 как `/128`.
-
-5. Мастер покажет данные для подключения VPS:
-
-```text
-CENTRAL_LAPI_URL
-AUTO_REG_TOKEN
-BOUNCER_KEY
-MACHINE_NAME
-```
-
-6. На VPS запусти `vps.sh`.
+3. В меню создай подключение для VPS.
+4. Укажи имя VPS и внешний IP этой VPS.
+5. Central-сервер покажет данные для подключения VPS.
+6. Запусти `vps.sh` на VPS.
 7. Вставь данные, которые показал central-сервер.
-8. Выбери CrowdSec Hub collections.
-9. Если нужно, включи расширенный выбор Hub elements.
+8. Выбери нужные CrowdSec Hub collections.
+9. После завершения проверь статус через меню или команды проверки.
 
-Созданные подключения сохраняются на central-сервере в файле:
+### Что устанавливает central.sh
 
-```text
-/root/crowdsec-central/vps-connections.tsv
-```
+`central.sh` устанавливает и настраивает:
 
-Посмотреть их можно через меню:
+- Docker;
+- Docker Compose plugin;
+- CrowdSec в Docker;
+- CrowdSec Manager;
+- central LAPI;
+- меню управления `crowdsec-central-menu`;
+- правила UFW для Web UI и LAPI;
+- хранение подключений VPS.
 
-```text
-Подключения VPS и LAPI -> Показать созданные подключения
-```
+После установки Web UI доступен только из локальной сети. Наружу нужно пробрасывать только LAPI-порт и только если внешние VPS должны подключаться к central-серверу.
 
-<a id="ru-central"></a>
-### Что делает central.sh
+### Что изменено в central.sh
 
-`central.sh` устанавливает и настраивает центральный CrowdSec-сервер.
+В текущей версии central-скрипта добавлены улучшения:
 
-Скрипт выполняет следующие действия:
+- установка и действия меню показываются в TUI-окнах;
+- долгие операции выводятся в отдельном окне установки;
+- настройки `central.env` читаются безопаснее;
+- добавлена защита от одновременного запуска нескольких копий скрипта;
+- перед изменением UFW сохраняется backup правил;
+- перед опасными действиями с firewall показывается предупреждение;
+- обновление меню из GitHub выполняется только после проверки и подтверждения;
+- просмотр файла с токенами сопровождается предупреждением.
 
-- устанавливает базовые пакеты;
-- устанавливает Docker и Docker Compose plugin;
-- создаёт backup старой apt/systemd-версии CrowdSec, если она была установлена;
-- удаляет старую apt/systemd-версию CrowdSec перед переходом на Docker-режим;
-- запускает Dockerized CrowdSec;
-- запускает CrowdSec Manager;
-- настраивает central LAPI;
-- создаёт auto-registration token;
-- создаёт общий bouncer key;
-- настраивает UFW;
-- ограничивает Web UI локальными сетями;
-- разрешает доступ к LAPI только для нужных сетей и VPS;
-- устанавливает команду меню `crowdsec-central-menu`;
-- создаёт индивидуальные bouncer keys для VPS через мастер подключения.
+### Что устанавливает vps.sh
 
-В меню используется CrowdSec Manager. Simple Web UI больше не используется как вариант установки.
+`vps.sh` устанавливает и настраивает:
 
-Во время установки и действий из меню скрипт показывает окно с текущим этапом выполнения. Ошибки показываются в отдельном окне с логом.
+- CrowdSec agent;
+- регистрацию VPS на central LAPI;
+- работу CrowdSec agent как node;
+- firewall bouncer;
+- выбранные CrowdSec Hub collections;
+- дополнительные Hub elements, если они выбраны вручную;
+- проверку сервисов и статуса CrowdSec.
 
-<a id="ru-vps"></a>
-### Что делает vps.sh
+Fail2Ban может быть удалён только после backup и подтверждения. Это нужно, чтобы избежать конфликта между Fail2Ban и CrowdSec firewall bouncer.
 
-`vps.sh` подключает VPS/node к центральному CrowdSec LAPI.
+### Что изменено в vps.sh
 
-Скрипт выполняет следующие действия:
+В текущей версии VPS-скрипта добавлены улучшения:
 
-- устанавливает базовые пакеты;
-- устанавливает CrowdSec agent;
-- предлагает удалить Fail2Ban, если он найден;
-- перед удалением Fail2Ban сохраняет backup;
-- проверяет доступность central LAPI;
-- регистрирует VPS/node на central LAPI через `cscli lapi register`;
-- настраивает CrowdSec agent как node;
-- устанавливает CrowdSec collections;
-- позволяет выбрать дополнительные Hub elements;
-- устанавливает firewall bouncer;
-- автоматически выбирает `iptables` или `nftables`;
-- подключает firewall bouncer к central LAPI;
-- проверяет конфигурацию CrowdSec;
-- перезапускает нужные сервисы;
-- показывает итоговую сводку.
+- установка проходит через TUI-окна;
+- токены вводятся в скрытом поле;
+- добавлена защита от одновременного запуска нескольких копий скрипта;
+- добавлено предупреждение при использовании `http://` для central LAPI;
+- установщик CrowdSec сначала скачивается во временный файл и проверяется;
+- удаление Fail2Ban требует подтверждения;
+- временные файлы очищаются автоматически;
+- повторный запуск открывает меню управления существующей установкой.
 
-Во время установки скрипт показывает окно с текущим этапом выполнения. Ошибки показываются в отдельном окне с логом.
-
-<a id="ru-hub"></a>
 ### CrowdSec Hub
 
-В CrowdSec не используется термин Fail2Ban “jails”. Вместо этого используются элементы CrowdSec Hub.
+CrowdSec Hub содержит готовые элементы защиты для разных сервисов.
 
-Основные типы:
+Обычно достаточно выбрать нужные `collections`. Они подтягивают связанные правила и парсеры.
 
-- `collections` - наборы правил и зависимостей для конкретного сервиса или стека;
-- `scenarios` - сценарии обнаружения атак;
-- `parsers` - разбор логов;
-- `postoverflows` - дополнительная обработка после срабатывания сценариев;
-- `appsec-configs` - конфигурации AppSec;
-- `appsec-rules` - правила AppSec;
-- `contexts` - дополнительные поля контекста для событий.
+Дополнительные элементы Hub можно выбирать вручную, если нужно точнее настроить защиту под конкретный сервис.
 
-Обычный порядок:
+Скрипт может предложить collections на основе найденных сервисов, systemd units, Docker containers и Proxmox.
 
-1. Сначала установить нужные `collections`.
-2. Потом добавить отдельные `scenarios`, `parsers`, `postoverflows`, `appsec-configs`, `appsec-rules` или `contexts`, если collection не покрывает нужный сервис.
+### Повторный запуск
 
-`vps.sh` получает список collections и Hub elements через `cscli`, а не использует заранее захардкоженный список.
+Если `central.sh` уже установлен, управление выполняется через:
 
-Скрипт может предложить collections по найденным сервисам:
-
-- nginx;
-- apache;
-- caddy;
-- traefik;
-- haproxy;
-- proxmox;
-- docker-контейнеры;
-- systemd-сервисы.
-
-<a id="ru-rerun"></a>
-### Повторный запуск и переустановка
-
-Если `vps.sh` запускается повторно и уже найден `/root/crowdsec-vps-node/node.env` или установлен `cscli`, скрипт показывает меню управления.
-
-Доступные действия:
-
-- показать статус;
-- выбрать и установить collections;
-- выбрать и установить дополнительные Hub elements;
-- проверить сервисы, Hub items, metrics и alerts;
-- перезапустить CrowdSec и bouncer;
-- переустановить или перенастроить VPS/node полностью.
-
-Ошибка вида:
-
-```text
-node.env: line 7: crowdsecurity/sshd: No such file or directory
+```bash
+sudo crowdsec-central-menu
 ```
 
-исправлена. Значения с пробелами сохраняются корректно.
+Если `vps.sh` запускается повторно на уже настроенной VPS, скрипт откроет меню управления.
 
-<a id="ru-files"></a>
-### Файлы и команды
+В меню VPS можно:
 
-Central:
+- посмотреть статус;
+- выбрать и установить collections;
+- установить дополнительные Hub elements;
+- проверить сервисы и метрики;
+- перезапустить CrowdSec и firewall bouncer;
+- выполнить переустановку или перенастройку.
 
-```text
+### Где лежат файлы central-сервера
+
+Меню:
+
+```bash
 /usr/local/sbin/crowdsec-central-menu
+```
+
+Настройки:
+
+```bash
 /root/crowdsec-central/central.env
+```
+
+Список созданных подключений VPS:
+
+```bash
 /root/crowdsec-central/vps-connections.tsv
-/root/crowdsec-central/ufw-backup-*
+```
+
+Docker Compose:
+
+```bash
 /opt/crowdsec-manager/docker-compose.yml
 ```
 
-VPS/node:
+Backup UFW:
 
-```text
+```bash
+/root/crowdsec-central/ufw-backup-*
+```
+
+### Где лежат файлы VPS
+
+Настройки VPS:
+
+```bash
 /root/crowdsec-vps-node/node.env
+```
+
+Backup Fail2Ban:
+
+```bash
 /root/crowdsec-vps-node/fail2ban-backup
+```
+
+Конфиг CrowdSec:
+
+```bash
 /etc/crowdsec/config.yaml
-/etc/crowdsec/local_api_credentials.yaml
+```
+
+Конфиг firewall bouncer:
+
+```bash
 /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
 ```
 
-Полезные команды на central:
+### Полезные команды
 
-```bash
-sudo crowdsec-central-menu
-docker ps
-docker logs crowdsec
-docker logs crowdsec-manager
-sudo ufw status verbose
-```
-
-Полезные команды на VPS/node:
+Проверить CrowdSec на VPS:
 
 ```bash
 sudo systemctl status crowdsec --no-pager -l
 sudo cscli lapi status
 sudo cscli metrics
+```
+
+Проверить firewall bouncer на VPS:
+
+```bash
 sudo systemctl status crowdsec-firewall-bouncer --no-pager -l
 sudo journalctl -u crowdsec-firewall-bouncer --no-pager -n 80
 ```
 
-<a id="ru-security"></a>
-### Важно по безопасности
+Проверить подключённые машины на central-сервере:
 
-Оба скрипта запускаются от root и меняют системные настройки. Перед запуском желательно использовать отдельную LXC/VM или отдельный VPS.
+```bash
+sudo cscli machines list
+sudo cscli alerts list
+sudo cscli decisions list
+```
 
-Что важно знать:
+### Важно
 
-- Web UI не нужно открывать в интернет.
-- Наружу пробрасывается только LAPI-порт, если внешние VPS должны подключаться к central.
-- Для подключения VPS лучше создавать индивидуальный bouncer key через меню central.
-- Если central LAPI доступен через обычный `http://`, лучше использовать VPN, приватную сеть или reverse proxy с HTTPS.
-- `central.sh` делает backup UFW перед перенастройкой firewall.
-- `vps.sh` делает backup Fail2Ban перед удалением.
-- Токены и ключи хранятся в root-only файлах настроек.
+Скрипты нужно запускать от root или через sudo.
+
+Перед установкой желательно иметь доступ к серверу через консоль провайдера или гипервизора. Это особенно важно при изменении firewall.
+
+Не публикуй содержимое файлов `central.env` и `node.env`. В них находятся токены и ключи доступа.
+
+Для подключения VPS к central LAPI лучше использовать VPN, приватную сеть или HTTPS. Если используется обычный `http://`, данные подключения передаются без шифрования.
 
 <a id="en"></a>
 ## English
 
 [Русский](#ru)
 
-### Table Of Contents
-
-- [Purpose](#en-purpose)
-- [Quick Start](#en-quick-start)
-- [Correct Installation Flow](#en-flow)
-- [What central.sh Does](#en-central)
-- [What vps.sh Does](#en-vps)
-- [CrowdSec Hub](#en-hub)
-- [Rerun and Reinstall](#en-rerun)
-- [Files and Commands](#en-files)
-- [Security Notes](#en-security)
-
-<a id="en-purpose"></a>
 ### Purpose
 
-This directory contains two Bash scripts for a setup with one central CrowdSec LAPI and multiple VPS/node machines:
+This directory contains two scripts for a CrowdSec setup with one central server and multiple VPS nodes.
 
-- `central.sh` installs the central server: Docker, Dockerized CrowdSec, CrowdSec Manager, LAPI, and the management menu.
-- `vps.sh` connects a VPS/node to the central LAPI, installs CrowdSec agent, firewall bouncer, and selected CrowdSec Hub elements.
+`central.sh` installs the central CrowdSec server: Docker, Dockerized CrowdSec, CrowdSec Manager, LAPI, and the management menu.
 
-File names and paths stay the same:
+`vps.sh` connects a VPS node to the central CrowdSec LAPI, installs the CrowdSec agent, firewall bouncer, and selected CrowdSec Hub elements.
 
-- `central.sh`
-- `vps.sh`
+File names and launch paths stay the same:
 
-Current versions:
+```bash
+crowdsec/central.sh
+crowdsec/vps.sh
+```
 
-- `central.sh`: `v0.2-secure`
-- `vps.sh`: `v0.2-secure-live`
-
-<a id="en-quick-start"></a>
 ### Quick Start
 
-Central:
+Run `central.sh` first on the central server.
 
 ```bash
 sh -c 'tmp="$(mktemp -t crowdsec-central.XXXXXX)" && curl -fsSL "https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh" -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; exit "$rc"'
 ```
 
-VPS/node:
+After the central server is ready, run `vps.sh` on every VPS node you want to connect.
 
 ```bash
 sh -c 'tmp="$(mktemp -t crowdsec-vps.XXXXXX)" && curl -fsSL "https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/vps.sh" -o "$tmp" && if [ "$(id -u)" -eq 0 ]; then bash "$tmp"; else sudo bash "$tmp"; fi; rc=$?; rm -f "$tmp"; exit "$rc"'
 ```
 
-Do not use old root-level URLs without `/crowdsec/`. The scripts are stored in the `crowdsec/` directory.
-
-<a id="en-flow"></a>
-### Correct Installation Flow
+### Correct Installation Order
 
 1. Run `central.sh` on the central server.
-2. After installation, open the menu:
+2. After installation, open the central menu:
 
 ```bash
 sudo crowdsec-central-menu
 ```
 
-3. Open:
-
-```text
-Подключения VPS и LAPI -> Создать подключение VPS
-```
-
+3. Create a VPS connection in the menu.
 4. Enter the VPS name and the VPS public IP.
-
-The script adds the IP to LAPI access:
-
-- IPv4 as `/32`;
-- IPv6 as `/128`.
-
-5. The wizard shows VPS connection values:
-
-```text
-CENTRAL_LAPI_URL
-AUTO_REG_TOKEN
-BOUNCER_KEY
-MACHINE_NAME
-```
-
+5. The central server will show the connection data for the VPS.
 6. Run `vps.sh` on the VPS.
-7. Paste the values from the central server.
-8. Select CrowdSec Hub collections.
-9. Enable advanced Hub element selection if needed.
+7. Paste the values shown by the central server.
+8. Select the required CrowdSec Hub collections.
+9. After installation, check the status through the menu or with the verification commands.
 
-Created connections are stored on the central server in:
+### What central.sh Installs
 
-```text
-/root/crowdsec-central/vps-connections.tsv
-```
+`central.sh` installs and configures:
 
-They can be viewed from the menu:
+- Docker;
+- Docker Compose plugin;
+- CrowdSec in Docker;
+- CrowdSec Manager;
+- central LAPI;
+- the `crowdsec-central-menu` management menu;
+- UFW rules for Web UI and LAPI;
+- saved VPS connection records.
 
-```text
-Подключения VPS и LAPI -> Показать созданные подключения
-```
+After installation, the Web UI is intended for local network access only. Only the LAPI port should be forwarded from the Internet, and only when external VPS nodes need to connect.
 
-<a id="en-central"></a>
-### What central.sh Does
+### What Changed in central.sh
 
-`central.sh` installs and configures the central CrowdSec server.
+The current central script includes these improvements:
 
-The script:
+- installation and menu actions are shown in TUI windows;
+- long operations are displayed in a separate installation window;
+- `central.env` is read more safely;
+- protection against running multiple script instances at the same time;
+- UFW rules are backed up before changes;
+- dangerous firewall actions show a warning first;
+- menu updates from GitHub require validation and confirmation;
+- viewing the token file shows a warning.
 
-- installs base packages;
-- installs Docker and the Docker Compose plugin;
-- backs up the old apt/systemd CrowdSec installation if present;
-- removes the old apt/systemd CrowdSec installation before switching to Docker mode;
-- starts Dockerized CrowdSec;
-- starts CrowdSec Manager;
-- configures central LAPI;
-- creates an auto-registration token;
-- creates a shared bouncer key;
-- configures UFW;
-- restricts Web UI to private networks;
-- allows LAPI access only for required networks and VPS nodes;
-- installs the `crowdsec-central-menu` command;
-- creates per-VPS bouncer keys through the onboarding wizard.
+### What vps.sh Installs
 
-The menu uses CrowdSec Manager. Simple Web UI is no longer used as an installation option.
+`vps.sh` installs and configures:
 
-During installation and menu actions, the script shows the current stage. Errors are shown in a separate log window.
+- CrowdSec agent;
+- VPS registration with the central LAPI;
+- CrowdSec agent node mode;
+- firewall bouncer;
+- selected CrowdSec Hub collections;
+- additional Hub elements when selected manually;
+- service and CrowdSec status checks.
 
-<a id="en-vps"></a>
-### What vps.sh Does
+Fail2Ban can be removed only after backup and confirmation. This helps avoid conflicts between Fail2Ban and the CrowdSec firewall bouncer.
 
-`vps.sh` connects a VPS/node to the central CrowdSec LAPI.
+### What Changed in vps.sh
 
-The script:
+The current VPS script includes these improvements:
 
-- installs base packages;
-- installs CrowdSec agent;
-- offers to remove Fail2Ban if it is found;
-- creates a Fail2Ban backup before removal;
-- checks central LAPI availability;
-- registers the VPS/node with central LAPI using `cscli lapi register`;
-- configures CrowdSec agent as a node;
-- installs CrowdSec collections;
-- allows selecting additional Hub elements;
-- installs the firewall bouncer;
-- automatically selects `iptables` or `nftables`;
-- connects the firewall bouncer to central LAPI;
-- checks the CrowdSec configuration;
-- restarts required services;
-- shows the final summary.
+- installation uses TUI windows;
+- tokens are entered in hidden fields;
+- protection against running multiple script instances at the same time;
+- warning when `http://` is used for the central LAPI;
+- the CrowdSec installer is downloaded to a temporary file and checked before execution;
+- Fail2Ban removal requires confirmation;
+- temporary files are cleaned automatically;
+- rerunning the script opens a management menu for the existing installation.
 
-During installation, the script shows the current stage. Errors are shown in a separate log window.
-
-<a id="en-hub"></a>
 ### CrowdSec Hub
 
-CrowdSec does not use the Fail2Ban term “jails”. Instead, it uses CrowdSec Hub elements.
+CrowdSec Hub contains ready-made protection elements for different services.
 
-Main types:
+Usually, selecting the required `collections` is enough. Collections pull related rules and parsers.
 
-- `collections` - rule and dependency bundles for a service or stack;
-- `scenarios` - attack detection scenarios;
-- `parsers` - log parsing;
-- `postoverflows` - additional processing after scenario overflow;
-- `appsec-configs` - AppSec configurations;
-- `appsec-rules` - AppSec rules;
-- `contexts` - additional event context fields.
+Additional Hub elements can be selected manually when you need more precise protection for a specific service.
 
-Normal order:
+The script can suggest collections based on detected services, systemd units, Docker containers, and Proxmox.
 
-1. Install the required `collections`.
-2. Add standalone `scenarios`, `parsers`, `postoverflows`, `appsec-configs`, `appsec-rules`, or `contexts` only if a collection does not cover the required service.
+### Rerun
 
-`vps.sh` gets collections and Hub elements through `cscli` instead of using a hardcoded list.
+If `central.sh` is already installed, manage it with:
 
-The script can suggest collections based on detected services:
-
-- nginx;
-- apache;
-- caddy;
-- traefik;
-- haproxy;
-- proxmox;
-- docker containers;
-- systemd services.
-
-<a id="en-rerun"></a>
-### Rerun and Reinstall
-
-If `vps.sh` is run again and `/root/crowdsec-vps-node/node.env` exists or `cscli` is installed, the script shows a management menu.
-
-Available actions:
-
-- show status;
-- select and install collections;
-- select and install additional Hub elements;
-- check services, Hub items, metrics, and alerts;
-- restart CrowdSec and bouncer;
-- fully reinstall or reconfigure the VPS/node.
-
-This error is fixed:
-
-```text
-node.env: line 7: crowdsecurity/sshd: No such file or directory
+```bash
+sudo crowdsec-central-menu
 ```
 
-Values containing spaces are saved correctly.
+If `vps.sh` is run again on an already configured VPS, it opens the management menu.
 
-<a id="en-files"></a>
-### Files and Commands
+In the VPS menu, you can:
 
-Central:
+- view status;
+- select and install collections;
+- install additional Hub elements;
+- check services and metrics;
+- restart CrowdSec and firewall bouncer;
+- reinstall or reconfigure the node.
 
-```text
+### Central Server Files
+
+Menu:
+
+```bash
 /usr/local/sbin/crowdsec-central-menu
+```
+
+Settings:
+
+```bash
 /root/crowdsec-central/central.env
+```
+
+Saved VPS connections:
+
+```bash
 /root/crowdsec-central/vps-connections.tsv
-/root/crowdsec-central/ufw-backup-*
+```
+
+Docker Compose:
+
+```bash
 /opt/crowdsec-manager/docker-compose.yml
 ```
 
-VPS/node:
+UFW backup:
 
-```text
+```bash
+/root/crowdsec-central/ufw-backup-*
+```
+
+### VPS Files
+
+VPS settings:
+
+```bash
 /root/crowdsec-vps-node/node.env
+```
+
+Fail2Ban backup:
+
+```bash
 /root/crowdsec-vps-node/fail2ban-backup
+```
+
+CrowdSec config:
+
+```bash
 /etc/crowdsec/config.yaml
-/etc/crowdsec/local_api_credentials.yaml
+```
+
+Firewall bouncer config:
+
+```bash
 /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
 ```
 
-Useful commands on central:
+### Useful Commands
 
-```bash
-sudo crowdsec-central-menu
-docker ps
-docker logs crowdsec
-docker logs crowdsec-manager
-sudo ufw status verbose
-```
-
-Useful commands on VPS/node:
+Check CrowdSec on the VPS:
 
 ```bash
 sudo systemctl status crowdsec --no-pager -l
 sudo cscli lapi status
 sudo cscli metrics
+```
+
+Check firewall bouncer on the VPS:
+
+```bash
 sudo systemctl status crowdsec-firewall-bouncer --no-pager -l
 sudo journalctl -u crowdsec-firewall-bouncer --no-pager -n 80
 ```
 
-<a id="en-security"></a>
-### Security Notes
+Check connected machines on the central server:
 
-Both scripts run as root and change system settings. It is recommended to use a separate LXC/VM or a dedicated VPS.
+```bash
+sudo cscli machines list
+sudo cscli alerts list
+sudo cscli decisions list
+```
 
-Important notes:
+### Important
 
-- Do not expose Web UI to the Internet.
-- Forward only the LAPI port if external VPS nodes must connect to central.
-- Create an individual bouncer key for each VPS through the central menu.
-- If central LAPI uses plain `http://`, use VPN, a private network, or a reverse proxy with HTTPS when possible.
-- `central.sh` creates a UFW backup before firewall reconfiguration.
-- `vps.sh` creates a Fail2Ban backup before removal.
-- Tokens and keys are stored in root-only configuration files.
+Run the scripts as root or through sudo.
+
+Before installation, make sure you have access to the server console through your provider or hypervisor. This is especially important when firewall rules are changed.
+
+Do not publish the contents of `central.env` or `node.env`. They contain tokens and access keys.
+
+For VPS connections to the central LAPI, VPN, a private network, or HTTPS is recommended. If plain `http://` is used, connection data is sent without encryption.
