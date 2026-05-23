@@ -5250,6 +5250,251 @@ manage_device_events_menu() {
 # --- end v0.7.1 submenu return fix ---
 
 
+
+# -----------------------------------------------------------------------------
+# v0.7.5 CrowdSec Manager / Console enrollment fix
+# -----------------------------------------------------------------------------
+# Важно:
+# - CrowdSec Manager управляет тем CrowdSec engine, который запущен в контейнере crowdsec.
+# - Поэтому Console enrollment, CAPI status/register и console options должны выполняться
+#   через docker exec crowdsec cscli, если контейнер crowdsec существует и запущен.
+# - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
+#   enroll через состояние того же engine.
+
+SCRIPT_VERSION="v0.7.5-manager-console-enroll-fix"
+
+crowdsec_engine_context() {
+  if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
+    printf '%s' "docker: crowdsec"
+  else
+    printf '%s' "host: cscli"
+  fi
+}
+
+crowdsec_cscli() {
+  safe_source_env
+  if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
+    docker exec crowdsec cscli "$@"
+  else
+    cscli "$@"
+  fi
+}
+
+parse_console_enroll_key() {
+  local raw="${1:-}"
+  raw="${raw//$'\r'/}"
+  raw="${raw//$'\n'/ }"
+  raw="${raw#sudo }"
+  if [[ "${raw}" == *"console enroll"* ]]; then
+    raw="${raw##*console enroll }"
+  elif [[ "${raw}" == *" enroll "* ]]; then
+    raw="${raw##* enroll }"
+  fi
+  raw="${raw%% *}"
+  printf '%s' "${raw}" | tr -cd 'A-Za-z0-9._:-'
+}
+
+action_description() {
+  local key="$1"
+  case "${key}" in
+    protection_capi|capi_enroll)
+      T "Подключение текущего CrowdSec engine к облачной CrowdSec Console. Если используется CrowdSec Manager в Docker, команды выполняются внутри контейнера crowdsec, чтобы Manager видел результат. Это не bouncer key, не auto-registration token и не Service API key." "Connects the current CrowdSec engine to the cloud CrowdSec Console. If CrowdSec Manager runs in Docker, commands are executed inside the crowdsec container so Manager sees the result. This is not a bouncer key, not an auto-registration token and not a Service API key."
+      ;;
+    *)
+      # fallback to the previous text where possible
+      case "${key}" in
+        status) T "Показывает состояние сервисов, открытые порты, контейнеры Docker, LAPI и основные параметры central. Используй это как первый пункт диагностики." "Shows service state, open ports, Docker containers, LAPI and main central settings. Use this as the first diagnostic step." ;;
+        connect) T "Показывает сохранённые подключения VPS, machines и bouncer/API устройств. Здесь можно повторно посмотреть LAPI URL, machine name и bouncer key." "Shows saved VPS, machine and bouncer/API device connections. Use it to view LAPI URL, machine name and bouncer key again." ;;
+        envfile) T "Показывает файл central.env с текущими настройками central. Там есть порты, URL, ranges и служебные ключи. Не публикуй этот вывод наружу." "Shows central.env with current central settings. It contains ports, URLs, ranges and secret keys. Do not publish this output." ;;
+        crowdsec_info) T "Показывает machines, bouncers, alerts, active decisions и metrics. Это общий экран понимания: кто подключён, кто блокирует и какие решения есть." "Shows machines, bouncers, alerts, active decisions and metrics. This is the overview: who is connected, who enforces and what decisions exist." ;;
+        protection_menu) T "Раздел настройки защиты central: бесплатные Hub collections, локальные rules/scenarios, ручные decisions, CrowdSec allowlist и опциональное подключение к CrowdSec Console/CAPI." "Protection setup: free Hub collections, local rules/scenarios, manual decisions, CrowdSec allowlist and optional CrowdSec Console/CAPI connection." ;;
+        protection_baseline) T "Ставит базовую бесплатную защиту: обновляет Hub и устанавливает linux + sshd collections. Это минимальная база, чтобы central мог создавать local decisions из своих логов." "Installs the base free protection: updates Hub and installs linux + sshd collections. This is the minimum base for central to create local decisions from its own logs." ;;
+        protection_collections) T "Управление CrowdSec Hub collections. Collections ставят наборы parsers/scenarios для Linux, SSH, web-серверов и firewall/router логов." "Manage CrowdSec Hub collections. Collections install parser/scenario bundles for Linux, SSH, web servers and firewall/router logs." ;;
+        protection_decisions) T "Локальные ручные блокировки через CrowdSec decisions. Можно добавить ban для IP/CIDR, импортировать свой blacklist из файла, удалить decision или посмотреть active decisions." "Local manual blocks through CrowdSec decisions. Add an IP/CIDR ban, import your own blacklist from a file, delete a decision or show active decisions." ;;
+        protection_trusted) T "CrowdSec allowlist: IP/CIDR из этого списка записываются в parser s02-enrich и применяются самим CrowdSec." "CrowdSec allowlist: IP/CIDR from this list are written to an s02-enrich parser and applied by CrowdSec itself." ;;
+        node_bouncer) T "Создаёт подключение VPS. Есть два режима: удалённая установка по SSH или ручная установка с ожиданием регистрации machine и последующим validate." "Creates a VPS connection. Two modes are available: remote SSH installation or manual installation with machine registration wait and validate." ;;
+        validate_machine) T "Подтверждает зарегистрированные VPS machines. Это нужно для VPS/agent, но не нужно для bouncer-only устройств вроде OpenWrt firewall-bouncer." "Validates registered VPS machines. Required for VPS/agent nodes, not required for bouncer-only devices such as OpenWrt firewall-bouncer." ;;
+        add_range) T "Добавляет IP/CIDR, которому разрешено обращаться к central LAPI. Обычно это IP VPS, роутера, NPM или другого доверенного источника." "Adds an IP/CIDR allowed to reach central LAPI. Usually this is a VPS, router, NPM or another trusted source IP." ;;
+        remove_range) T "Удаляет IP/CIDR из allowed ranges LAPI. После удаления этот источник может потерять доступ к central LAPI." "Removes an IP/CIDR from LAPI allowed ranges. After removal that source may lose access to central LAPI." ;;
+        replace_ranges) T "Полностью заменяет список allowed ranges LAPI. Используй осторожно: можно случайно отрезать доступ VPS, роутеру или NPM." "Completely replaces the LAPI allowed ranges list. Use carefully: you can cut off VPS, router or NPM access." ;;
+        device_manage) T "Управление устройствами, где установлен только bouncer/API key. Такие устройства не являются machines, не требуют validate и только забирают decisions из central." "Manage devices that only have a bouncer/API key. These devices are not machines, do not need validate and only pull decisions from central." ;;
+        device_events) T "Отдельная настройка событий от роутера/устройства. Bouncer сам логи не отправляет. Если нужны события, включается filtered syslog intake на central." "Separate router/device event intake setup. A bouncer does not send logs. If events are needed, enable filtered syslog intake on central." ;;
+        syslog_devices) T "Показывает устройства, для которых включён remote syslog intake: порт, режим filtered/full и файлы логов на central." "Shows devices with remote syslog intake enabled: port, filtered/full mode and log files on central." ;;
+        web_addr) T "Меняет LAN IP central и порт Web UI. Это влияет на адрес CrowdSec Manager в браузере." "Changes central LAN IP and Web UI port. This affects the CrowdSec Manager browser URL." ;;
+        lapi_port) T "Меняет порт central LAPI. После изменения нужно обновить настройки VPS, bouncers, NPM и пробросы портов." "Changes the central LAPI port. After changing it, update VPS, bouncers, NPM and port forwards." ;;
+        public_addr) T "Задаёт внешний IP/DDNS для прямого HTTP доступа к LAPI. Используй только если VPS ходят напрямую, без HTTPS reverse proxy." "Sets public IP/DDNS for direct HTTP LAPI access. Use only if VPS connect directly without an HTTPS reverse proxy." ;;
+        public_lapi_url) T "Задаёт публичный HTTPS URL LAPI через Nginx Proxy Manager. Это предпочтительно для удалённых VPS вместо прямого HTTP." "Sets the public HTTPS LAPI URL through Nginx Proxy Manager. This is preferred for remote VPS instead of direct HTTP." ;;
+        auto_token) T "Перегенерирует auto-registration token для регистрации machines. Новые установки VPS со старым token больше не смогут регистрироваться." "Regenerates the auto-registration token for machines. New VPS installs using the old token will no longer register." ;;
+        bouncer_key) T "Перегенерирует shared bouncer key. Индивидуальные bouncer keys устройств не меняет, но shared-key подключения потребуется обновить." "Regenerates the shared bouncer key. Individual device bouncer keys are not changed, but shared-key connections must be updated." ;;
+        firewall) T "Показывает текущие правила UFW/firewall central: SSH, Web UI, LAPI и syslog intake." "Shows current central UFW/firewall rules: SSH, Web UI, LAPI and syslog intake." ;;
+        test_lapi) T "Проверяет доступ CrowdSec Manager/Web UI к LAPI. Используй, если Manager показывает LAPI Offline." "Tests CrowdSec Manager/Web UI access to LAPI. Use it if Manager shows LAPI Offline." ;;
+        restart) T "Перезапускает CrowdSec, Docker контейнеры и Web UI. Используй после изменений или при зависании сервисов." "Restarts CrowdSec, Docker containers and Web UI. Use after changes or if services hang." ;;
+        update_webui) T "Обновляет только CrowdSec Manager/Web UI контейнер, не трогая весь сервер." "Updates only the CrowdSec Manager/Web UI container, without touching the whole server." ;;
+        logs) T "Показывает логи CrowdSec и Manager. Это основной пункт для поиска причин ошибок." "Shows CrowdSec and Manager logs. This is the main place to investigate errors." ;;
+        reapply) T "Повторно применяет сохранённые настройки: LAPI config, Docker, UFW и связанные параметры." "Reapplies saved settings: LAPI config, Docker, UFW and related parameters." ;;
+        update_all) T "Обновляет весь стек: системные пакеты, Docker, CrowdSec и Web UI. Используй для полного обслуживания." "Updates the full stack: system packages, Docker, CrowdSec and Web UI. Use for full maintenance." ;;
+        update_system) T "Обновляет пакеты Debian/Ubuntu через apt." "Updates Debian/Ubuntu packages through apt." ;;
+        update_docker) T "Обновляет Docker и docker compose plugin." "Updates Docker and the docker compose plugin." ;;
+        update_crowdsec) T "Обновляет CrowdSec engine и связанные пакеты из репозитория CrowdSec." "Updates CrowdSec engine and related packages from the CrowdSec repository." ;;
+        versions) T "Показывает версии ОС, Docker, CrowdSec, cscli и контейнеров." "Shows OS, Docker, CrowdSec, cscli and container versions." ;;
+        repair_menu) T "Скачивает свежий central.sh из GitHub, проверяет синтаксис и устанавливает его как /usr/local/sbin/crowdsec-central-menu. Используй для обновления самого скрипта меню." "Downloads the latest central.sh from GitHub, checks syntax, and installs it as /usr/local/sbin/crowdsec-central-menu. Use it to update the menu script itself." ;;
+        language) T "Меняет язык интерфейса и сохраняет выбор в central.env." "Changes interface language and saves the choice to central.env." ;;
+        disable_autostart) T "Отключает автозапуск меню при входе root в shell." "Disables automatic menu start when root logs into shell." ;;
+        enable_autostart) T "Включает автозапуск меню при входе root в shell." "Enables automatic menu start when root logs into shell." ;;
+        *) T "Описание для этого пункта пока не задано. Действие будет выполнено без дополнительных изменений." "No description is defined for this item yet. The action will run without additional changes." ;;
+      esac
+      ;;
+  esac
+}
+
+capi_console_status() {
+  local tmp
+  tmp="$(mktemp)"
+  {
+    echo "$(T "CAPI/Console статус. Это опционально: бесплатный local-mode работает без платных списков." "CAPI/Console status. This is optional: free local-mode works without paid lists.")"
+    echo
+    echo "$(T "Команды выполняются в engine:" "Commands run in engine:") $(crowdsec_engine_context)"
+    echo
+    echo "=== cscli capi status ==="
+    crowdsec_cscli capi status 2>&1 || true
+    echo
+    echo "=== cscli console status ==="
+    crowdsec_cscli console status 2>&1 || true
+    echo
+    echo "=== cscli console list/options ==="
+    crowdsec_cscli console list 2>&1 || true
+    echo
+    echo "$(T "Если CrowdSec Manager запущен в Docker, статус должен проверяться именно внутри контейнера crowdsec. Этот экран делает это автоматически." "If CrowdSec Manager runs in Docker, status must be checked inside the crowdsec container. This screen does that automatically.")"
+  } >"${tmp}"
+  show_file "$(T "CrowdSec Console / CAPI" "CrowdSec Console / CAPI")" "${tmp}"
+  rm -f "${tmp}"
+}
+
+console_enroll_with_key() {
+  local enroll_input enroll_key enable_all rc
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    enroll_input="$(whiptail --title " $(T "CrowdSec Console enrollment" "CrowdSec Console enrollment") " --passwordbox "$(T "Вставь Console enrollment key или всю команду из app.crowdsec.net.\n\nМожно вставить:\ncscli console enroll XXXXX\nили только XXXXX\n\nКоманда будет выполнена в том CrowdSec engine, которым управляет CrowdSec Manager." "Paste the Console enrollment key or the whole command from app.crowdsec.net.\n\nYou may paste:\ncscli console enroll XXXXX\nor only XXXXX\n\nThe command will run in the CrowdSec engine managed by CrowdSec Manager.")" 18 96 "" 3>&1 1>&2 2>&3)" || return 0
+    set +e
+    whiptail --title " $(T "Console options" "Console options") " \
+      --yes-button "$(T "Да" "Yes")" --no-button "$(T "Нет" "No")" \
+      --yesno "$(T "После enroll включить отправку всех Console options через: cscli console enable --all?\n\nЭто включает передачу alerts/decisions/metrics/status в облачную CrowdSec Console. Это опционально. Если не уверен, выбери Нет." "After enroll, enable all Console options with: cscli console enable --all?\n\nThis enables sending alerts/decisions/metrics/status to the cloud CrowdSec Console. This is optional. If unsure, choose No.")" 16 96
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] && enable_all="yes" || enable_all="no"
+  else
+    read -rsp "$(T "Console enrollment key or command: " "Console enrollment key or command: ")" enroll_input || return 0
+    echo
+    read -rp "$(T "Включить cscli console enable --all? [y/N]: " "Enable cscli console enable --all? [y/N]: ")" enable_all || true
+    [[ "${enable_all:-N}" =~ ^[Yy]$ ]] && enable_all="yes" || enable_all="no"
+  fi
+
+  enroll_key="$(parse_console_enroll_key "${enroll_input}")"
+  if [[ -z "${enroll_key}" ]]; then
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+      whiptail --title " $(T "Пустой ключ" "Empty key") " --msgbox "$(T "Enrollment key пустой. Возврат в предыдущее меню." "Enrollment key is empty. Returning to the previous menu.")" 9 80 || true
+    else
+      warn "$(T "Enrollment key пустой." "Enrollment key is empty.")"
+    fi
+    return 0
+  fi
+
+  console_enroll_apply() {
+    echo "Engine context: $(crowdsec_engine_context)"
+    echo "Running: cscli console enroll <hidden>"
+    crowdsec_cscli console enroll "${enroll_key}"
+    if [[ "${enable_all}" == "yes" ]]; then
+      echo "Running: cscli console enable --all"
+      crowdsec_cscli console enable --all || true
+    else
+      echo "Console options were not enabled by user choice."
+    fi
+    echo
+    echo "Console status:"
+    crowdsec_cscli console status || true
+    echo
+    echo "CAPI status:"
+    crowdsec_cscli capi status || true
+  }
+
+  run_with_live_progress "$(T "CrowdSec Console enrollment" "CrowdSec Console enrollment")" console_enroll_apply || return 0
+  show_help_text "$(T "CrowdSec Console" "CrowdSec Console")" "$(T "Enroll выполнен в текущем CrowdSec engine.\n\nЕсли статус показывает ожидание подтверждения, открой app.crowdsec.net -> Engines и подтверди Security Engine.\n\nКлюч не сохраняется и не отображается в CrowdSec Manager. Manager должен видеть результат enroll через состояние engine." "Enroll has been executed in the current CrowdSec engine.\n\nIf status shows pending validation, open app.crowdsec.net -> Engines and validate the Security Engine.\n\nThe key is not saved and is not displayed in CrowdSec Manager. Manager should see the enroll result through the engine state.")"
+}
+
+capi_register_free() {
+  capi_register_apply() {
+    echo "Engine context: $(crowdsec_engine_context)"
+    echo "Running: cscli capi register"
+    crowdsec_cscli capi register || true
+    echo
+    echo "CAPI status:"
+    crowdsec_cscli capi status || true
+  }
+  run_with_live_progress "$(T "CrowdSec CAPI register" "CrowdSec CAPI register")" capi_register_apply || true
+}
+
+manage_capi_console_menu() {
+  local choice
+  while true; do
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+      choice="$(whiptail --title " $(T "CrowdSec Console / CAPI" "CrowdSec Console / CAPI") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Здесь подключается текущий CrowdSec engine к облачной CrowdSec Console.\n\nЕсли используется CrowdSec Manager в Docker, команды автоматически выполняются внутри контейнера crowdsec, а не на хосте.\n\nПосле действия вы вернётесь сюда." "Connect the current CrowdSec engine to the cloud CrowdSec Console here.\n\nIf CrowdSec Manager runs in Docker, commands are executed inside the crowdsec container automatically, not on the host.\n\nAfter an action you will return here.")" 27 106 6 \
+        "enroll" "$(T "Console enrollment key" "Console enrollment key")" "$(T "Вводит enrollment key или всю команду cscli console enroll из app.crowdsec.net." "Enter the enrollment key or the whole cscli console enroll command from app.crowdsec.net.")" \
+        "capi" "$(T "CAPI register/status" "CAPI register/status")" "$(T "Выполняет cscli capi register в текущем engine и показывает статус." "Runs cscli capi register in the current engine and shows status.")" \
+        "cti" "$(T "CTI API key" "CTI API key")" "$(T "Сохраняет CTI API key в config.yaml. Это отдельный ключ, не enrollment key." "Saves CTI API key to config.yaml. This is a separate key, not an enrollment key.")" \
+        "status" "$(T "Показать CAPI/Console статус" "Show CAPI/Console status")" "$(T "Показывает статус Console/CAPI в том же engine, которым управляет Manager." "Shows Console/CAPI status in the same engine managed by Manager.")" \
+        3>&1 1>&2 2>&3)" || return 0
+    else
+      echo "1) enroll - Console enrollment key"
+      echo "2) capi - CAPI register/status"
+      echo "3) cti - CTI API key"
+      echo "4) status"
+      echo "0) back"
+      read -rp "> " choice || return 0
+      case "${choice}" in 0|q|back) return 0;; 1) choice=enroll;; 2) choice=capi;; 3) choice=cti;; 4) choice=status;; esac
+    fi
+    case "${choice}" in
+      enroll) show_action_intro capi_enroll || continue; console_enroll_with_key ;;
+      capi) capi_register_free ;;
+      cti) configure_cti_api_key ;;
+      status) capi_console_status ;;
+    esac
+  done
+}
+
+manage_protection_menu() {
+  local choice
+  while true; do
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+      choice="$(whiptail --title " $(T "Защита, правила и decisions" "Protection, rules and decisions") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Этот раздел отвечает за то, ОТКУДА central берёт decisions для всех bouncers.\n\nБесплатный режим: Hub collections + анализ своих логов + ручные local decisions.\nCrowdSec Console/CAPI опциональны и не включают платные blocklists автоматически.\n\nПосле любого подпункта вы вернётесь сюда." "This section controls WHERE central gets decisions for all bouncers.\n\nFree mode: Hub collections + local log analysis + manual local decisions.\nCrowdSec Console/CAPI are optional and do not enable paid blocklists automatically.\n\nAfter any subitem you will return here.")" 27 106 7 \
+        "baseline" "$(T "Базовая бесплатная защита" "Base free protection")" "$(T "Ставит linux + sshd collections. Минимальная база для local decisions." "Installs linux + sshd collections. Minimum base for local decisions.")" \
+        "collections" "$(T "Collections / rules / Hub" "Collections / rules / Hub")" "$(T "Установка и просмотр collections, scenarios, parsers из CrowdSec Hub." "Install and view collections, scenarios, parsers from CrowdSec Hub.")" \
+        "decisions" "$(T "Manual decisions / local blacklist" "Manual decisions / local blacklist")" "$(T "Ручные bans, удаление decisions и импорт своего списка IP/CIDR." "Manual bans, delete decisions and import your own IP/CIDR list.")" \
+        "trusted" "$(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR")" "$(T "Реальная allowlist-настройка CrowdSec для IP/CIDR, которые не должны обрабатываться как атакующие." "Real CrowdSec allowlist configuration for IP/CIDR that must not be treated as attackers.")" \
+        "capi" "$(T "CrowdSec Console / CAPI" "CrowdSec Console / CAPI")" "$(T "Console enrollment, CAPI status/register и CTI API key. Для Docker выполняется внутри контейнера crowdsec." "Console enrollment, CAPI status/register and CTI API key. In Docker it runs inside the crowdsec container.")" \
+        "info" "$(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")" "$(T "Общий статус подключений, alerts, decisions и metrics." "Overall status of connections, alerts, decisions and metrics.")" \
+        3>&1 1>&2 2>&3)" || return 0
+    else
+      echo "1) baseline - базовая защита"
+      echo "2) collections - правила Hub"
+      echo "3) decisions - ручные bans/local blacklist"
+      echo "4) trusted - CrowdSec allowlist"
+      echo "5) capi - CrowdSec Console/CAPI"
+      echo "6) info - общий статус"
+      echo "0) back"
+      read -rp "> " choice || return 0
+      case "${choice}" in 0|q|back) return 0;; 1) choice=baseline;; 2) choice=collections;; 3) choice=decisions;; 4) choice=trusted;; 5) choice=capi;; 6) choice=info;; esac
+    fi
+    case "${choice}" in
+      baseline) show_action_intro protection_baseline || continue; run_with_live_progress "$(T "Базовая защита CrowdSec" "Base CrowdSec protection")" apply_initial_protection_baseline || true ;;
+      collections) show_action_intro protection_collections || continue; manage_collections_menu ;;
+      decisions) show_action_intro protection_decisions || continue; manage_decisions_menu ;;
+      trusted) show_action_intro protection_trusted || continue; manage_trusted_ips_menu ;;
+      capi) show_action_intro protection_capi || continue; manage_capi_console_menu ;;
+      info) show_action_intro crowdsec_info || continue; show_crowdsec_info ;;
+    esac
+  done
+}
+
+
 acquire_script_lock
 load_saved_language
 choose_language_if_needed
