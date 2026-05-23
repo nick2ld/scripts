@@ -2083,33 +2083,193 @@ wait_for_machine_and_validate() {
   fail "Machine '${machine_name}' не появилась за ${timeout} секунд. Позже подтверди её через меню: Подключения VPS и LAPI -> Подтвердить machine VPS."
 }
 
+machine_list_tsv() {
+  local json_tmp text_tmp
+  json_tmp="$(mktemp)"
+  text_tmp="$(mktemp)"
+
+  if crowdsec_cscli machines list -o json >"${json_tmp}" 2>/dev/null && [[ -s "${json_tmp}" ]]; then
+    python3 - "${json_tmp}" <<'PY_JSON_MACHINES'
+import json, sys
+path = sys.argv[1]
+try:
+    data = json.load(open(path, 'r', encoding='utf-8', errors='replace'))
+except Exception:
+    data = []
+if isinstance(data, dict):
+    for key in ('machines', 'items', 'data'):
+        if isinstance(data.get(key), list):
+            data = data[key]
+            break
+if not isinstance(data, list):
+    data = []
+for item in data:
+    if not isinstance(item, dict):
+        continue
+    name = str(item.get('machineId') or item.get('machine_id') or item.get('name') or item.get('login') or item.get('id') or '').strip()
+    if not name:
+        continue
+    ip = str(item.get('ipAddress') or item.get('ip_address') or item.get('ip') or item.get('last_ip') or '-').strip() or '-'
+    last = str(item.get('lastUpdate') or item.get('last_update') or item.get('updated_at') or item.get('last_seen') or '-').strip() or '-'
+    version = str(item.get('version') or item.get('agent_version') or '-').strip() or '-'
+    raw_valid = item.get('validated')
+    if raw_valid is None:
+        raw_valid = item.get('isValidated')
+    if raw_valid is None:
+        raw_valid = item.get('is_validated')
+    if raw_valid is None:
+        raw_valid = item.get('status')
+    valid_text = str(raw_valid).strip().lower()
+    validated = 'yes' if raw_valid is True or valid_text in ('true','yes','validated','valid','enabled','✔','✓','✅') else 'no'
+    print('\t'.join([name, ip, last, validated, version]))
+PY_JSON_MACHINES
+    local rc=$?
+    rm -f "${json_tmp}" "${text_tmp}"
+    return "${rc}"
+  fi
+
+  crowdsec_cscli machines list >"${text_tmp}" 2>&1 || true
+  python3 - "${text_tmp}" <<'PY_TEXT_MACHINES'
+import re, sys
+text = open(sys.argv[1], 'r', encoding='utf-8', errors='replace').read()
+ansi = re.compile(r'\x1b\[[0-9;?]*[ -/]*[@-~]')
+text = ansi.sub('', text)
+for raw in text.splitlines():
+    line = raw.strip()
+    if not line or line.startswith('-') or line.lower().startswith('name'):
+        continue
+    if 'no machines' in line.lower() or 'error' in line.lower():
+        continue
+    parts = re.split(r'\s+', line)
+    if len(parts) < 2:
+        continue
+    name = parts[0]
+    if not re.match(r'^[A-Za-z0-9_.:-]+$', name):
+        continue
+    ip = parts[1] if len(parts) > 1 else '-'
+    last = parts[2] if len(parts) > 2 else '-'
+    validated = 'yes' if any(mark in line for mark in ('✔','✓','✅')) or re.search(r'\b(validated|true|yes)\b', line, re.I) else 'no'
+    version = parts[-1] if len(parts) >= 5 else '-'
+    print('\t'.join([name, ip, last, validated, version]))
+PY_TEXT_MACHINES
+  local rc=$?
+  rm -f "${json_tmp}" "${text_tmp}"
+  return "${rc}"
+}
+
+validate_selected_machines_apply() {
+  local machines_file="$1"
+  local selected_file="$2"
+  local name ip last validated version changed=0
+  while IFS=$'\t' read -r name ip last validated version; do
+    [[ -n "${name:-}" ]] || continue
+    if grep -Fxq "${name}" "${selected_file}"; then
+      if [[ "${validated}" == "yes" ]]; then
+        echo "Already validated: ${name}"
+      else
+        echo "Validating: ${name}"
+        crowdsec_cscli machines validate "${name}"
+        changed=$((changed + 1))
+      fi
+    fi
+  done < "${machines_file}"
+  if (( changed == 0 )); then
+    echo "No new machines selected for validation."
+  else
+    echo "Validated machines: ${changed}"
+  fi
+}
+
 validate_machine_prompt() {
   safe_source_env
-  local machine_name
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    local tmp
-    tmp="$(mktemp)"
-    crowdsec_cscli machines list >"${tmp}" 2>&1 || true
-    whiptail --title " Machines на central " --textbox "${tmp}" 24 110 || true
-    rm -f "${tmp}"
-    machine_name=$(whiptail --title " Подтвердить machine VPS " --inputbox "Введите имя machine для validate.\n\nЭто имя должно совпадать с Machine name, который вводился в vps.sh." 12 86 "" 3>&1 1>&2 2>&3) || return 0
-  else
-    print_header
-    echo "Machines на central:"
-    crowdsec_cscli machines list || true
-    echo
-    read -rp "Имя machine для validate: " machine_name
-  fi
-  machine_name="$(printf '%s' "${machine_name:-}" | tr -cd 'A-Za-z0-9._:-')"
-  [[ -n "${machine_name}" ]] || { warn "Имя machine не задано."; pause; return; }
-  if run_with_live_progress "Подтверждение machine ${machine_name}" validate_machine_on_central "${machine_name}"; then
+  local machines_file selected_file removed_file selected_raw rc name ip last validated version state label changed_uncheck=0
+  machines_file="$(mktemp)"
+  selected_file="$(mktemp)"
+  removed_file="$(mktemp)"
+  machine_list_tsv >"${machines_file}" || true
+
+  if [[ ! -s "${machines_file}" ]]; then
+    rm -f "${machines_file}" "${selected_file}" "${removed_file}"
     if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      whiptail --title " Успех " --msgbox "Machine подтверждена:\n${machine_name}" 9 76
+      whiptail --title " $(T "Machines на central" "Machines on central") " --msgbox "$(T "Machines не найдены." "No machines found.")" 8 76 || true
     else
-      ok "Machine подтверждена: ${machine_name}"
+      warn "$(T "Machines не найдены." "No machines found.")"
       pause
     fi
+    return 0
   fi
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    local args=()
+    while IFS=$'\t' read -r name ip last validated version; do
+      [[ -n "${name:-}" ]] || continue
+      if [[ "${validated}" == "yes" ]]; then
+        state="on"
+        label="$(T "подтверждена" "validated") | ${ip:-'-'} | ${version:-'-'}"
+      else
+        state="off"
+        label="$(T "не подтверждена" "not validated") | ${ip:-'-'} | ${version:-'-'}"
+      fi
+      args+=("${name}" "${label}" "${state}")
+    done < "${machines_file}"
+
+    set +e
+    selected_raw="$(whiptail --title " $(T "Подтвердить machine VPS" "Validate VPS machines") " \
+      --cancel-button "$(T "Отмена" "Cancel")" --ok-button "OK" --notags \
+      --checklist "$(T "Отметь machines, которые должны быть подтверждены.\n\nOK - применить выбранные подтверждения.\nОтмена - вернуться назад без изменений." "Select machines that should be validated.\n\nOK - apply selected validations.\nCancel - go back without changes.")" \
+      24 110 14 "${args[@]}" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    if [[ "${rc}" -ne 0 ]]; then
+      rm -f "${machines_file}" "${selected_file}" "${removed_file}"
+      return 0
+    fi
+
+    printf '%s\n' ${selected_raw} | tr -d '"' | awk 'NF && !seen[$0]++' >"${selected_file}"
+  else
+    print_header
+    echo "$(T "Machines на central:" "Machines on central:")"
+    echo
+    nl -w2 -s') ' "${machines_file}" | awk -F'\t' '{status=($5=="yes"?"[x]":"[ ]"); print $1" "status" "$2" "$3" "$4" "$6}'
+    echo
+    echo "$(T "Введи имена machines для подтверждения через пробел. Enter - назад без изменений." "Enter machine names to validate separated by spaces. Enter - back without changes.")"
+    read -rp "> " selected_raw || selected_raw=""
+    if [[ -z "${selected_raw// }" ]]; then
+      rm -f "${machines_file}" "${selected_file}" "${removed_file}"
+      return 0
+    fi
+    printf '%s\n' ${selected_raw} | tr -cd 'A-Za-z0-9_.:-\n' | awk 'NF && !seen[$0]++' >"${selected_file}"
+  fi
+
+  while IFS=$'\t' read -r name ip last validated version; do
+    [[ -n "${name:-}" ]] || continue
+    if [[ "${validated}" == "yes" ]] && ! grep -Fxq "${name}" "${selected_file}"; then
+      echo "${name}" >>"${removed_file}"
+      changed_uncheck=1
+    fi
+  done < "${machines_file}"
+
+  if [[ -s "${selected_file}" ]]; then
+    run_with_live_progress "$(T "Подтверждение machines" "Validating machines")" validate_selected_machines_apply "${machines_file}" "${selected_file}" || true
+  fi
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    local msg
+    msg="$(T "Изменения применены." "Changes applied.")"
+    if (( changed_uncheck )); then
+      msg="${msg}\n\n$(T "Снятие галочки с уже подтверждённой machine не удаляет её подтверждение. Для удаления machine используй отдельное удаление/перерегистрацию." "Unchecking an already validated machine does not remove its validation. To remove a machine, delete/re-register it separately.")"
+    fi
+    whiptail --title " $(T "Готово" "Done") " --msgbox "${msg}" 12 90 || true
+  else
+    ok "$(T "Изменения применены." "Changes applied.")"
+    if (( changed_uncheck )); then
+      warn "$(T "Снятие галочки с уже подтверждённой machine не удаляет её подтверждение." "Unchecking an already validated machine does not remove its validation.")"
+    fi
+    pause
+  fi
+
+  rm -f "${machines_file}" "${selected_file}" "${removed_file}"
+  return 0
 }
 
 change_public_addr() {
