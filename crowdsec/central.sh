@@ -1130,7 +1130,7 @@ remove_allowed_range() {
   fi
 
   local remove_num
-  IFS=',' read -ra items <<< "${ALLOWED_RANGES}"
+  IFS=',' read -r -ra items <<< "${ALLOWED_RANGES}"
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
     local menu_args=()
@@ -1153,6 +1153,12 @@ remove_allowed_range() {
     fi
   fi
 
+  # --- НОВАЯ ЛОГИКА: Определяем удаляемый IP-адрес до перезаписи списка ---
+  local target_idx=$((remove_num - 1))
+  local removed_cidr="${items[target_idx]}"
+  local removed_ip="${removed_cidr%%/*}" # Удаляет маску подсети (например, /32), оставляя чистый IP
+  # -----------------------------------------------------------------------
+
   local new_list=""
   for i in "${!items[@]}"; do
     if [[ $((i+1)) -ne ${remove_num} ]]; then
@@ -1165,11 +1171,25 @@ remove_allowed_range() {
   save_env
   configure_docker_crowdsec_lapi
   configure_ufw_full
+  
+  # Принудительный перезапуск контейнера для применения ALLOWED_RANGES
   (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
+
+  # --- НОВАЯ ЛОГИКА: Удаление информации об аккаунте/подключении VPS ---
+  if [[ -f "${CONNECTIONS_FILE}" && -n "${removed_ip}" ]]; then
+    local tmp_file
+    tmp_file=$(mktemp)
+    # Фильтруем файл vps-connections.tsv, исключая строку, которая содержит наш IP
+    grep -v "${removed_ip}" "${CONNECTIONS_FILE}" > "${tmp_file}" || true
+    mv "${tmp_file}" "${CONNECTIONS_FILE}"
+    chmod 600 "${CONNECTIONS_FILE}"
+  fi
+  # -----------------------------------------------------------------------
+
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
-    whiptail --title " Успех " --msgbox "Пункт удалён." 8 78
+    whiptail --title " Успех " --msgbox "Пункт удалён и история подключения очищена." 8 78
   else
-    ok "Пункт удалён."
+    ok "Пункт удалён и история подключения очищена."
     pause
   fi
 }
