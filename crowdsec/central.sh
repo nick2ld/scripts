@@ -532,40 +532,106 @@ create_named_vps_bouncer_key() {
     read -rp "Имя VPS/bouncer, такое же как Machine name в VPS-скрипте: " node_name
     read -rp "Внешний IP VPS для доступа к LAPI: " vps_ip
   fi
+  
   node_name="$(printf '%s' "${node_name:-}" | tr -cd 'A-Za-z0-9._:-')"
   [[ -n "${node_name}" ]] || fail "Имя bouncer не может быть пустым."
   vps_ip="$(printf '%s' "${vps_ip:-}" | tr -cd '0-9A-Fa-f:.')"
   [[ -n "${vps_ip}" ]] || fail "IP VPS не может быть пустым."
+  
   if [[ "${vps_ip}" == *:* ]]; then
     vps_cidr="${vps_ip}/128"
   else
     vps_cidr="${vps_ip}/32"
   fi
+  
   if [[ -z "${ALLOWED_RANGES}" ]]; then
     ALLOWED_RANGES="${vps_cidr}"
   elif ! echo ",${ALLOWED_RANGES}," | grep -q ",${vps_cidr},"; then
     ALLOWED_RANGES="${ALLOWED_RANGES},${vps_cidr}"
   fi
+
+  # Генерация токена аутентификации bouncer
   bouncer_key="$(openssl rand -hex 32)"
-  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
-    docker exec crowdsec cscli bouncers delete "${node_name}" >/dev/null 2>&1 || true
-    docker exec crowdsec cscli bouncers add "${node_name}" --key "${bouncer_key}" >/dev/null
+
+  # Синхронное выполнение конфигурационных шагов с трансляцией статуса в реальном времени
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    # Инициализация именованного канала (FIFO) для управления прогресс-баром
+    local fifo
+    fifo=$(mktemp -u)
+    mkfifo "${fifo}"
+
+    # Асинхронный запуск whiptail --gauge с чтением из дескриптора FIFO
+    whiptail --title " Регистрация ноды VPS " --gauge "Инициализация мастера подключения..." 8 78 0 < "${fifo}" &
+    local gauge_pid=$!
+
+    # Перенаправление дескриптора вывода в созданный канал
+    exec 3> "${fifo}"
+
+    echo -e "XXX\n10\nУдаление устаревших bouncer-инстансов из базы LAPI...\nXXX" >&3
+    if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+      docker exec crowdsec cscli bouncers delete "${node_name}" >/dev/null 2>&1 || true
+      echo -e "XXX\n25\nРегистрация новой ноды в изолированной среде CrowdSec LAPI...\nXXX" >&3
+      docker exec crowdsec cscli bouncers add "${node_name}" --key "${bouncer_key}" >/dev/null
+    else
+      cscli bouncers delete "${node_name}" >/dev/null 2>&1 || true
+      echo -e "XXX\n25\nРегистрация новой ноды в локальной базе CrowdSec LAPI...\nXXX" >&3
+      cscli bouncers add "${node_name}" --key "${bouncer_key}" >/dev/null
+    fi
+
+    echo -e "XXX\n40\nФиксация новых переменных окружения в central.env...\nXXX" >&3
+    save_env >/dev/null 2>&1
+    sleep 0.1
+
+    echo -e "XXX\n55\nГенерация обновленной конфигурации CrowdSec LAPI...\nXXX" >&3
+    configure_docker_crowdsec_lapi >/dev/null 2>&1
+    sleep 0.1
+
+    echo -e "XXX\n70\nПерезапуск контейнера CrowdSec для применения сетевых ACL...\nXXX" >&3
+    (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec) >/dev/null 2>&1
+
+    echo -e "XXX\n85\nДобавление правил сетевого доступа в системный брандмауэр UFW...\nXXX" >&3
+    configure_ufw_full >/dev/null 2>&1
+
+    echo -e "XXX\n95\nСинхронизация записи в локальном журнале vps-connections.tsv...\nXXX" >&3
+    mkdir -p "${CONFIG_DIR}"
+    chmod 700 "${CONFIG_DIR}"
+    touch "${CONNECTIONS_FILE}"
+    chmod 600 "${CONNECTIONS_FILE}"
+    awk -F'\t' -v name="${node_name}" '($2 != name)' "${CONNECTIONS_FILE}" >"${CONNECTIONS_FILE}.tmp" || true
+    mv "${CONNECTIONS_FILE}.tmp" "${CONNECTIONS_FILE}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -Is)" "${node_name}" "${vps_ip}" "${VPS_LAPI_URL}" "${AUTO_REG_TOKEN}" "${bouncer_key}" >>"${CONNECTIONS_FILE}"
+
+    echo -e "XXX\n100\nПроцесс генерации и авторизации успешно завершен!\nXXX" >&3
+    sleep 0.2
+
+    # Закрытие дескриптора канала и уничтожение временного FIFO-файла
+    exec 3>&-
+    wait "${gauge_pid}" 2>/dev/null || true
+    rm -f "${fifo}"
   else
-    cscli bouncers delete "${node_name}" >/dev/null 2>&1 || true
-    cscli bouncers add "${node_name}" --key "${bouncer_key}" >/dev/null
+    # Линейная обработка команд для стандартного консольного интерфейса (CLI)
+    if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
+      docker exec crowdsec cscli bouncers delete "${node_name}" >/dev/null 2>&1 || true
+      docker exec crowdsec cscli bouncers add "${node_name}" --key "${bouncer_key}" >/dev/null
+    else
+      cscli bouncers delete "${node_name}" >/dev/null 2>&1 || true
+      cscli bouncers add "${node_name}" --key "${bouncer_key}" >/dev/null
+    fi
+    save_env
+    configure_docker_crowdsec_lapi
+    (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
+    configure_ufw_full
+    
+    mkdir -p "${CONFIG_DIR}"
+    chmod 700 "${CONFIG_DIR}"
+    touch "${CONNECTIONS_FILE}"
+    chmod 600 "${CONNECTIONS_FILE}"
+    awk -F'\t' -v name="${node_name}" '($2 != name)' "${CONNECTIONS_FILE}" >"${CONNECTIONS_FILE}.tmp" || true
+    mv "${CONNECTIONS_FILE}.tmp" "${CONNECTIONS_FILE}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -Is)" "${node_name}" "${vps_ip}" "${VPS_LAPI_URL}" "${AUTO_REG_TOKEN}" "${bouncer_key}" >>"${CONNECTIONS_FILE}"
   fi
-  save_env
-  configure_docker_crowdsec_lapi
-# Принудительный перезапуск контейнера для применения ALLOWED_RANGES
-  (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
-  configure_ufw_full
-  mkdir -p "${CONFIG_DIR}"
-  chmod 700 "${CONFIG_DIR}"
-  touch "${CONNECTIONS_FILE}"
-  chmod 600 "${CONNECTIONS_FILE}"
-  awk -F'\t' -v name="${node_name}" '($2 != name)' "${CONNECTIONS_FILE}" >"${CONNECTIONS_FILE}.tmp" || true
-  mv "${CONNECTIONS_FILE}.tmp" "${CONNECTIONS_FILE}"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -Is)" "${node_name}" "${vps_ip}" "${VPS_LAPI_URL}" "${AUTO_REG_TOKEN}" "${bouncer_key}" >>"${CONNECTIONS_FILE}"
+
+  # Рендеринг и вывод финального конфигурационного файла ноды
   tmp="$(mktemp)"
   {
     echo "Данные для установки VPS:"
@@ -590,6 +656,7 @@ create_named_vps_bouncer_key() {
     echo "- В CrowdSec Manager bouncer будет отображаться как '${node_name}', а не shared-firewall-bouncer."
     echo "- Запись сохранена в ${CONNECTIONS_FILE}."
   } >"${tmp}"
+  
   show_file "Индивидуальный bouncer key VPS" "${tmp}"
   rm -f "${tmp}"
 }
@@ -1114,10 +1181,7 @@ add_allowed_range() {
   safe_source_env
   local new_range
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
-    # Добавляем || true, чтобы whiptail не ронял скрипт при нажатии Отмена/Esc
     new_range=$(whiptail --title " Добавление IP/CIDR " --inputbox "Введите IP/CIDR для добавления к LAPI (например, 11.22.33.44/32):" 10 78 3>&1 1>&2 2>&3) || true
-    
-    # Если переменная пустая (нажали Отмена, Esc или ничего не ввели) — выходим обратно в меню
     if [[ -z "${new_range}" ]]; then
       return
     fi
@@ -1141,9 +1205,7 @@ add_allowed_range() {
 
   if [[ ! "${new_range}" =~ ^[0-9a-fA-F:.]+/[0-9]{1,3}$ ]]; then
     if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
-      # Перехватываем Отмена/Esc через || true, а выбор пользователя проверяем по коду выхода ($?)
       whiptail --title " Предупреждение " --yes-button "Добавить" --no-button "Отмена" --yesno "Похоже, это не CIDR.\nВсё равно добавить?" 10 78 || true
-      # Если код выхода равен 1 (нажали Отмена) или 255 (нажали Esc) — мягко выходим в меню
       if [[ $? -ne 0 ]]; then
         return
       fi
@@ -1169,10 +1231,54 @@ add_allowed_range() {
     ALLOWED_RANGES="${ALLOWED_RANGES},${new_range}"
   fi
 
-  save_env
-  configure_docker_crowdsec_lapi
-  configure_ufw_full
-  (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
+  # Выполнение системных вызовов с обновлением индикатора прогресса в реальном времени
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    # Создание именованного канала (FIFO) для управления индикатором без ухода в subshell
+    local fifo
+    fifo=$(mktemp -u)
+    mkfifo "${fifo}"
+
+    # Запуск whiptail --gauge в фоновом режиме с чтением из FIFO
+    whiptail --title " Сохранение изменений " --gauge "Инициализация процесса сохранения..." 8 78 0 < "${fifo}" &
+    local gauge_pid=$!
+
+    # Перенаправление дескриптора для отправки команд в фоновый whiptail
+    exec 3> "${fifo}"
+
+    # Индикация шага 1: Запись конфигурации окружения
+    echo -e "XXX\n10\nЗапись переменных в central.env...\nXXX" >&3
+    save_env >/dev/null 2>&1
+    sleep 0.1
+
+    # Индикация шага 2: Пересборка локальных настроек LAPI
+    echo -e "XXX\n30\nГенерация конфигурации CrowdSec LAPI (config.yaml)...\nXXX" >&3
+    configure_docker_crowdsec_lapi >/dev/null 2>&1
+    sleep 0.1
+
+    # Индикация шага 3: Модификация правил файрвола
+    echo -e "XXX\n50\nОбновление правил брандмауэра UFW...\nXXX" >&3
+    configure_ufw_full >/dev/null 2>&1
+    sleep 0.1
+
+    # Индикация шага 4: Перезапуск зависимых Docker-сервисов (блокирующая операция)
+    echo -e "XXX\n70\nПерезапуск контейнера CrowdSec (может занять время)...\nXXX" >&3
+    (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec) >/dev/null 2>&1
+
+    # Финальная стадия
+    echo -e "XXX\n100\nКонфигурация успешно применена!\nXXX" >&3
+    sleep 0.2
+
+    # Закрытие дескриптора и очистка ресурсов бэкэнда
+    exec 3>&-
+    wait "${gauge_pid}" 2>/dev/null || true
+    rm -f "${fifo}"
+  else
+    save_env
+    configure_docker_crowdsec_lapi
+    configure_ufw_full
+    (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
+  fi
+
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
     whiptail --title " Успех " --msgbox "IP/CIDR добавлен: ${new_range}" 8 78
   else
@@ -1201,7 +1307,12 @@ remove_allowed_range() {
     for i in "${!items[@]}"; do
       menu_args+=("$((i+1))" "${items[$i]}")
     done
-    remove_num=$(whiptail --title " Удаление IP/CIDR " --cancel-button "Отмена" --ok-button "Удалить" --menu "Выберите пункт для удаления:" 18 78 8 "${menu_args[@]}" 3>&1 1>&2 2>&3) || return
+    
+    # Перехватываем Отмена/Esc через || true, предотвращая падение из-за set -e
+    remove_num=$(whiptail --title " Удаление IP/CIDR " --cancel-button "Отмена" --ok-button "Удалить" --menu "Выберите пункт для удаления:" 18 78 8 "${menu_args[@]}" 3>&1 1>&2 2>&3) || true
+    if [[ -z "${remove_num}" ]]; then
+      return
+    fi
   else
     print_header
     echo "Удаление IP/CIDR по номеру:"
@@ -1217,24 +1328,22 @@ remove_allowed_range() {
     fi
   fi
 
-  # 1. Определяем удаляемый IP-адрес
+  # Определение параметров удаляемой ноды
   local target_idx=$((remove_num - 1))
   local removed_cidr="${items[target_idx]}"
   local removed_ip="${removed_cidr%%/*}"
 
-  # 2. НОВАЯ ЛОГИКА: Находим имя машины и баунсера в базе до удаления строки
+  # Поиск идентификаторов машины и баунсера в локальной базе данных до модификации файлов
   local machine_name=""
   local bouncer_name=""
   if [[ -f "${CONNECTIONS_FILE}" && -n "${removed_ip}" ]]; then
-    # Файл TSV имеет структуру: Дата | IP | Имя_VPS | Токен | Ключ_Баунсера
-    # Имя машины в CrowdSec совпадает с Именем_VPS, а баунсер называется bouncer_<Имя_VPS>
     machine_name=$(grep "${removed_ip}" "${CONNECTIONS_FILE}" | cut -f3 | xargs)
     if [[ -n "${machine_name}" ]]; then
       bouncer_name="bouncer_${machine_name}"
     fi
   fi
 
-  # 3. Пересобираем список ALLOWED_RANGES (оригинальный код)
+  # Реконструкция списка ALLOWED_RANGES в памяти основного процесса
   local new_list=""
   for i in "${!items[@]}"; do
     if [[ $((i+1)) -ne ${remove_num} ]]; then
@@ -1244,29 +1353,79 @@ remove_allowed_range() {
     fi
   done
   ALLOWED_RANGES="${new_list}"
-  save_env
-  configure_docker_crowdsec_lapi
-  configure_ufw_full
-  
-  # Принудительный перезапуск контейнера для применения сети
-  (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
 
-  # 4. НОВАЯ ЛОГИКА: Удаляем из самого CrowdSec Manager (LAPI)
-  if [[ -n "${machine_name}" ]]; then
-    # Вызываем команды удаления внутри работающего контейнера docker
-    docker exec -t crowdsec cscli machines delete "${machine_name}" >/dev/null 2>&1 || true
-    if [[ -n "${bouncer_name}" ]]; then
+  # Синхронное выполнение фоновых процессов с выводом статуса в реальном времени
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+    # Создание именованного канала (FIFO) для управления прогресс-баром
+    local fifo
+    fifo=$(mktemp -u)
+    mkfifo "${fifo}"
+
+    # Фоновый запуск whiptail --gauge с привязкой потока ввода к FIFO
+    whiptail --title " Удаление конфигурации " --gauge "Инициализация процесса удаления..." 8 78 0 < "${fifo}" &
+    local gauge_pid=$!
+
+    # Перенаправление дескриптора вывода в именованный канал
+    exec 3> "${fifo}"
+
+    echo -e "XXX\n10\nОбновление файла конфигурации окружения (central.env)...\nXXX" >&3
+    save_env >/dev/null 2>&1
+    sleep 0.1
+
+    echo -e "XXX\n25\nПересборка декларативного конфига LAPI (config.yaml)...\nXXX" >&3
+    configure_docker_crowdsec_lapi >/dev/null 2>&1
+    sleep 0.1
+
+    echo -e "XXX\n40\nОчистка цепочек правил брандмауэра UFW...\nXXX" >&3
+    configure_ufw_full >/dev/null 2>&1
+    sleep 0.1
+
+    echo -e "XXX\n60\nПерезапуск сервиса CrowdSec (перечитывание сетевых ACL)...\nXXX" >&3
+    (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec) >/dev/null 2>&1
+
+    if [[ -n "${machine_name}" ]]; then
+      echo -e "XXX\n75\nУдаление машины ${machine_name} из базы CrowdSec LAPI...\nXXX" >&3
+      docker exec -t crowdsec cscli machines delete "${machine_name}" >/dev/null 2>&1 || true
+      
+      echo -e "XXX\n85\nДеавторизация bouncer-фильтра ${bouncer_name}...\nXXX" >&3
       docker exec -t crowdsec cscli bouncers delete "${bouncer_name}" >/dev/null 2>&1 || true
     fi
-  fi
 
-  # 5. Очистка файла vps-connections.tsv
-  if [[ -f "${CONNECTIONS_FILE}" && -n "${removed_ip}" ]]; then
-    local tmp_file
-    tmp_file=$(mktemp)
-    grep -v "${removed_ip}" "${CONNECTIONS_FILE}" > "${tmp_file}" || true
-    mv "${tmp_file}" "${CONNECTIONS_FILE}"
-    chmod 600 "${CONNECTIONS_FILE}"
+    if [[ -f "${CONNECTIONS_FILE}" && -n "${removed_ip}" ]]; then
+      echo -e "XXX\n95\nИсключение записи из локального лога vps-connections.tsv...\nXXX" >&3
+      local tmp_file
+      tmp_file=$(mktemp)
+      grep -v "${removed_ip}" "${CONNECTIONS_FILE}" > "${tmp_file}" || true
+      mv "${tmp_file}" "${CONNECTIONS_FILE}"
+      chmod 600 "${CONNECTIONS_FILE}"
+    fi
+
+    echo -e "XXX\n100\nПроцесс удаления успешно завершен!\nXXX" >&3
+    sleep 0.2
+
+    # Закрытие дескриптора и деструктуризация FIFO
+    exec 3>&-
+    wait "${gauge_pid}" 2>/dev/null || true
+    rm -f "${fifo}"
+  else
+    # Линейное последовательное выполнение для CLI-режима
+    save_env
+    configure_docker_crowdsec_lapi
+    configure_ufw_full
+    (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
+    if [[ -n "${machine_name}" ]]; then
+      docker exec -t crowdsec cscli machines delete "${machine_name}" >/dev/null 2>&1 || true
+      if [[ -n "${bouncer_name}" ]]; then
+        docker exec -t crowdsec cscli bouncers delete "${bouncer_name}" >/dev/null 2>&1 || true
+      fi
+    fi
+    if [[ -f "${CONNECTIONS_FILE}" && -n "${removed_ip}" ]]; then
+      local tmp_file
+      tmp_file=$(mktemp)
+      grep -v "${removed_ip}" "${CONNECTIONS_FILE}" > "${tmp_file}" || true
+      mv "${tmp_file}" "${CONNECTIONS_FILE}"
+      chmod 600 "${CONNECTIONS_FILE}"
+    fi
   fi
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
