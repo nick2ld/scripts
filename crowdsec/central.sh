@@ -25,6 +25,112 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+UI_LANG="${UI_LANG:-}"
+
+T() {
+  if [[ "${UI_LANG:-ru}" == "en" ]]; then
+    printf '%s' "$2"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+load_saved_language() {
+  local env_file="${ENV_FILE:-}" line key value
+  UI_LANG="${UI_LANG:-}"
+  if [[ -n "${env_file}" && -f "${env_file}" ]]; then
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      [[ "${line}" =~ ^[[:space:]]*$ || "${line}" =~ ^[[:space:]]*# ]] && continue
+      key="${line%%=*}"
+      value="${line#*=}"
+      if [[ "${key}" == "UI_LANG" ]]; then
+        value="${value//\'/}"
+        value="${value//\"/}"
+        value="${value//\\ / }"
+        case "${value}" in
+          en|ru) UI_LANG="${value}" ;;
+        esac
+        break
+      fi
+    done < "${env_file}"
+  fi
+  case "${UI_LANG:-}" in
+    en|ru) ;;
+    *) UI_LANG="ru" ;;
+  esac
+}
+
+save_language_only() {
+  local env_file="${ENV_FILE:-}" tmp
+  [[ -n "${env_file}" ]] || return 0
+  mkdir -p "$(dirname "${env_file}")" 2>/dev/null || true
+  if [[ -f "${env_file}" ]]; then
+    tmp="$(mktemp)"
+    grep -v '^UI_LANG=' "${env_file}" > "${tmp}" 2>/dev/null || true
+    printf 'UI_LANG=%s\n' "${UI_LANG:-ru}" >> "${tmp}"
+    cat "${tmp}" > "${env_file}"
+    rm -f "${tmp}"
+  else
+    printf 'UI_LANG=%s\n' "${UI_LANG:-ru}" > "${env_file}"
+  fi
+  chmod 600 "${env_file}" 2>/dev/null || true
+}
+
+choose_language_if_needed() {
+  load_saved_language
+  if [[ -f "${ENV_FILE:-/nonexistent}" ]] && grep -q '^UI_LANG=' "${ENV_FILE}" 2>/dev/null && [[ -n "${UI_LANG:-}" ]]; then
+    return 0
+  fi
+  if tui_available && [[ -t 0 && -t 1 ]]; then
+    local choice
+    choice="$(whiptail --title " Language / Язык " --cancel-button "Exit" --ok-button "OK" --notags --menu "Choose interface language / Выберите язык интерфейса:" 12 70 2 \
+      "ru" "Русский" \
+      "en" "English" \
+      3>&1 1>&2 2>&3)" || choice="ru"
+    UI_LANG="${choice}"
+  elif [[ -t 0 ]]; then
+    echo "Choose interface language / Выберите язык интерфейса:"
+    echo "1) Русский"
+    echo "2) English"
+    read -rp "Language [1/2]: " lang_choice || lang_choice="1"
+    case "${lang_choice}" in
+      2|en|EN|English|english) UI_LANG="en" ;;
+      *) UI_LANG="ru" ;;
+    esac
+  else
+    UI_LANG="ru"
+  fi
+  save_language_only
+}
+
+change_language() {
+  load_saved_language
+  local choice
+  if tui_available && [[ -t 0 && -t 1 ]]; then
+    choice="$(whiptail --title "$(T "$(T "Язык интерфейса" "Interface language")" "Interface language")" --cancel-button "$(T "$(T "Назад" "Back")" "Back")" --ok-button "OK" --notags --menu "$(T "Выберите язык интерфейса:" "Choose interface language:")" 12 70 2 \
+      "ru" "Русский" \
+      "en" "English" \
+      3>&1 1>&2 2>&3)" || return 0
+    UI_LANG="${choice}"
+  else
+    echo
+    echo "1) Русский"
+    echo "2) English"
+    read -rp "$(T "Выберите язык [1/2]: " "Choose language [1/2]: ")" choice || return 0
+    case "${choice}" in
+      2|en|EN|English|english) UI_LANG="en" ;;
+      *) UI_LANG="ru" ;;
+    esac
+  fi
+  save_language_only
+  if tui_available && [[ -t 0 && -t 1 ]]; then
+    whiptail --title "$(T "$(T "Готово" "Done")" "Done")" --msgbox "$(T "Язык сохранён." "Language saved.")" 8 60 || true
+  else
+    echo "$(T "Язык сохранён." "Language saved.")"
+  fi
+}
+
+
 CONFIG_DIR="/root/crowdsec-central"
 ENV_FILE="${CONFIG_DIR}/central.env"
 CONNECTIONS_FILE="${CONFIG_DIR}/vps-connections.tsv"
@@ -40,18 +146,18 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.4-tls-validate"
+SCRIPT_VERSION="v0.5-i18n"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 
 log() { echo "==> $*"; }
-ok() { echo "OK: $*"; }
-warn() { echo "WARN: $*"; }
-fail() { echo "ERROR: $*" >&2; exit 1; }
+ok() { echo "$(T "ГОТОВО" "OK"): $*"; }
+warn() { echo "$(T "ВНИМАНИЕ" "WARN"): $*"; }
+fail() { echo "$(T "ОШИБКА" "ERROR"): $*" >&2; exit 1; }
 pause() {
   if [[ "${CROWDSEC_TUI_MODE:-}" != "whiptail" && "${CROWDSEC_TUI_MODE:-}" != "installer" ]]; then
     echo
-    read -rp "Нажми Enter для продолжения..." _ || true
+    read -rp "$(T "Нажми Enter для продолжения..." "Press Enter to continue...")" _ || true
   fi
 }
 is_interactive() { [[ -t 0 ]]; }
@@ -241,14 +347,14 @@ show_file() {
       safe_clear
       printf '%s\n\n' "${title}" >/dev/tty
       cat "${tmp}" >/dev/tty
-      read -rp "Нажми Enter для продолжения..." _ </dev/tty || true
+      read -rp "$(T "Нажми Enter для продолжения..." "Press Enter to continue...")" _ </dev/tty || true
     fi
   else
     safe_clear
     if has_tty; then
       printf '%s\n\n' "${title}" >/dev/tty
       cat "${tmp}" >/dev/tty
-      read -rp "Нажми Enter для продолжения..." _ </dev/tty || true
+      read -rp "$(T "Нажми Enter для продолжения..." "Press Enter to continue...")" _ </dev/tty || true
     else
       printf '%s\n\n' "${title}"
       cat "${tmp}"
@@ -334,7 +440,7 @@ confirm_dangerous_action() {
     return 0
   fi
   if [[ "${CROWDSEC_TUI_MODE:-}" =~ ^(whiptail|installer)$ ]] && tui_available; then
-    whiptail --title " ${title} " --yes-button "Продолжить" --no-button "Отмена" --yesno "${text}" 14 88
+    whiptail --title " ${title} " --yes-button "$(T "Продолжить" "Continue")" --no-button "$(T "Отмена" "Cancel")" --yesno "${text}" 14 88
     return $?
   fi
   if has_tty; then
@@ -379,7 +485,7 @@ safe_source_env() {
   # Безопасно читаем central.env как данные, а не как shell-код.
   # Старый вариант `source central.env` мог выполнить произвольную команду от root,
   # если файл был повреждён или изменён злоумышленником.
-  local env_lan env_web env_lapi env_public env_ranges env_token env_bouncer env_pass env_type env_public_lapi_url env_public_lapi_mode env_npm_cidr
+  local env_lan env_web env_lapi env_public env_ranges env_token env_bouncer env_pass env_type env_public_lapi_url env_public_lapi_mode env_npm_cidr env_ui_lang
   env_lan="$(read_env_key LAN_IP)"
   env_web="$(read_env_key WEB_PORT)"
   env_lapi="$(read_env_key LAPI_PORT)"
@@ -392,6 +498,7 @@ safe_source_env() {
   env_public_lapi_url="$(read_env_key PUBLIC_LAPI_URL)"
   env_public_lapi_mode="$(read_env_key PUBLIC_LAPI_MODE)"
   env_npm_cidr="$(read_env_key NPM_ALLOWED_CIDR)"
+  env_ui_lang="$(read_env_key UI_LANG)"
 
   LAN_IP="${LAN_IP:-${env_lan:-$(get_lan_ip)}}"
   WEB_PORT="${WEB_PORT:-${env_web:-${DEFAULT_WEB_PORT}}}"
@@ -405,12 +512,14 @@ safe_source_env() {
   PUBLIC_LAPI_URL="${PUBLIC_LAPI_URL:-${env_public_lapi_url:-}}"
   PUBLIC_LAPI_MODE="${PUBLIC_LAPI_MODE:-${env_public_lapi_mode:-direct}}"
   NPM_ALLOWED_CIDR="${NPM_ALLOWED_CIDR:-${env_npm_cidr:-}}"
+  UI_LANG="${UI_LANG:-${env_ui_lang:-ru}}"
 
   LAN_IP="$(sanitize_plain_value "${LAN_IP}")"
   PUBLIC_ADDR="$(sanitize_plain_value "${PUBLIC_ADDR}")"
   PUBLIC_LAPI_URL="$(sanitize_token_value "${PUBLIC_LAPI_URL}")"
   PUBLIC_LAPI_MODE="$(sanitize_plain_value "${PUBLIC_LAPI_MODE}")"
   NPM_ALLOWED_CIDR="$(printf '%s' "${NPM_ALLOWED_CIDR}" | tr -cd '0-9A-Fa-f:.\/')"
+  case "${UI_LANG:-ru}" in en|ru) ;; *) UI_LANG="ru" ;; esac
   AUTO_REG_TOKEN="$(sanitize_token_value "${AUTO_REG_TOKEN}")"
   SHARED_BOUNCER_KEY="$(sanitize_token_value "${SHARED_BOUNCER_KEY}")"
   WEBUI_PASSWORD="$(sanitize_token_value "${WEBUI_PASSWORD}")"
@@ -452,6 +561,7 @@ save_env() {
   PUBLIC_LAPI_URL="${PUBLIC_LAPI_URL:-}"
   PUBLIC_LAPI_MODE="${PUBLIC_LAPI_MODE:-direct}"
   NPM_ALLOWED_CIDR="${NPM_ALLOWED_CIDR:-}"
+  UI_LANG="${UI_LANG:-ru}"
 
   mkdir -p "${CONFIG_DIR}"
   chmod 700 "${CONFIG_DIR}"
@@ -685,7 +795,7 @@ tui_input() {
 tui_yesno() {
   local title="$1"
   local text="$2"
-  whiptail --title " ${title} " --yes-button "Да" --no-button "Нет" --yesno "${text}" 10 78
+  whiptail --title " ${title} " --yes-button "$(T "Да" "Yes")" --no-button "$(T "Нет" "No")" --yesno "${text}" 10 78
 }
 
 ask_initial_settings_tui() {
@@ -693,10 +803,10 @@ ask_initial_settings_tui() {
   DETECTED_IP="$(get_lan_ip)"
   [[ -n "${DETECTED_IP}" ]] || DETECTED_IP="${LAN_IP}"
 
-  LAN_IP="$(tui_input "Начальная настройка" "LAN IP для Web UI и локального LAPI" "${DETECTED_IP}")" || exit 1
-  WEB_PORT="$(tui_input "Начальная настройка" "Порт Web UI" "${WEB_PORT:-3000}")" || exit 1
-  LAPI_PORT="$(tui_input "Начальная настройка" "Порт центрального LAPI" "${LAPI_PORT:-8080}")" || exit 1
-  PUBLIC_LAPI_URL="$(tui_input "Публичный LAPI" "Публичный HTTPS URL LAPI через Nginx Proxy Manager.\n\nПример: https://lapi.example.com\n\nЕсли NPM не используется, оставь пустым." "${PUBLIC_LAPI_URL:-}")" || exit 1
+  LAN_IP="$(tui_input "$(T "Начальная настройка" "Initial setup")" "LAN IP для Web UI и локального LAPI" "${DETECTED_IP}")" || exit 1
+  WEB_PORT="$(tui_input "$(T "Начальная настройка" "Initial setup")" "$(T "Порт Web UI" "Web UI port")" "${WEB_PORT:-3000}")" || exit 1
+  LAPI_PORT="$(tui_input "$(T "Начальная настройка" "Initial setup")" "$(T "Порт центрального LAPI" "Central LAPI port")" "${LAPI_PORT:-8080}")" || exit 1
+  PUBLIC_LAPI_URL="$(tui_input "$(T "Публичный LAPI" "Public LAPI")" "Публичный HTTPS URL LAPI через Nginx Proxy Manager.\n\nПример: https://lapi.example.com\n\nЕсли NPM не используется, оставь пустым." "${PUBLIC_LAPI_URL:-}")" || exit 1
   if [[ -n "${PUBLIC_LAPI_URL:-}" ]]; then
     PUBLIC_LAPI_MODE="npm"
     PUBLIC_ADDR=""
@@ -706,7 +816,7 @@ ask_initial_settings_tui() {
     fi
   else
     PUBLIC_LAPI_MODE="direct"
-    PUBLIC_ADDR="$(tui_input "Внешний адрес" "Внешний IP или DDNS для готовой команды подключения VPS. Можно оставить пустым." "${PUBLIC_ADDR:-}")" || exit 1
+    PUBLIC_ADDR="$(tui_input "$(T "Внешний адрес" "Public address")" "Внешний IP или DDNS для готовой команды подключения VPS. Можно оставить пустым." "${PUBLIC_ADDR:-}")" || exit 1
   fi
   WEB_UI_TYPE="manager"
 
@@ -730,7 +840,7 @@ configure_crowdsec_lapi() {
   AUTO_REG_TOKEN="${AUTO_REG_TOKEN}" ALLOWED_RANGES="${ALLOWED_RANGES}" LAPI_PORT="${LAPI_PORT}" python3 - <<'PY'
 import os, yaml, re
 path = "/etc/crowdsec/config.yaml"
-token = os.environ.get("AUTO_REG_TOKEN", "").strip()
+token = os.environ.get("$(T "AUTO_REG_TOKEN" "AUTO_REG_TOKEN")", "").strip()
 if not token:
     raise SystemExit("AUTO_REG_TOKEN is empty, refusing to write broken CrowdSec config")
 with open(path, "r", errors="replace") as f:
@@ -963,7 +1073,7 @@ for env_name in ("LOCAL_LAPI_ALLOWED_RANGES", "ALLOWED_RANGES"):
             ranges.append(item)
 cfg["api"]["server"]["auto_registration"] = {
     "enabled": True,
-    "token": os.environ["AUTO_REG_TOKEN"],
+    "token": os.environ["$(T "AUTO_REG_TOKEN" "AUTO_REG_TOKEN")"],
     "allowed_ranges": ranges,
 }
 with open(path, "w") as f:
@@ -1394,7 +1504,7 @@ show_install_result() {
 show_install_result_tui() {
   {
     show_install_result
-  } | show_output "Установка завершена"
+  } | show_output "$(T "Установка завершена" "Installation complete")"
 }
 
 full_install() {
@@ -1404,14 +1514,14 @@ full_install() {
   if bootstrap_installer_tui; then
     export CROWDSEC_TUI_MODE="installer"
     tui_theme
-    whiptail --title " CrowdSec Central " --msgbox "Установка CrowdSec Central LAPI + Web UI.\n\nВсе параметры можно будет изменить позже через меню." 12 78
+    whiptail --title "$(T " CrowdSec Central " " CrowdSec Central ")" --msgbox "Установка CrowdSec Central LAPI + Web UI.\n\nВсе параметры можно будет изменить позже через меню." 12 78
     if tui_yesno "Обновление системы" "Перед установкой обновить системные пакеты Debian?"; then
       do_upgrade="Y"
     else
       do_upgrade="N"
     fi
     ask_initial_settings_tui
-    run_install_step "Устанавливаю базовые пакеты" install_base
+    run_install_step "$(T "Устанавливаю базовые пакеты" "Installing base packages")" install_base
     if [[ ! "${do_upgrade:-Y}" =~ ^[Nn]$ ]]; then
       run_install_step "Обновляю системные пакеты Debian" upgrade_system_packages
     fi
@@ -1508,7 +1618,7 @@ show_connection_info() {
     done
 
     # Инициализация интерактивного меню выбора ноды
-    choice_num=$(whiptail --title " Список подключений VPS " --cancel-button "Назад" --ok-button "Выбрать" --menu "Выберите ноду для просмотра полных данных подключения:" 18 78 8 "${menu_args[@]}" 3>&1 1>&2 2>&3) || true
+    choice_num=$(whiptail --title " Список подключений VPS " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --menu "Выберите ноду для просмотра полных данных подключения:" 18 78 8 "${menu_args[@]}" 3>&1 1>&2 2>&3) || true
     if [[ -z "${choice_num}" ]]; then
       return
     fi
@@ -1608,7 +1718,7 @@ add_allowed_range() {
 
   if [[ ! "${new_range}" =~ ^[0-9a-fA-F:.]+/[0-9]{1,3}$ ]]; then
     if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      whiptail --title " Предупреждение " --yes-button "Добавить" --no-button "Отмена" --yesno "Похоже, это не CIDR.\nВсё равно добавить?" 10 78 || true
+      whiptail --title " Предупреждение " --yes-button "Добавить" --no-button "$(T "Отмена" "Cancel")" --yesno "Похоже, это не CIDR.\nВсё равно добавить?" 10 78 || true
       [[ $? -eq 0 ]] || return
     else
       warn "Похоже, это не CIDR."
@@ -1676,7 +1786,7 @@ remove_allowed_range() {
     for i in "${!items[@]}"; do
       menu_args+=("$((i+1))" "${items[$i]}")
     done
-    remove_num=$(whiptail --title " Удаление IP/CIDR " --cancel-button "Отмена" --ok-button "Удалить" --menu "Выбери IP/CIDR для удаления:" 18 78 8 "${menu_args[@]}" 3>&1 1>&2 2>&3) || true
+    remove_num=$(whiptail --title " Удаление IP/CIDR " --cancel-button "$(T "Отмена" "Cancel")" --ok-button "Удалить" --menu "Выбери IP/CIDR для удаления:" 18 78 8 "${menu_args[@]}" 3>&1 1>&2 2>&3) || true
     [[ -n "${remove_num}" ]] || return 0
   else
     print_header
@@ -2027,7 +2137,7 @@ change_public_addr() {
 
 regenerate_auto_token() {
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    whiptail --title " Регенерация токена " --yes-button "Продолжить" --no-button "Отмена" --yesno "Новые серверы должны будут использовать новый токен.\n\nПерегенерировать токен авторегистрации?" 12 78 || return
+    whiptail --title " Регенерация токена " --yes-button "$(T "Продолжить" "Continue")" --no-button "$(T "Отмена" "Cancel")" --yesno "Новые серверы должны будут использовать новый токен.\n\nПерегенерировать токен авторегистрации?" 12 78 || return
   else
     print_header
     echo "Новые серверы должны будут использовать новый токен."
@@ -2049,7 +2159,7 @@ regenerate_auto_token() {
 
 regenerate_bouncer_key() {
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    whiptail --title " Регенерация bouncer key " --yes-button "Продолжить" --no-button "Отмена" --yesno "Удалённые bouncers нужно будет перенастроить на новый ключ.\n\nСоздать новый shared bouncer key?" 12 78 || return
+    whiptail --title " Регенерация bouncer key " --yes-button "$(T "Продолжить" "Continue")" --no-button "$(T "Отмена" "Cancel")" --yesno "Удалённые bouncers нужно будет перенастроить на новый ключ.\n\nСоздать новый shared bouncer key?" 12 78 || return
   else
     print_header
     echo "Удалённые bouncer нужно будет перенастроить на новый ключ."
@@ -2476,6 +2586,7 @@ run_menu_action() {
     update_crowdsec) update_crowdsec_only ;;
     versions) show_versions ;;
     repair_menu) repair_menu_installation ;;
+    language) change_language ;;
     test_lapi) test_webui_lapi ;;
     exit) exit 0 ;;
   esac
@@ -2490,56 +2601,56 @@ menu_loop_whiptail() {
     local category choice summary
     summary="$(tui_summary)"
     category="$(whiptail \
-      --backtitle "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" \
-      --title " CrowdSec Central " \
-      --cancel-button "Выход" \
-      --ok-button "Выбрать" \
+      --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" \
+      --title "$(T " CrowdSec Central " " CrowdSec Central ")" \
+      --cancel-button "$(T "Выход" "Exit")" \
+      --ok-button "$(T "Выбрать" "Select")" \
       --notags \
-      --menu "Выберите раздел:\nСтрелки - навигация, ENTER - выбрать, ESC/Отмена - выход.\n\n${summary}" \
+      --menu "$(T "Выберите раздел:\nСтрелки - навигация, ENTER - выбрать, ESC/Отмена - выход.\n\n${summary}" "Choose a section:\nArrows - navigation, ENTER - select, ESC/Cancel - exit.\n\n${summary}")" \
       22 88 7 \
-      "status" "Статус и данные" \
-      "access" "Подключения VPS и LAPI" \
-      "network" "Сеть и ключи" \
-      "service" "Обслуживание" \
-      "system" "Обновления и диагностика" \
-      "menu" "Настройки меню" \
-      "exit" "Выход" \
+      "status" "$(T "Статус и данные" "Status and data")" \
+      "access" "$(T "Подключения VPS и LAPI" "VPS and LAPI connections")" \
+      "network" "$(T "Сеть и ключи" "Network and keys")" \
+      "service" "$(T "Обслуживание" "Maintenance")" \
+      "system" "$(T "Обновления и диагностика" "Updates and diagnostics")" \
+      "menu" "$(T "Настройки меню" "Menu settings")" \
+      "exit" "$(T "Выход" "Exit")" \
       3>&1 1>&2 2>&3)" || exit 0
     [[ "${category}" == "exit" ]] && exit 0
 
     while true; do
       case "${category}" in
         status)
-          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" --title " Статус и данные " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 5 \
-            "status" "Статус сервисов и портов" \
-            "connect" "Данные подключения VPS" \
-            "envfile" "Показать central.env" \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " Статус и данные " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 18 76 5 \
+            "status" "$(T "Статус сервисов и портов" "Service and port status")" \
+            "connect" "$(T "Данные подключения VPS" "VPS connection data")" \
+            "envfile" "$(T "Показать central.env" "Show central.env")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         access)
-          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" --title " Подключения VPS и LAPI " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 80 6 \
-            "node_bouncer" "Создать подключение VPS" \
-            "validate_machine" "Подтвердить machine VPS" \
-            "connect" "Показать созданные подключения" \
-            "add_range" "Добавить IP/CIDR вручную" \
-            "remove_range" "Удалить IP/CIDR из LAPI" \
-            "replace_ranges" "Заменить весь список IP/CIDR" \
-            "firewall" "Показать firewall/UFW" \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " Подключения VPS и LAPI " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 18 80 6 \
+            "node_bouncer" "$(T "Создать подключение VPS" "Create VPS connection")" \
+            "validate_machine" "$(T "Подтвердить machine VPS" "Validate VPS machine")" \
+            "connect" "$(T "Показать созданные подключения" "Show saved connections")" \
+            "add_range" "$(T "Добавить IP/CIDR вручную" "Add IP/CIDR manually")" \
+            "remove_range" "$(T "Удалить IP/CIDR из LAPI" "Remove IP/CIDR from LAPI")" \
+            "replace_ranges" "$(T "Заменить весь список IP/CIDR" "Replace the full IP/CIDR list")" \
+            "firewall" "$(T "Показать firewall/UFW" "Show firewall/UFW")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         network)
-          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" --title " Сеть и ключи " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 8 \
-            "web_addr" "Изменить LAN IP или порт Web UI" \
-            "lapi_port" "Изменить порт LAPI" \
-            "public_addr" "Изменить внешний IP/DDNS для VPS" \
-            "public_lapi_url" "HTTPS LAPI через Nginx Proxy Manager" \
-            "auto_token" "Перегенерировать auto-registration token" \
-            "bouncer_key" "Перегенерировать shared bouncer key" \
-            "test_lapi" "Проверить доступ Web UI к LAPI" \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " Сеть и ключи " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 20 76 8 \
+            "web_addr" "$(T "Изменить LAN IP или порт Web UI" "Change LAN IP or Web UI port")" \
+            "lapi_port" "$(T "Изменить порт LAPI" "Change LAPI port")" \
+            "public_addr" "$(T "Изменить внешний IP/DDNS для VPS" "Change public IP/DDNS for VPS")" \
+            "public_lapi_url" "$(T "HTTPS LAPI через Nginx Proxy Manager" "HTTPS LAPI through Nginx Proxy Manager")" \
+            "auto_token" "$(T "Перегенерировать auto-registration token" "Regenerate auto-registration token")" \
+            "bouncer_key" "$(T "Перегенерировать shared bouncer key" "Regenerate shared bouncer key")" \
+            "test_lapi" "$(T "Проверить доступ Web UI к LAPI" "Test Web UI access to LAPI")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         service)
-          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" --title " Обслуживание " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 7 \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " Обслуживание " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 20 76 7 \
             "restart" "Перезапустить CrowdSec, Docker и Web UI" \
             "update_webui" "Обновить CrowdSec Manager" \
             "logs" "Показать логи Manager и CrowdSec" \
@@ -2548,7 +2659,7 @@ menu_loop_whiptail() {
             3>&1 1>&2 2>&3)" || break
           ;;
         system)
-          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" --title " Обновления и диагностика " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 20 76 7 \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " Обновления и диагностика " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 20 76 7 \
             "update_all" "Обновить весь стек" \
             "update_system" "Обновить пакеты Debian" \
             "update_docker" "Обновить Docker" \
@@ -2557,10 +2668,11 @@ menu_loop_whiptail() {
             3>&1 1>&2 2>&3)" || break
           ;;
         menu)
-          choice="$(whiptail --backtitle "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" --title " Настройки меню " --cancel-button "Назад" --ok-button "Выбрать" --notags --menu "Выберите действие:" 18 76 5 \
-            "disable_autostart" "Отключить автозапуск меню при входе" \
-            "enable_autostart" "Включить автозапуск меню при входе" \
-            "repair_menu" "Обновить или переустановить команду меню" \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " Настройки меню " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 18 76 5 \
+            "disable_autostart" "$(T "Отключить автозапуск меню при входе" "Disable menu autostart on login")" \
+            "enable_autostart" "$(T "Включить автозапуск меню при входе" "Enable menu autostart on login")" \
+            "repair_menu" "$(T "Обновить или переустановить команду меню" "Update or reinstall menu command")" \
+            "language" "$(T "Изменить язык интерфейса" "Change interface language")" \
             3>&1 1>&2 2>&3)" || break
           ;;
       esac
@@ -2580,27 +2692,27 @@ menu_loop_plain() {
     printf "| %-56s |\n" "LAPI для VPS: ${VPS_LAPI_URL}"
     echo "+----------------------------------------------------------+"
     echo
-    echo "[ СТАТУС И ДАННЫЕ ]"
-    echo "  1) Показать статус"
-    echo "  2) Показать созданные подключения VPS"
-    echo "  3) Показать файл настроек central.env"
+    echo "$(T "[ СТАТУС И ДАННЫЕ ]" "[ STATUS AND DATA ]")"
+    echo "  1) $(T "Показать статус" "Show status")"
+    echo "  2) $(T "Показать созданные подключения VPS" "Show saved VPS connections")"
+    echo "  3) $(T "Показать файл настроек central.env" "Show central.env settings file")"
     echo
-    echo "[ ПОДКЛЮЧЕНИЯ VPS И LAPI ]"
-    echo "  4) Создать подключение VPS"
-    echo "  5) Подтвердить machine VPS"
-    echo "  6) Удалить IP/CIDR из доступа к LAPI по номеру"
-    echo "  7) Полностью заменить список IP/CIDR"
+    echo "$(T "[ ПОДКЛЮЧЕНИЯ VPS И LAPI ]" "[ VPS AND LAPI CONNECTIONS ]")"
+    echo "  4) $(T "Создать подключение VPS" "Create VPS connection")"
+    echo "  5) $(T "Подтвердить machine VPS" "Validate VPS machine")"
+    echo "  6) $(T "Удалить IP/CIDR из доступа к LAPI по номеру" "Remove IP/CIDR from LAPI access by number")"
+    echo "  7) $(T "Полностью заменить список IP/CIDR" "Replace full IP/CIDR list")"
     echo
-    echo "[ СЕТЬ И КЛЮЧИ ]"
-    echo "  8) Изменить LAN IP или порт веб-морды"
-    echo "  9) Изменить порт LAPI"
-    echo " 10) Изменить внешний адрес или DDNS для VPS"
-    echo " 11) HTTPS LAPI через Nginx Proxy Manager"
-    echo " 12) Перегенерировать auto-registration token"
-    echo " 13) Создать новый shared bouncer key"
-    echo " 14) Добавить IP/CIDR вручную"
+    echo "$(T "[ СЕТЬ И КЛЮЧИ ]" "[ NETWORK AND KEYS ]")"
+    echo "  8) $(T "Изменить LAN IP или порт веб-морды" "Change LAN IP or Web UI port")"
+    echo "  9) $(T "Изменить порт LAPI" "Change LAPI port")"
+    echo " 10) $(T "Изменить внешний адрес или DDNS для VPS" "Change public address or DDNS for VPS")"
+    echo " 11) $(T "HTTPS LAPI через Nginx Proxy Manager" "HTTPS LAPI through Nginx Proxy Manager")"
+    echo " 12) $(T "Перегенерировать auto-registration token" "Regenerate auto-registration token")"
+    echo " 13) $(T "Создать новый shared bouncer key" "Create a new shared bouncer key")"
+    echo " 14) $(T "Добавить IP/CIDR вручную" "Add IP/CIDR manually")"
     echo
-    echo "[ ОБСЛУЖИВАНИЕ ]"
+    echo "$(T "[ ОБСЛУЖИВАНИЕ ]" "[ MAINTENANCE ]")"
     echo " 15) Перезапустить CrowdSec, Docker и Web UI"
     echo " 16) Обновить CrowdSec Manager"
     echo " 17) Показать логи Manager и CrowdSec"
@@ -2615,11 +2727,12 @@ menu_loop_plain() {
     echo " 26) Обновить только CrowdSec"
     echo " 27) Показать версии установленного ПО"
     echo " 28) Починить или переустановить команду меню"
-    echo " 29) Проверить доступ Web UI к LAPI"
+    echo " 29) $(T "Проверить доступ Web UI к LAPI" "Test Web UI access to LAPI")"
+    echo " 30) $(T "Изменить язык интерфейса" "Change interface language")"
     echo
-    echo "  0) Выход"
+    echo "  0) $(T "Выход" "Exit")"
     echo
-    if ! read -rp "Выбери действие [0-29]: " choice; then
+    if ! read -rp "$(T "Выбери действие [0-30]: " "Choose action [0-30]: ")" choice; then
       echo
       exit 0
     fi
@@ -2653,8 +2766,9 @@ menu_loop_plain() {
       27) show_versions ;;
       28) repair_menu_installation ;;
       29) test_webui_lapi ;;
+      30) change_language ;;
       0) exit 0 ;;
-      *) echo "Неизвестный пункт меню."; pause ;;
+      *) echo "$(T "Неизвестный пункт меню." "Unknown menu item.")"; pause ;;
     esac
   done
 }
@@ -2670,6 +2784,8 @@ menu_loop() {
 }
 
 acquire_script_lock
+load_saved_language
+choose_language_if_needed
 
 case "${1:-}" in
   --install) full_install ;;

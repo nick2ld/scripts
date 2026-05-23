@@ -21,20 +21,126 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+UI_LANG="${UI_LANG:-}"
+
+T() {
+  if [[ "${UI_LANG:-ru}" == "en" ]]; then
+    printf '%s' "$2"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+load_saved_language() {
+  local env_file="${ENV_FILE:-}" line key value
+  UI_LANG="${UI_LANG:-}"
+  if [[ -n "${env_file}" && -f "${env_file}" ]]; then
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      [[ "${line}" =~ ^[[:space:]]*$ || "${line}" =~ ^[[:space:]]*# ]] && continue
+      key="${line%%=*}"
+      value="${line#*=}"
+      if [[ "${key}" == "UI_LANG" ]]; then
+        value="${value//\'/}"
+        value="${value//\"/}"
+        value="${value//\\ / }"
+        case "${value}" in
+          en|ru) UI_LANG="${value}" ;;
+        esac
+        break
+      fi
+    done < "${env_file}"
+  fi
+  case "${UI_LANG:-}" in
+    en|ru) ;;
+    *) UI_LANG="ru" ;;
+  esac
+}
+
+save_language_only() {
+  local env_file="${ENV_FILE:-}" tmp
+  [[ -n "${env_file}" ]] || return 0
+  mkdir -p "$(dirname "${env_file}")" 2>/dev/null || true
+  if [[ -f "${env_file}" ]]; then
+    tmp="$(mktemp)"
+    grep -v '^UI_LANG=' "${env_file}" > "${tmp}" 2>/dev/null || true
+    printf 'UI_LANG=%s\n' "${UI_LANG:-ru}" >> "${tmp}"
+    cat "${tmp}" > "${env_file}"
+    rm -f "${tmp}"
+  else
+    printf 'UI_LANG=%s\n' "${UI_LANG:-ru}" > "${env_file}"
+  fi
+  chmod 600 "${env_file}" 2>/dev/null || true
+}
+
+choose_language_if_needed() {
+  load_saved_language
+  if [[ -f "${ENV_FILE:-/nonexistent}" ]] && grep -q '^UI_LANG=' "${ENV_FILE}" 2>/dev/null && [[ -n "${UI_LANG:-}" ]]; then
+    return 0
+  fi
+  if tui_available && [[ -t 0 && -t 1 ]]; then
+    local choice
+    choice="$(whiptail --title " Language / Язык " --cancel-button "Exit" --ok-button "OK" --notags --menu "Choose interface language / Выберите язык интерфейса:" 12 70 2 \
+      "ru" "Русский" \
+      "en" "English" \
+      3>&1 1>&2 2>&3)" || choice="ru"
+    UI_LANG="${choice}"
+  elif [[ -t 0 ]]; then
+    echo "Choose interface language / Выберите язык интерфейса:"
+    echo "1) Русский"
+    echo "2) English"
+    read -rp "Language [1/2]: " lang_choice || lang_choice="1"
+    case "${lang_choice}" in
+      2|en|EN|English|english) UI_LANG="en" ;;
+      *) UI_LANG="ru" ;;
+    esac
+  else
+    UI_LANG="ru"
+  fi
+  save_language_only
+}
+
+change_language() {
+  load_saved_language
+  local choice
+  if tui_available && [[ -t 0 && -t 1 ]]; then
+    choice="$(whiptail --title "$(T "$(T "Язык интерфейса" "Interface language")" "Interface language")" --cancel-button "$(T "$(T "Назад" "Back")" "Back")" --ok-button "OK" --notags --menu "$(T "Выберите язык интерфейса:" "Choose interface language:")" 12 70 2 \
+      "ru" "Русский" \
+      "en" "English" \
+      3>&1 1>&2 2>&3)" || return 0
+    UI_LANG="${choice}"
+  else
+    echo
+    echo "1) Русский"
+    echo "2) English"
+    read -rp "$(T "Выберите язык [1/2]: " "Choose language [1/2]: ")" choice || return 0
+    case "${choice}" in
+      2|en|EN|English|english) UI_LANG="en" ;;
+      *) UI_LANG="ru" ;;
+    esac
+  fi
+  save_language_only
+  if tui_available && [[ -t 0 && -t 1 ]]; then
+    whiptail --title "$(T "$(T "Готово" "Done")" "Done")" --msgbox "$(T "Язык сохранён." "Language saved.")" 8 60 || true
+  else
+    echo "$(T "Язык сохранён." "Language saved.")"
+  fi
+}
+
+
 CONFIG_DIR="/root/crowdsec-vps-node"
 ENV_FILE="${CONFIG_DIR}/node.env"
 FAIL2BAN_BACKUP_DIR="${CONFIG_DIR}/fail2ban-backup"
-SCRIPT_VERSION="v0.2-secure-live-inputfix"
+SCRIPT_VERSION="v0.3-i18n"
 SCRIPT_RELEASE_DATE="2026-05-22"
 LOCK_FILE="/var/lock/crowdsec-vps-node.lock"
 LOCK_FD=200
 TMP_FILES=()
 
 log() { echo "==> $*"; }
-ok() { echo "OK: $*"; }
-warn() { echo "WARN: $*"; }
-fail() { echo "ERROR: $*" >&2; exit 1; }
-pause() { echo; read -rp "Нажми Enter для продолжения..." _ || true; }
+ok() { echo "$(T "ГОТОВО" "OK"): $*"; }
+warn() { echo "$(T "ВНИМАНИЕ" "WARN"): $*"; }
+fail() { echo "$(T "ОШИБКА" "ERROR"): $*" >&2; exit 1; }
+pause() { echo; read -rp "$(T "Нажми Enter для продолжения..." "Press Enter to continue...")" _ || true; }
 
 register_tmp() {
   local item="$1"
@@ -201,7 +307,7 @@ tui_secret_input() {
 tui_yesno() {
   local title="$1"
   local text="$2"
-  whiptail --title " ${title} " --yes-button "Да" --no-button "Нет" --yesno "${text}" 10 78
+  whiptail --title " ${title} " --yes-button "$(T "Да" "Yes")" --no-button "$(T "Нет" "No")" --yesno "${text}" 10 78
 }
 strip_ansi() {
   sed -r 's/\x1B\[[0-9;?]*[ -/]*[@-~]//g'
@@ -289,7 +395,7 @@ load_env_if_exists() {
       value="${line#*=}"
       key="$(printf '%s' "${key}" | tr -cd 'A-Za-z0-9_')"
       case "${key}" in
-        CENTRAL_LAPI_URL|AUTO_REG_TOKEN|SHARED_BOUNCER_KEY|MACHINE_NAME|INSTALL_FIREWALL_BOUNCER|REMOVE_FAIL2BAN|COLLECTION_SELECTION_MODE|SELECTED_COLLECTIONS|HUB_ITEM_SELECTION_MODE|SELECTED_HUB_ITEMS|FIREWALL_BOUNCER_PACKAGE|FIREWALL_BOUNCER_MODE) ;;
+        CENTRAL_LAPI_URL|AUTO_REG_TOKEN|SHARED_BOUNCER_KEY|MACHINE_NAME|INSTALL_FIREWALL_BOUNCER|REMOVE_FAIL2BAN|COLLECTION_SELECTION_MODE|SELECTED_COLLECTIONS|HUB_ITEM_SELECTION_MODE|SELECTED_HUB_ITEMS|FIREWALL_BOUNCER_PACKAGE|FIREWALL_BOUNCER_MODE|UI_LANG) ;;
         *) continue ;;
       esac
       parsed="${value}"
@@ -319,6 +425,8 @@ load_env_if_exists() {
   SELECTED_HUB_ITEMS="${SELECTED_HUB_ITEMS:-}"
   FIREWALL_BOUNCER_PACKAGE="${FIREWALL_BOUNCER_PACKAGE:-}"
   FIREWALL_BOUNCER_MODE="${FIREWALL_BOUNCER_MODE:-}"
+  UI_LANG="${UI_LANG:-ru}"
+  case "${UI_LANG}" in en|ru) ;; *) UI_LANG="ru" ;; esac
   if [[ "${had_env}" == "yes" ]]; then
     save_env
   fi
@@ -340,6 +448,7 @@ HUB_ITEM_SELECTION_MODE=$(quote_env "${HUB_ITEM_SELECTION_MODE}")
 SELECTED_HUB_ITEMS=$(quote_env "${SELECTED_HUB_ITEMS}")
 FIREWALL_BOUNCER_PACKAGE=$(quote_env "${FIREWALL_BOUNCER_PACKAGE}")
 FIREWALL_BOUNCER_MODE=$(quote_env "${FIREWALL_BOUNCER_MODE}")
+UI_LANG=$(quote_env "${UI_LANG:-ru}")
 ENV
   chmod 600 "${ENV_FILE}"
 }
@@ -348,10 +457,10 @@ ask_settings() {
   load_env_if_exists
   if tui_available; then
     tui_theme
-    whiptail --title " CrowdSec VPS Node " --msgbox "Подключение VPS к центральному CrowdSec LAPI.\n\nДанные возьми в меню центрального сервера: sudo crowdsec-central-menu" 12 78
-    CENTRAL_LAPI_URL="$(tui_input "Central LAPI" "Central LAPI URL" "${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}")" || exit 1
+    whiptail --title " CrowdSec VPS Node " --msgbox "$(T "Подключение VPS к центральному CrowdSec LAPI.\n\nДанные возьми в меню центрального сервера: sudo crowdsec-central-menu" "Connect this VPS to the central CrowdSec LAPI.\n\nGet the values from the central server menu: sudo crowdsec-central-menu")" 12 78
+    CENTRAL_LAPI_URL="$(tui_input "Central LAPI" "$(T "Central LAPI URL" "Central LAPI URL")" "${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}")" || exit 1
     local new_auto_token new_bouncer_key
-    new_auto_token="$(tui_secret_input "Central LAPI" "AUTO_REG_TOKEN" "${AUTO_REG_TOKEN:-}")" || exit 1
+    new_auto_token="$(tui_secret_input "Central LAPI" "$(T "AUTO_REG_TOKEN" "AUTO_REG_TOKEN")" "${AUTO_REG_TOKEN:-}")" || exit 1
     if [[ -n "${new_auto_token}" || -z "${AUTO_REG_TOKEN:-}" ]]; then
       AUTO_REG_TOKEN="${new_auto_token}"
     fi
@@ -359,8 +468,8 @@ ask_settings() {
     if [[ -n "${new_bouncer_key}" || -z "${SHARED_BOUNCER_KEY:-}" ]]; then
       SHARED_BOUNCER_KEY="${new_bouncer_key}"
     fi
-    MACHINE_NAME="$(tui_input "Machine" "Machine name" "${MACHINE_NAME}")" || exit 1
-    if tui_yesno "Firewall Bouncer" "Ставить firewall-bouncer для автоматической блокировки IP?"; then
+    MACHINE_NAME="$(tui_input "Machine" "$(T "Machine name" "Machine name")" "${MACHINE_NAME}")" || exit 1
+    if tui_yesno "Firewall Bouncer" "$(T "Ставить firewall-bouncer для автоматической блокировки IP?" "Install firewall-bouncer for automatic IP blocking?")"; then
       INSTALL_FIREWALL_BOUNCER="yes"
     else
       INSTALL_FIREWALL_BOUNCER="no"
@@ -370,28 +479,28 @@ ask_settings() {
     else
       REMOVE_FAIL2BAN="no"
     fi
-    COLLECTION_SELECTION_MODE="$(whiptail --title " Collections " --cancel-button "Отмена" --ok-button "Выбрать" --notags --menu "Как выбрать CrowdSec collections после установки агента?" 16 86 3 \
-      "manual" "Показать список из CrowdSec Hub и выбрать вручную" \
-      "auto" "Поставить только базовые и похожие на найденный софт" \
-      "base" "Поставить только linux + sshd" \
+    COLLECTION_SELECTION_MODE="$(whiptail --title " Collections " --cancel-button "$(T "Отмена" "Cancel")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Как выбрать CrowdSec collections после установки агента?" "How to select CrowdSec collections after agent installation?")" 16 86 3 \
+      "manual" "$(T "Показать список из CrowdSec Hub и выбрать вручную" "Show the CrowdSec Hub list and select manually")" \
+      "auto" "$(T "Поставить только базовые и похожие на найденный софт" "Install base collections and detected-service matches")" \
+      "base" "$(T "Поставить только linux + sshd" "Install only linux + sshd")" \
       3>&1 1>&2 2>&3)" || exit 1
-    HUB_ITEM_SELECTION_MODE="$(whiptail --title " Дополнительные Hub elements " --cancel-button "Отмена" --ok-button "Выбрать" --notags --menu "Выбирать отдельно scenarios/parsers/appsec и прочее?\n\nОбычно достаточно collections, потому что они подтягивают связанные элементы." 18 90 2 \
-      "none" "Нет, только collections" \
-      "manual" "Да, показать расширенный выбор Hub elements" \
+    HUB_ITEM_SELECTION_MODE="$(whiptail --title " Дополнительные Hub elements " --cancel-button "$(T "Отмена" "Cancel")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "Выбирать отдельно scenarios/parsers/appsec и прочее?\n\nОбычно достаточно collections, потому что они подтягивают связанные элементы." 18 90 2 \
+      "none" "$(T "Нет, только collections" "No, collections only")" \
+      "manual" "$(T "Да, показать расширенный выбор Hub elements" "Yes, show advanced Hub element selection")" \
       3>&1 1>&2 2>&3)" || exit 1
-    [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "Central LAPI URL не может быть пустым."
-    [[ "${CENTRAL_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]] || fail "Central LAPI URL должен начинаться с http:// или https://"
+    [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "$(T "Central LAPI URL не может быть пустым." "Central LAPI URL cannot be empty.")"
+    [[ "${CENTRAL_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]] || fail "$(T "Central LAPI URL должен начинаться с http:// или https://" "Central LAPI URL must start with http:// or https://")"
     normalize_lapi_url
     if [[ "${CENTRAL_LAPI_URL}" =~ ^http:// ]]; then
       tui_yesno " Предупреждение " "Central LAPI указан через HTTP, токены и ключи передаются без TLS. Продолжить?" || exit 1
     fi
-    [[ -n "${AUTO_REG_TOKEN}" ]] || fail "AUTO_REG_TOKEN не может быть пустым."
-    [[ "${AUTO_REG_TOKEN}" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "AUTO_REG_TOKEN содержит недопустимые символы."
+    [[ -n "${AUTO_REG_TOKEN}" ]] || fail "$(T "AUTO_REG_TOKEN не может быть пустым." "AUTO_REG_TOKEN cannot be empty.")"
+    [[ "${AUTO_REG_TOKEN}" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "$(T "AUTO_REG_TOKEN содержит недопустимые символы." "AUTO_REG_TOKEN contains invalid characters.")"
     if [[ -n "${SHARED_BOUNCER_KEY}" ]] && [[ ! "${SHARED_BOUNCER_KEY}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-      fail "SHARED_BOUNCER_KEY содержит недопустимые символы."
+      fail "$(T "SHARED_BOUNCER_KEY содержит недопустимые символы." "SHARED_BOUNCER_KEY contains invalid characters.")"
     fi
     if [[ "${INSTALL_FIREWALL_BOUNCER}" == "yes" && -z "${SHARED_BOUNCER_KEY}" ]]; then
-      fail "Для firewall-bouncer нужен SHARED_BOUNCER_KEY."
+      fail "$(T "Для firewall-bouncer нужен SHARED_BOUNCER_KEY." "SHARED_BOUNCER_KEY is required for firewall-bouncer.")"
     fi
     save_env
     return
@@ -407,8 +516,8 @@ ask_settings() {
   echo
   prompt_default input_lapi "Central LAPI URL [${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}]: " "${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}"
   CENTRAL_LAPI_URL="${input_lapi:-${CENTRAL_LAPI_URL}}"
-  [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "Central LAPI URL не может быть пустым."
-  [[ "${CENTRAL_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]] || fail "Central LAPI URL должен начинаться с http:// или https://"
+  [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "$(T "Central LAPI URL не может быть пустым." "Central LAPI URL cannot be empty.")"
+  [[ "${CENTRAL_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]] || fail "$(T "Central LAPI URL должен начинаться с http:// или https://" "Central LAPI URL must start with http:// or https://")"
   normalize_lapi_url
   if [[ "${CENTRAL_LAPI_URL}" =~ ^http:// ]]; then
     warn "Central LAPI указан через HTTP. Токены и ключи передаются без TLS."
@@ -418,13 +527,13 @@ ask_settings() {
 
   prompt_default input_token "AUTO_REG_TOKEN: " "${AUTO_REG_TOKEN:-}"
   AUTO_REG_TOKEN="${input_token:-${AUTO_REG_TOKEN}}"
-  [[ -n "${AUTO_REG_TOKEN}" ]] || fail "AUTO_REG_TOKEN не может быть пустым."
-  [[ "${AUTO_REG_TOKEN}" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "AUTO_REG_TOKEN содержит недопустимые символы."
+  [[ -n "${AUTO_REG_TOKEN}" ]] || fail "$(T "AUTO_REG_TOKEN не может быть пустым." "AUTO_REG_TOKEN cannot be empty.")"
+  [[ "${AUTO_REG_TOKEN}" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "$(T "AUTO_REG_TOKEN содержит недопустимые символы." "AUTO_REG_TOKEN contains invalid characters.")"
 
   prompt_default input_bouncer "BOUNCER_KEY из мастера подключения VPS на central: " "${SHARED_BOUNCER_KEY:-}"
   SHARED_BOUNCER_KEY="${input_bouncer:-${SHARED_BOUNCER_KEY}}"
   if [[ -n "${SHARED_BOUNCER_KEY}" ]] && [[ ! "${SHARED_BOUNCER_KEY}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-    fail "SHARED_BOUNCER_KEY содержит недопустимые символы."
+    fail "$(T "SHARED_BOUNCER_KEY содержит недопустимые символы." "SHARED_BOUNCER_KEY contains invalid characters.")"
   fi
 
   prompt_default input_machine "Machine name [${MACHINE_NAME}]: " "${MACHINE_NAME}"
@@ -438,7 +547,7 @@ ask_settings() {
     INSTALL_FIREWALL_BOUNCER="yes"
   fi
   if [[ "${INSTALL_FIREWALL_BOUNCER}" == "yes" && -z "${SHARED_BOUNCER_KEY}" ]]; then
-    fail "Для firewall-bouncer нужен SHARED_BOUNCER_KEY."
+    fail "$(T "Для firewall-bouncer нужен SHARED_BOUNCER_KEY." "SHARED_BOUNCER_KEY is required for firewall-bouncer.")"
   fi
 
   echo
@@ -665,7 +774,7 @@ select_hub_collections() {
     while IFS=$'\t' read -r tag item state; do
       args+=("${tag}" "${item:-${tag}}" "${state:-off}")
     done <"${menu_file}"
-    selected="$(whiptail --title " CrowdSec Hub collections " --cancel-button "Назад" --ok-button "Установить" --checklist "Выбери collections для установки.\n\nПредвыбраны базовые и похожие на найденный софт/контейнеры." 30 110 18 "${args[@]}" 3>&1 1>&2 2>&3)" || selected="${SELECTED_COLLECTIONS}"
+    selected="$(whiptail --title " CrowdSec Hub collections " --cancel-button "$(T "Назад" "Back")" --ok-button "Установить" --checklist "Выбери collections для установки.\n\nПредвыбраны базовые и похожие на найденный софт/контейнеры." 30 110 18 "${args[@]}" 3>&1 1>&2 2>&3)" || selected="${SELECTED_COLLECTIONS}"
     SELECTED_COLLECTIONS="$(printf '%s\n' ${selected} | tr -d '"' | awk 'NF && !seen[$0]++' | tr '\n' ' ')"
   fi
   [[ -n "${SELECTED_COLLECTIONS// }" ]] || SELECTED_COLLECTIONS="crowdsecurity/linux crowdsecurity/sshd"
@@ -703,7 +812,7 @@ select_extra_hub_items() {
       state="off"
       args+=("${tag}" "${item:-${tag}}" "${state}")
     done <"${file}"
-    selected="$(whiptail --title " Hub: ${item_type} " --cancel-button "Назад" --ok-button "Добавить" --checklist "Выбери ${item_type} для установки." 30 110 18 "${args[@]}" 3>&1 1>&2 2>&3)" || selected=""
+    selected="$(whiptail --title " Hub: ${item_type} " --cancel-button "$(T "Назад" "Back")" --ok-button "Добавить" --checklist "Выбери ${item_type} для установки." 30 110 18 "${args[@]}" 3>&1 1>&2 2>&3)" || selected=""
     for item in ${selected}; do
       item="${item//\"/}"
       [[ -n "${item}" ]] && SELECTED_HUB_ITEMS="${SELECTED_HUB_ITEMS} ${item_type}:${item}"
@@ -1023,20 +1132,20 @@ full_install() {
   fi
   if tui_available; then
     tui_theme
-    run_install_step "Устанавливаю базовые пакеты" install_base
-    run_install_step "Удаляю Fail2Ban при наличии" remove_fail2ban_if_installed
-    run_install_step "Подключаю репозиторий CrowdSec" install_crowdsec_repo
-    run_install_step "Устанавливаю CrowdSec agent" install_crowdsec_agent
+    run_install_step "$(T "Устанавливаю базовые пакеты" "Installing base packages")" install_base
+    run_install_step "$(T "Удаляю Fail2Ban при наличии" "Removing Fail2Ban if present")" remove_fail2ban_if_installed
+    run_install_step "$(T "Подключаю репозиторий CrowdSec" "Configuring CrowdSec repository")" install_crowdsec_repo
+    run_install_step "$(T "Устанавливаю CrowdSec agent" "Installing CrowdSec agent")" install_crowdsec_agent
     select_hub_collections
     select_extra_hub_items
-    run_install_step "Устанавливаю collections" install_collections
-    run_install_step "Устанавливаю дополнительные Hub elements" install_extra_hub_items
-    run_install_step "Настраиваю источники логов" configure_acquisition
-    run_install_step "Регистрирую VPS на центральном LAPI" register_to_central_lapi
-    run_install_step "Настраиваю CrowdSec node" configure_agent_as_node
-    run_install_step "Устанавливаю firewall bouncer" install_firewall_bouncer
-    run_install_step "Проверяю конфигурацию" test_config
-    run_install_step "Перезапускаю сервисы" restart_services
+    run_install_step "$(T "Устанавливаю collections" "Installing collections")" install_collections
+    run_install_step "$(T "Устанавливаю дополнительные Hub elements" "Installing additional Hub elements")" install_extra_hub_items
+    run_install_step "$(T "Настраиваю источники логов" "Configuring log sources")" configure_acquisition
+    run_install_step "$(T "Регистрирую VPS на центральном LAPI" "Registering VPS with central LAPI")" register_to_central_lapi
+    run_install_step "$(T "Настраиваю CrowdSec node" "Configuring CrowdSec node")" configure_agent_as_node
+    run_install_step "$(T "Устанавливаю firewall bouncer" "Installing firewall bouncer")" install_firewall_bouncer
+    run_install_step "$(T "Проверяю конфигурацию" "Checking configuration")" test_config
+    run_install_step "$(T "Перезапускаю сервисы" "Restarting services")" restart_services
   else
     install_base
     remove_fail2ban_if_installed
@@ -1061,14 +1170,15 @@ manage_existing_installation() {
     local choice
     if tui_available; then
       tui_theme
-      choice="$(whiptail --title " CrowdSec VPS Node " --cancel-button "Выход" --ok-button "Выбрать" --notags --menu "Узел уже установлен. Выберите действие:" 20 92 9 \
-        "status" "Показать текущую сводку" \
-        "collections" "Выбрать и установить CrowdSec Hub collections" \
-        "hub" "Выбрать и установить scenarios/parsers/appsec/context" \
-        "check" "Проверить сервисы, Hub items, метрики и алерты" \
-        "restart" "Перезапустить CrowdSec и bouncer" \
-        "reinstall" "Переустановить/перенастроить узел полностью" \
-        "exit" "Выход" \
+      choice="$(whiptail --title " CrowdSec VPS Node " --cancel-button "$(T "Выход" "Exit")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Узел уже установлен. Выберите действие:" "Node is already installed. Choose an action:")" 20 92 9 \
+        "status" "$(T "Показать текущую сводку" "Show current summary")" \
+        "collections" "$(T "Выбрать и установить CrowdSec Hub collections" "Select and install CrowdSec Hub collections")" \
+        "hub" "$(T "Выбрать и установить scenarios/parsers/appsec/context" "Select and install scenarios/parsers/appsec/context")" \
+        "check" "$(T "Проверить сервисы, Hub items, метрики и алерты" "Check services, Hub items, metrics, and alerts")" \
+        "restart" "$(T "Перезапустить CrowdSec и bouncer" "Restart CrowdSec and bouncer")" \
+        "reinstall" "$(T "Переустановить/перенастроить узел полностью" "Reinstall/reconfigure node completely")" \
+        "language" "$(T "Изменить язык интерфейса" "Change interface language")" \
+        "exit" "$(T "Выход" "Exit")" \
         3>&1 1>&2 2>&3)" || return 0
     else
       safe_clear
@@ -1079,7 +1189,8 @@ manage_existing_installation() {
       echo "4) Проверить сервисы, Hub items, метрики и алерты"
       echo "5) Перезапустить CrowdSec и bouncer"
       echo "6) Переустановить/перенастроить узел полностью"
-      echo "0) Выход"
+      echo "7) $(T "Изменить язык интерфейса" "Change interface language")"
+      echo "0) $(T "Выход" "Exit")"
       read -rp "Выбор: " plain_choice || return 0
       case "${plain_choice}" in
         1) choice="status" ;;
@@ -1088,6 +1199,7 @@ manage_existing_installation() {
         4) choice="check" ;;
         5) choice="restart" ;;
         6) choice="reinstall" ;;
+        7) choice="language" ;;
         0) choice="exit" ;;
         *) choice="" ;;
       esac
@@ -1108,27 +1220,28 @@ manage_existing_installation() {
       collections)
         COLLECTION_SELECTION_MODE="manual"
         select_hub_collections
-        run_install_step "Устанавливаю collections" install_collections
-        run_install_step "Проверяю конфигурацию" test_config
-        run_install_step "Перезапускаю сервисы" restart_services
+        run_install_step "$(T "Устанавливаю collections" "Installing collections")" install_collections
+        run_install_step "$(T "Проверяю конфигурацию" "Checking configuration")" test_config
+        run_install_step "$(T "Перезапускаю сервисы" "Restarting services")" restart_services
         ;;
       hub)
         HUB_ITEM_SELECTION_MODE="manual"
         select_extra_hub_items
-        run_install_step "Устанавливаю дополнительные Hub elements" install_extra_hub_items
-        run_install_step "Проверяю конфигурацию" test_config
-        run_install_step "Перезапускаю сервисы" restart_services
+        run_install_step "$(T "Устанавливаю дополнительные Hub elements" "Installing additional Hub elements")" install_extra_hub_items
+        run_install_step "$(T "Проверяю конфигурацию" "Checking configuration")" test_config
+        run_install_step "$(T "Перезапускаю сервисы" "Restarting services")" restart_services
         ;;
       check) show_runtime_checks ;;
-      restart) run_install_step "Перезапускаю сервисы" restart_services ;;
+      restart) run_install_step "$(T "Перезапускаю сервисы" "Restarting services")" restart_services ;;
       reinstall)
         if [[ ! "$(tui_available && echo yes || echo no)" == "yes" ]] || tui_yesno " Переустановка " "Перезапустить мастер и полностью переустановить/перенастроить VPS node?"; then
           full_install no
           return 0
         fi
         ;;
+      language) change_language ;;
       exit) return 0 ;;
-      *) warn "Неизвестный пункт."; pause ;;
+      *) warn "$(T "Неизвестный пункт." "Unknown item.")"; pause ;;
     esac
   done
 }
@@ -1136,18 +1249,19 @@ manage_existing_installation() {
 main() {
   require_root
   acquire_lock
+  bootstrap_installer_tui || true
+  choose_language_if_needed
   detect_debian
   require_interactive_install
-  bootstrap_installer_tui || true
   if [[ -f "${ENV_FILE}" || -x "$(command -v cscli 2>/dev/null || true)" ]]; then
     load_env_if_exists
     if tui_available; then
       tui_theme
       local mode
-      mode="$(whiptail --title " CrowdSec VPS Node " --cancel-button "Выход" --ok-button "Выбрать" --notags --menu "Найдена существующая установка или настройки VPS node." 16 88 4 \
-        "manage" "Открыть меню управления" \
-        "reinstall" "Переустановить/перенастроить полностью" \
-        "install" "Продолжить обычную установку" \
+      mode="$(whiptail --title " CrowdSec VPS Node " --cancel-button "$(T "Выход" "Exit")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "Найдена существующая установка или настройки VPS node." 16 88 4 \
+        "manage" "$(T "Открыть меню управления" "Open management menu")" \
+        "reinstall" "$(T "Переустановить/перенастроить полностью" "Reinstall/reconfigure completely")" \
+        "install" "$(T "Продолжить обычную установку" "Continue normal installation")" \
         3>&1 1>&2 2>&3)" || exit 0
       case "${mode}" in
         manage) manage_existing_installation; exit 0 ;;
