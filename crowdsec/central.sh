@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.0-i18n-protection-menu"
+SCRIPT_VERSION="v0.7.1-i18n-submenu-return-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4963,6 +4963,195 @@ menu_loop_whiptail() {
     done
   done
 }
+
+
+# --- v0.7.1 submenu return fix ---
+# These final definitions intentionally override earlier one-shot submenu functions.
+# Every nested menu now stays inside its own loop until the user presses Back/Cancel.
+# Actions return to the menu they were started from instead of jumping to the main menu.
+
+manage_collections_menu() {
+  local choice
+  while true; do
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+      choice="$(whiptail --title " $(T "Collections и правила" "Collections and rules") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Выберите действие. После выполнения вы вернётесь сюда." "Choose an action. After it finishes you will return here.")" 22 100 7 \
+        "base" "$(T "Базовые правила: linux + sshd" "Base rules: linux + sshd")" "$(T "Минимальный бесплатный набор правил для central." "Minimum free ruleset for central.")" \
+        "router" "$(T "Firewall/router правила" "Firewall/router rules")" "$(T "Добавляет правила для firewall/router логов, если они доступны в Hub." "Adds rules for firewall/router logs if available in the Hub.")" \
+        "web" "$(T "Web правила" "Web rules")" "$(T "Добавляет nginx/apache/http-cve collections, если они доступны." "Adds nginx/apache/http-cve collections if available.")" \
+        "all" "$(T "Базовые + firewall/router + web" "Base + firewall/router + web")" "$(T "Ставит сразу все стандартные наборы этого скрипта." "Installs all standard sets managed by this script.")" \
+        "status" "$(T "Показать Hub, collections, scenarios, parsers" "Show Hub, collections, scenarios, parsers")" "$(T "Показывает, что установлено и включено сейчас." "Shows what is installed and enabled now.")" \
+        3>&1 1>&2 2>&3)" || return 0
+    else
+      echo "1) base  2) router  3) web  4) all  5) status  0) back"
+      read -rp "> " choice || return 0
+      case "${choice}" in 0|q|back) return 0;; 1) choice=base;; 2) choice=router;; 3) choice=web;; 4) choice=all;; 5) choice=status;; esac
+    fi
+    case "${choice}" in
+      base|router|web|all) run_with_live_progress "$(T "Установка/обновление collections" "Installing/updating collections")" protection_install_collection_group "${choice}" || true ;;
+      status) show_hub_and_rules_status ;;
+    esac
+  done
+}
+
+manage_decisions_menu() {
+  local choice
+  while true; do
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+      choice="$(whiptail --title " $(T "Decisions и локальные blacklist" "Decisions and local blacklist") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Ручные decisions применяются к central LAPI и будут выдаваться bouncers. После действия вы вернётесь сюда." "Manual decisions are applied to central LAPI and will be pulled by bouncers. After an action you will return here.")" 22 100 6 \
+        "list" "$(T "Показать active decisions" "Show active decisions")" "$(T "Показывает текущие bans/decisions." "Shows current bans/decisions.")" \
+        "add" "$(T "Добавить manual ban decision" "Add manual ban decision")" "$(T "Ручной ban IP/CIDR. Доверенные IP/CIDR скрипт не даст забанить." "Manual ban for IP/CIDR. Trusted IP/CIDR are protected.")" \
+        "delete" "$(T "Удалить decision по IP/CIDR" "Delete decision by IP/CIDR")" "$(T "Удаляет активный decision для указанного IP/CIDR." "Deletes active decision for a given IP/CIDR.")" \
+        "import" "$(T "Импортировать локальный blacklist из файла" "Import local blacklist from file")" "$(T "Добавляет decisions из файла со списком IP/CIDR." "Adds decisions from a file with IP/CIDR list.")" \
+        3>&1 1>&2 2>&3)" || return 0
+    else
+      echo "1) list  2) add  3) delete  4) import  0) back"
+      read -rp "> " choice || return 0
+      case "${choice}" in 0|q|back) return 0;; 1) choice=list;; 2) choice=add;; 3) choice=delete;; 4) choice=import;; esac
+    fi
+    case "${choice}" in
+      list) show_active_decisions ;;
+      add) add_manual_decision ;;
+      delete) delete_manual_decision ;;
+      import) import_decisions_from_file ;;
+    esac
+  done
+}
+
+manage_trusted_ips_menu() {
+  local choice
+  while true; do
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+      choice="$(whiptail --title " $(T "Доверенные IP/CIDR" "Trusted IP/CIDR") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Это локальный предохранитель скрипта от случайного ручного бана своих адресов. После ввода или отмены вы вернётесь сюда." "This is a local script safety guard against accidentally banning your own addresses. After input or cancel you will return here.")" 22 100 5 \
+        "show" "$(T "Показать список" "Show list")" "$(T "Показывает локальный список доверенных IP/CIDR." "Shows local trusted IP/CIDR list.")" \
+        "add" "$(T "Добавить IP/CIDR" "Add IP/CIDR")" "$(T "Добавляет адрес или подсеть в доверенный список скрипта." "Adds address or subnet to the script trusted list.")" \
+        "remove" "$(T "Удалить IP/CIDR" "Remove IP/CIDR")" "$(T "Удаляет запись из доверенного списка скрипта." "Removes entry from the script trusted list.")" \
+        "clean" "$(T "Удалить active decisions для доверенных IP" "Remove active decisions for trusted IPs")" "$(T "Снимает bans с адресов, которые сейчас в доверенном списке." "Removes bans from addresses currently in trusted list.")" \
+        3>&1 1>&2 2>&3)" || return 0
+    else
+      echo "1) show  2) add  3) remove  4) clean  0) back"
+      read -rp "> " choice || return 0
+      case "${choice}" in 0|q|back) return 0;; 1) choice=show;; 2) choice=add;; 3) choice=remove;; 4) choice=clean;; esac
+    fi
+    case "${choice}" in
+      show) show_trusted_ip_list ;;
+      add) add_trusted_ip ;;
+      remove) remove_trusted_ip ;;
+      clean) run_with_live_progress "$(T "Очистка decisions для доверенных IP" "Cleaning decisions for trusted IPs")" remove_decisions_for_trusted_ips || true ;;
+    esac
+  done
+}
+
+manage_capi_console_menu() {
+  local choice
+  while true; do
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+      choice="$(whiptail --title " $(T "CrowdSec Console / CAPI" "CrowdSec Console / CAPI") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Здесь вводится ключ CrowdSec Console.\n\nОбычно нужен Console enrollment key из app.crowdsec.net при добавлении Security Engine. CAPI register отдельный. CTI API key нужен только для CTI API.\n\nПосле действия вы вернётесь сюда." "Enter CrowdSec Console keys here.\n\nUsually you need the Console enrollment key from app.crowdsec.net when adding a Security Engine. CAPI register is separate. CTI API key is only for CTI API.\n\nAfter an action you will return here.")" 25 104 6 \
+        "enroll" "$(T "Ввести Console enrollment key" "Enter Console enrollment key")" "$(T "Подключает этот central engine к CrowdSec Console через cscli console enroll <key>." "Connects this central engine to CrowdSec Console using cscli console enroll <key>.")" \
+        "capi" "$(T "CAPI register/status" "CAPI register/status")" "$(T "Выполняет cscli capi register и показывает статус. Не включает платные blocklists." "Runs cscli capi register and shows status. Does not enable paid blocklists.")" \
+        "cti" "$(T "Ввести CTI API key" "Enter CTI API key")" "$(T "Сохраняет CTI API key в config.yaml. Это отдельный ключ, не enrollment key." "Saves CTI API key to config.yaml. This is a separate key, not an enrollment key.")" \
+        "status" "$(T "Показать CAPI/Console статус" "Show CAPI/Console status")" "$(T "Показывает cscli console status и cscli capi status." "Shows cscli console status and cscli capi status.")" \
+        3>&1 1>&2 2>&3)" || return 0
+    else
+      echo "1) enroll - Console enrollment key"
+      echo "2) capi - CAPI register/status"
+      echo "3) cti - CTI API key"
+      echo "4) status"
+      echo "0) back"
+      read -rp "> " choice || return 0
+      case "${choice}" in 0|q|back) return 0;; 1) choice=enroll;; 2) choice=capi;; 3) choice=cti;; 4) choice=status;; esac
+    fi
+    case "${choice}" in
+      enroll) show_action_intro capi_enroll || continue; console_enroll_with_key ;;
+      capi) capi_register_free ;;
+      cti) configure_cti_api_key ;;
+      status) capi_console_status ;;
+    esac
+  done
+}
+
+manage_protection_menu() {
+  local choice
+  while true; do
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+      choice="$(whiptail --title " $(T "Защита, правила и decisions" "Protection, rules and decisions") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Этот раздел отвечает за то, ОТКУДА central берёт decisions для всех bouncers.\n\nБесплатный режим: Hub collections + анализ своих логов + ручные local decisions.\nConsole/CAPI опциональны и не включают платные blocklists автоматически.\n\nПосле любого подпункта вы вернётесь сюда." "This section controls WHERE central gets decisions for all bouncers.\n\nFree mode: Hub collections + local log analysis + manual local decisions.\nConsole/CAPI are optional and do not enable paid blocklists automatically.\n\nAfter any subitem you will return here.")" 27 106 7 \
+        "baseline" "$(T "Базовая бесплатная защита" "Base free protection")" "$(T "Ставит linux + sshd collections. Минимальная база для local decisions." "Installs linux + sshd collections. Minimum base for local decisions.")" \
+        "collections" "$(T "Collections / rules / Hub" "Collections / rules / Hub")" "$(T "Установка и просмотр collections, scenarios, parsers из CrowdSec Hub." "Install and view collections, scenarios, parsers from CrowdSec Hub.")" \
+        "decisions" "$(T "Manual decisions / local blacklist" "Manual decisions / local blacklist")" "$(T "Ручные bans, удаление decisions и импорт своего списка IP/CIDR." "Manual bans, delete decisions and import your own IP/CIDR list.")" \
+        "trusted" "$(T "Доверенные IP/CIDR" "Trusted IP/CIDR")" "$(T "Предохранитель от случайного ручного бана своих адресов через это меню." "Safety guard against manually banning your own addresses through this menu.")" \
+        "capi" "$(T "CrowdSec Console / CAPI / API key" "CrowdSec Console / CAPI / API key")" "$(T "Здесь вводится Console enrollment key или CTI API key и проверяется CAPI status." "Enter Console enrollment key or CTI API key here and check CAPI status.")" \
+        "info" "$(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")" "$(T "Общий статус подключений, alerts, decisions и metrics." "Overall status of connections, alerts, decisions and metrics.")" \
+        3>&1 1>&2 2>&3)" || return 0
+    else
+      echo "1) baseline - базовая защита"
+      echo "2) collections - правила Hub"
+      echo "3) decisions - ручные bans/local blacklist"
+      echo "4) trusted - доверенные IP"
+      echo "5) capi - Console/CAPI/API key"
+      echo "6) info - общий статус"
+      echo "0) back"
+      read -rp "> " choice || return 0
+      case "${choice}" in 0|q|back) return 0;; 1) choice=baseline;; 2) choice=collections;; 3) choice=decisions;; 4) choice=trusted;; 5) choice=capi;; 6) choice=info;; esac
+    fi
+    case "${choice}" in
+      baseline) show_action_intro protection_baseline || continue; run_with_live_progress "$(T "Базовая защита CrowdSec" "Base CrowdSec protection")" apply_initial_protection_baseline || true ;;
+      collections) show_action_intro protection_collections || continue; manage_collections_menu ;;
+      decisions) show_action_intro protection_decisions || continue; manage_decisions_menu ;;
+      trusted) show_action_intro protection_trusted || continue; manage_trusted_ips_menu ;;
+      capi) show_action_intro protection_capi || continue; manage_capi_console_menu ;;
+      info) show_action_intro crowdsec_info || continue; show_crowdsec_info ;;
+    esac
+  done
+}
+
+manage_bouncer_devices_menu() {
+  local choice
+  while true; do
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+      choice="$(whiptail --title " $(T "Bouncer/API устройства" "Bouncer/API devices") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Это устройства без CrowdSec agent: OpenWrt/router/firewall-bouncer. Они только забирают decisions и блокируют. После действия вы вернётесь сюда." "These are devices without a CrowdSec agent: OpenWrt/router/firewall-bouncer. They only pull decisions and block. After an action you will return here.")" 22 102 5 \
+        "show" "$(T "Показать устройства и статус bouncers" "Show devices and bouncer status")" "$(T "Показывает сохранённые устройства и Last Pull bouncers." "Shows saved devices and bouncer Last Pull.")" \
+        "create" "$(T "Добавить bouncer/API устройство" "Add bouncer/API device")" "$(T "Создаёт bouncer key и allowed range для устройства." "Creates bouncer key and allowed range for a device.")" \
+        "remove" "$(T "Удалить bouncer/API устройство" "Remove bouncer/API device")" "$(T "Удаляет bouncer, запись устройства и связанные разрешения." "Deletes bouncer, device record and related access rules.")" \
+        "check" "$(T "Проверить bouncer Last Pull" "Check bouncer Last Pull")" "$(T "Проверяет, подключается ли устройство к central LAPI." "Checks whether the device pulls from central LAPI.")" \
+        3>&1 1>&2 2>&3)" || return 0
+    else
+      echo "1) show  2) create  3) remove  4) check  0) back"
+      read -rp "> " choice || return 0
+      case "${choice}" in 0|q|back) return 0;; 1) choice=show;; 2) choice=create;; 3) choice=remove;; 4) choice=check;; esac
+    fi
+    case "${choice}" in
+      show) show_bouncer_devices ;;
+      create) create_openwrt_bouncer_connection ;;
+      remove) remove_bouncer_device ;;
+      check) check_bouncer_device_status ;;
+    esac
+  done
+}
+
+manage_device_events_menu() {
+  local choice
+  while true; do
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+      choice="$(whiptail --title " $(T "События от роутера/устройства" "Router/device event intake") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Этот раздел не нужен для обычного bouncer-only режима. Он нужен только если central должен анализировать filtered security/firewall/auth события устройства. После действия вы вернётесь сюда." "This section is not needed for normal bouncer-only mode. It is only needed if central must analyze filtered security/firewall/auth device events. After an action you will return here.")" 23 104 5 \
+        "enable" "$(T "Включить filtered syslog intake" "Enable filtered syslog intake")" "$(T "Central будет принимать копию syslog и фильтровать только security/firewall/auth события." "Central will receive a syslog copy and filter only security/firewall/auth events.")" \
+        "disable" "$(T "Отключить syslog intake" "Disable syslog intake")" "$(T "Удаляет intake на central и показывает команды для отключения log_ip на OpenWrt." "Removes intake on central and shows commands to disable log_ip on OpenWrt.")" \
+        "show" "$(T "Показать настроенные syslog intake" "Show configured syslog intake")" "$(T "Показывает устройства, для которых включён приём событий." "Shows devices that have event intake enabled.")" \
+        "logs" "$(T "Показать последние события устройства" "Show latest device events")" "$(T "Открывает последние строки filtered security log." "Opens latest lines of filtered security log.")" \
+        3>&1 1>&2 2>&3)" || return 0
+    else
+      echo "1) enable  2) disable  3) show  4) logs  0) back"
+      read -rp "> " choice || return 0
+      case "${choice}" in 0|q|back) return 0;; 1) choice=enable;; 2) choice=disable;; 3) choice=show;; 4) choice=logs;; esac
+    fi
+    case "${choice}" in
+      enable) configure_device_event_intake ;;
+      disable) disable_device_event_intake ;;
+      show) show_remote_syslog_devices ;;
+      logs) show_device_event_logs ;;
+    esac
+  done
+}
+# --- end v0.7.1 submenu return fix ---
+
 
 acquire_script_lock
 load_saved_language
