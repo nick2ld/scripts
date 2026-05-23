@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.5.1-i18n-langdialog"
+SCRIPT_VERSION="v0.5.2-i18n-cancel-back"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 
@@ -844,7 +844,7 @@ configure_crowdsec_lapi() {
   AUTO_REG_TOKEN="${AUTO_REG_TOKEN}" ALLOWED_RANGES="${ALLOWED_RANGES}" LAPI_PORT="${LAPI_PORT}" python3 - <<'PY'
 import os, yaml, re
 path = "/etc/crowdsec/config.yaml"
-token = os.environ.get("$(T "AUTO_REG_TOKEN" "AUTO_REG_TOKEN")", "").strip()
+token = os.environ.get("AUTO_REG_TOKEN", "").strip()
 if not token:
     raise SystemExit("AUTO_REG_TOKEN is empty, refusing to write broken CrowdSec config")
 with open(path, "r", errors="replace") as f:
@@ -1077,7 +1077,7 @@ for env_name in ("LOCAL_LAPI_ALLOWED_RANGES", "ALLOWED_RANGES"):
             ranges.append(item)
 cfg["api"]["server"]["auto_registration"] = {
     "enabled": True,
-    "token": os.environ["$(T "AUTO_REG_TOKEN" "AUTO_REG_TOKEN")"],
+    "token": os.environ["AUTO_REG_TOKEN"],
     "allowed_ranges": ranges,
 }
 with open(path, "w") as f:
@@ -1637,7 +1637,7 @@ show_connection_info() {
     done
     echo
     read -rp "Введи номер VPS для просмотра параметров (или Enter для отмены): " choice_num
-    [[ -n "${choice_num}" ]] || return
+    [[ -n "${choice_num}" ]] || return 0
     [[ "${choice_num}" =~ ^[0-9]+$ ]] || { warn "Нужно ввести номер."; pause; return; }
     if (( choice_num < 1 || choice_num > ${#lines[@]} )); then
       warn "Номер вне диапазона."
@@ -1723,7 +1723,7 @@ add_allowed_range() {
   if [[ ! "${new_range}" =~ ^[0-9a-fA-F:.]+/[0-9]{1,3}$ ]]; then
     if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
       whiptail --title " Предупреждение " --yes-button "Добавить" --no-button "$(T "Отмена" "Cancel")" --yesno "Похоже, это не CIDR.\nВсё равно добавить?" 10 78 || true
-      [[ $? -eq 0 ]] || return
+      [[ $? -eq 0 ]] || return 0
     else
       warn "Похоже, это не CIDR."
       read -rp "Всё равно добавить? [y/N]: " confirm
@@ -1873,7 +1873,7 @@ replace_allowed_ranges() {
   safe_source_env
   local new_ranges
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    new_ranges=$(whiptail --title " Замена списка IP/CIDR " --inputbox "Текущий список: ${ALLOWED_RANGES:-пуст}\n\nВведите новый список через запятую:" 12 78 "${ALLOWED_RANGES}" 3>&1 1>&2 2>&3) || return
+    new_ranges=$(whiptail --title " Замена списка IP/CIDR " --inputbox "Текущий список: ${ALLOWED_RANGES:-пуст}\n\nВведите новый список через запятую:" 12 78 "${ALLOWED_RANGES}" 3>&1 1>&2 2>&3) || return 0
   else
     print_header
     echo "Сейчас: ${ALLOWED_RANGES:-список пуст}"
@@ -1898,8 +1898,8 @@ change_lan_ip_or_web_port() {
   safe_source_env
   local new_lan_ip new_web_port
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    new_lan_ip=$(whiptail --title " Изменение LAN IP " --inputbox "Введите новый LAN IP:" 10 78 "${LAN_IP}" 3>&1 1>&2 2>&3) || return
-    new_web_port=$(whiptail --title " Изменение порта Web UI " --inputbox "Введите новый порт веб-морды:" 10 78 "${WEB_PORT}" 3>&1 1>&2 2>&3) || return
+    new_lan_ip=$(whiptail --title " Изменение LAN IP " --inputbox "Введите новый LAN IP:" 10 78 "${LAN_IP}" 3>&1 1>&2 2>&3) || return 0
+    new_web_port=$(whiptail --title " Изменение порта Web UI " --inputbox "Введите новый порт веб-морды:" 10 78 "${WEB_PORT}" 3>&1 1>&2 2>&3) || return 0
   else
     print_header
     echo "Сейчас: LAN IP ${LAN_IP}, Web port ${WEB_PORT}, Web UI ${LOCAL_WEB_UI}"
@@ -1935,7 +1935,7 @@ change_lapi_port() {
   safe_source_env
   local new_lapi_port
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    new_lapi_port=$(whiptail --title " Изменение порта LAPI " --inputbox "Введите новый порт LAPI:" 10 78 "${LAPI_PORT}" 3>&1 1>&2 2>&3) || return
+    new_lapi_port=$(whiptail --title " Изменение порта LAPI " --inputbox "Введите новый порт LAPI:" 10 78 "${LAPI_PORT}" 3>&1 1>&2 2>&3) || return 0
   else
     print_header
     read -rp "Новый LAPI port [${LAPI_PORT}]: " new_lapi_port
@@ -1969,9 +1969,9 @@ configure_public_lapi_url() {
   safe_source_env
   local new_url new_npm_cidr
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    new_url=$(whiptail --title " Публичный LAPI через Nginx Proxy Manager " --inputbox "Введите полный публичный URL LAPI, который проксируется через Nginx Proxy Manager.\n\nПример: https://lapi.example.com\n\nОставь пустым, чтобы отключить этот режим и вернуться к прямому http://IP:PORT." 14 92 "${PUBLIC_LAPI_URL:-}" 3>&1 1>&2 2>&3) || return
+    new_url=$(whiptail --title " Публичный LAPI через Nginx Proxy Manager " --inputbox "Введите полный публичный URL LAPI, который проксируется через Nginx Proxy Manager.\n\nПример: https://lapi.example.com\n\nОставь пустым, чтобы отключить этот режим и вернуться к прямому http://IP:PORT." 14 92 "${PUBLIC_LAPI_URL:-}" 3>&1 1>&2 2>&3) || return 0
     if [[ -n "${new_url}" ]]; then
-      new_npm_cidr=$(whiptail --title " Доступ NPM к LAPI " --inputbox "IP/CIDR Nginx Proxy Manager, которому разрешить доступ к локальному LAPI.\n\nПример: 192.168.1.10/32\nМожно оставить пустым, если NPM уже попадает в разрешённые локальные сети." 14 92 "${NPM_ALLOWED_CIDR:-}" 3>&1 1>&2 2>&3) || return
+      new_npm_cidr=$(whiptail --title " Доступ NPM к LAPI " --inputbox "IP/CIDR Nginx Proxy Manager, которому разрешить доступ к локальному LAPI.\n\nПример: 192.168.1.10/32\nМожно оставить пустым, если NPM уже попадает в разрешённые локальные сети." 14 92 "${NPM_ALLOWED_CIDR:-}" 3>&1 1>&2 2>&3) || return 0
     else
       new_npm_cidr=""
     fi
@@ -2092,7 +2092,7 @@ validate_machine_prompt() {
     crowdsec_cscli machines list >"${tmp}" 2>&1 || true
     whiptail --title " Machines на central " --textbox "${tmp}" 24 110 || true
     rm -f "${tmp}"
-    machine_name=$(whiptail --title " Подтвердить machine VPS " --inputbox "Введите имя machine для validate.\n\nЭто имя должно совпадать с Machine name, который вводился в vps.sh." 12 86 "" 3>&1 1>&2 2>&3) || return
+    machine_name=$(whiptail --title " Подтвердить machine VPS " --inputbox "Введите имя machine для validate.\n\nЭто имя должно совпадать с Machine name, который вводился в vps.sh." 12 86 "" 3>&1 1>&2 2>&3) || return 0
   else
     print_header
     echo "Machines на central:"
@@ -2116,7 +2116,7 @@ change_public_addr() {
   safe_source_env
   local new_public
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    new_public=$(whiptail --title " Внешний адрес LAPI " --inputbox "Текущий адрес: ${PUBLIC_ADDR:-не задан}\n\nВведите новый внешний IP или DNS (оставьте пустым, чтобы удалить):" 12 78 "${PUBLIC_ADDR}" 3>&1 1>&2 2>&3) || return
+    new_public=$(whiptail --title " Внешний адрес LAPI " --inputbox "Текущий адрес: ${PUBLIC_ADDR:-не задан}\n\nВведите новый внешний IP или DNS (оставьте пустым, чтобы удалить):" 12 78 "${PUBLIC_ADDR}" 3>&1 1>&2 2>&3) || return 0
   else
     print_header
     echo "Сейчас: ${PUBLIC_ADDR:-не задан}"
@@ -2141,7 +2141,7 @@ change_public_addr() {
 
 regenerate_auto_token() {
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    whiptail --title " Регенерация токена " --yes-button "$(T "Продолжить" "Continue")" --no-button "$(T "Отмена" "Cancel")" --yesno "Новые серверы должны будут использовать новый токен.\n\nПерегенерировать токен авторегистрации?" 12 78 || return
+    whiptail --title " Регенерация токена " --yes-button "$(T "Продолжить" "Continue")" --no-button "$(T "Отмена" "Cancel")" --yesno "Новые серверы должны будут использовать новый токен.\n\nПерегенерировать токен авторегистрации?" 12 78 || return 0
   else
     print_header
     echo "Новые серверы должны будут использовать новый токен."
@@ -2163,7 +2163,7 @@ regenerate_auto_token() {
 
 regenerate_bouncer_key() {
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    whiptail --title " Регенерация bouncer key " --yes-button "$(T "Продолжить" "Continue")" --no-button "$(T "Отмена" "Cancel")" --yesno "Удалённые bouncers нужно будет перенастроить на новый ключ.\n\nСоздать новый shared bouncer key?" 12 78 || return
+    whiptail --title " Регенерация bouncer key " --yes-button "$(T "Продолжить" "Continue")" --no-button "$(T "Отмена" "Cancel")" --yesno "Удалённые bouncers нужно будет перенастроить на новый ключ.\n\nСоздать новый shared bouncer key?" 12 78 || return 0
   else
     print_header
     echo "Удалённые bouncer нужно будет перенастроить на новый ключ."
@@ -2607,10 +2607,10 @@ menu_loop_whiptail() {
     category="$(whiptail \
       --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" \
       --title "$(T " CrowdSec Central " " CrowdSec Central ")" \
-      --cancel-button "$(T "Выход" "Exit")" \
+      --cancel-button "$(T "Назад" "Back")" \
       --ok-button "$(T "Выбрать" "Select")" \
       --notags \
-      --menu "$(T "Выберите раздел:\nСтрелки - навигация, ENTER - выбрать, ESC/Отмена - выход.\n\n${summary}" "Choose a section:\nArrows - navigation, ENTER - select, ESC/Cancel - exit.\n\n${summary}")" \
+      --menu "$(T "Выберите раздел:\nСтрелки - навигация, ENTER - выбрать, ESC/Отмена - назад.\n\n${summary}" "Choose a section:\nArrows - navigation, ENTER - select, ESC/Cancel - back.\n\n${summary}")" \
       22 88 7 \
       "status" "$(T "Статус и данные" "Status and data")" \
       "access" "$(T "Подключения VPS и LAPI" "VPS and LAPI connections")" \
@@ -2619,7 +2619,7 @@ menu_loop_whiptail() {
       "system" "$(T "Обновления и диагностика" "Updates and diagnostics")" \
       "menu" "$(T "Настройки меню" "Menu settings")" \
       "exit" "$(T "Выход" "Exit")" \
-      3>&1 1>&2 2>&3)" || exit 0
+      3>&1 1>&2 2>&3)" || continue
     [[ "${category}" == "exit" ]] && exit 0
 
     while true; do
@@ -2738,7 +2738,7 @@ menu_loop_plain() {
     echo
     if ! read -rp "$(T "Выбери действие [0-30]: " "Choose action [0-30]: ")" choice; then
       echo
-      exit 0
+      continue
     fi
     case "${choice}" in
       1) show_status; pause ;;
