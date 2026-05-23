@@ -130,7 +130,7 @@ change_language() {
 CONFIG_DIR="/root/crowdsec-vps-node"
 ENV_FILE="${CONFIG_DIR}/node.env"
 FAIL2BAN_BACKUP_DIR="${CONFIG_DIR}/fail2ban-backup"
-SCRIPT_VERSION="v0.4-i18n-unattended"
+SCRIPT_VERSION="v0.4-i18n-unattended-notty"
 SCRIPT_RELEASE_DATE="2026-05-22"
 LOCK_FILE="/var/lock/crowdsec-vps-node.lock"
 LOCK_FD=200
@@ -319,7 +319,7 @@ run_install_step() {
   log_file="$(mktemp)"
   clean_log="$(mktemp)"
   rc_file="$(mktemp)"
-  if tui_available; then
+  if tui_available && is_interactive && [[ -t 1 ]]; then
     set +e
     (
       set +e
@@ -356,7 +356,7 @@ run_install_step() {
     rm -f "${log_file}" "${clean_log}" "${rc_file}"
     return 0
   fi
-  if tui_available; then
+  if tui_available && is_interactive && [[ -t 1 ]]; then
     strip_ansi <"${log_file}" >"${clean_log}" || cp "${log_file}" "${clean_log}"
     whiptail --title " Ошибка: ${title} " --textbox "${clean_log}" 30 110 || true
   else
@@ -455,7 +455,7 @@ ENV
 
 ask_settings() {
   load_env_if_exists
-  if tui_available; then
+  if tui_available && is_interactive && [[ -t 1 ]]; then
     tui_theme
     whiptail --title " CrowdSec VPS Node " --msgbox "$(T "Подключение VPS к центральному CrowdSec LAPI.\n\nДанные возьми в меню центрального сервера: sudo crowdsec-central-menu" "Connect this VPS to the central CrowdSec LAPI.\n\nGet the values from the central server menu: sudo crowdsec-central-menu")" 12 78
     CENTRAL_LAPI_URL="$(tui_input "Central LAPI" "$(T "Central LAPI URL" "Central LAPI URL")" "${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}")" || exit 1
@@ -769,7 +769,7 @@ select_hub_collections() {
     fi
   done <"${collections_file}"
   SELECTED_COLLECTIONS="$(tr ' ' '\n' <<<"${SELECTED_COLLECTIONS}" | awk 'NF && !seen[$0]++' | tr '\n' ' ')"
-  if [[ "${COLLECTION_SELECTION_MODE}" == "manual" && -s "${menu_file}" && tui_available ]]; then
+  if [[ "${COLLECTION_SELECTION_MODE}" == "manual" && -s "${menu_file}" && tui_available && is_interactive && -t 1 ]]; then
     local args=()
     while IFS=$'\t' read -r tag item state; do
       args+=("${tag}" "${item:-${tag}}" "${state:-off}")
@@ -1114,7 +1114,7 @@ show_runtime_checks() {
     echo "Важно: наличие сценария проверяется через cscli scenarios list/metrics."
     echo "Боевой триггер зависит от реальных логов конкретного сервиса и его acquisition."
   } >"${tmp}"
-  if tui_available; then
+  if tui_available && is_interactive && [[ -t 1 ]]; then
     whiptail --title " Проверка VPS node " --textbox "${tmp}" 34 118 || true
   else
     cat "${tmp}"
@@ -1130,7 +1130,7 @@ full_install() {
   else
     load_env_if_exists
   fi
-  if tui_available; then
+  if tui_available && is_interactive && [[ -t 1 ]]; then
     tui_theme
     run_install_step "$(T "Устанавливаю базовые пакеты" "Installing base packages")" install_base
     run_install_step "$(T "Удаляю Fail2Ban при наличии" "Removing Fail2Ban if present")" remove_fail2ban_if_installed
@@ -1168,7 +1168,7 @@ manage_existing_installation() {
   load_env_if_exists
   while true; do
     local choice
-    if tui_available; then
+    if tui_available && is_interactive && [[ -t 1 ]]; then
       tui_theme
       choice="$(whiptail --title " CrowdSec VPS Node " --cancel-button "$(T "Выход" "Exit")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Узел уже установлен. Выберите действие:" "Node is already installed. Choose an action:")" 20 92 9 \
         "status" "$(T "Показать текущую сводку" "Show current summary")" \
@@ -1206,7 +1206,7 @@ manage_existing_installation() {
     fi
     case "${choice}" in
       status)
-        if tui_available; then
+        if tui_available && is_interactive && [[ -t 1 ]]; then
           local tmp
           tmp="$(mktemp)"
           show_status >"${tmp}"
@@ -1246,25 +1246,45 @@ manage_existing_installation() {
   done
 }
 
-main() {
+run_unattended_install() {
+  export DEBIAN_FRONTEND=noninteractive
+  export TERM="${TERM:-xterm}"
   require_root
   acquire_lock
-  if [[ "${1:-}" == "--unattended" || "${CROWDSEC_VPS_UNATTENDED:-no}" == "yes" ]]; then
-    export CROWDSEC_VPS_UNATTENDED="yes"
-    load_saved_language
-    load_env_if_exists
-    detect_debian
-    full_install yes
-    show_status
-    return 0
+  load_saved_language || true
+  detect_debian
+  load_env_if_exists
+  [[ -n "${CENTRAL_LAPI_URL:-}" ]] || fail "$(T "CENTRAL_LAPI_URL не задан в ${ENV_FILE}." "CENTRAL_LAPI_URL is not set in ${ENV_FILE}.")"
+  [[ -n "${AUTO_REG_TOKEN:-}" ]] || fail "$(T "AUTO_REG_TOKEN не задан в ${ENV_FILE}." "AUTO_REG_TOKEN is not set in ${ENV_FILE}.")"
+  [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || fail "$(T "SHARED_BOUNCER_KEY не задан в ${ENV_FILE}." "SHARED_BOUNCER_KEY is not set in ${ENV_FILE}.")"
+  [[ -n "${MACHINE_NAME:-}" ]] || fail "$(T "MACHINE_NAME не задан в ${ENV_FILE}." "MACHINE_NAME is not set in ${ENV_FILE}.")"
+  full_install yes
+  show_status
+}
+
+main() {
+  local arg
+  for arg in "$@"; do
+    case "${arg}" in
+      --unattended|--non-interactive)
+        run_unattended_install
+        exit 0
+        ;;
+    esac
+  done
+  if [[ "${CROWDSEC_VPS_UNATTENDED:-0}" == "1" ]]; then
+    run_unattended_install
+    exit 0
   fi
+  require_root
+  acquire_lock
   bootstrap_installer_tui || true
   choose_language_if_needed
   detect_debian
   require_interactive_install
   if [[ -f "${ENV_FILE}" || -x "$(command -v cscli 2>/dev/null || true)" ]]; then
     load_env_if_exists
-    if tui_available; then
+    if tui_available && is_interactive && [[ -t 1 ]]; then
       tui_theme
       local mode
       mode="$(whiptail --title " CrowdSec VPS Node " --cancel-button "$(T "Выход" "Exit")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "Найдена существующая установка или настройки VPS node." 16 88 4 \
@@ -1284,7 +1304,7 @@ main() {
   else
     full_install no
   fi
-  if tui_available; then
+  if tui_available && is_interactive && [[ -t 1 ]]; then
     local tmp
     tmp="$(mktemp)"
     show_status >"${tmp}"

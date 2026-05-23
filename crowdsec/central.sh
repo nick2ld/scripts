@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.6.1-i18n-remote-vps-github-download"
+SCRIPT_VERSION="v0.6.2-i18n-remote-vps-notty-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -996,6 +996,8 @@ build_remote_vps_installer_script() {
 #!/usr/bin/env bash
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
+export TERM="${TERM:-xterm}"
+export CROWDSEC_VPS_UNATTENDED=1
 
 mkdir -p /root/crowdsec-vps-node
 chmod 700 /root/crowdsec-vps-node
@@ -1024,7 +1026,11 @@ fi
 
 curl -fsSL "$(shell_quote "${VPS_SCRIPT_RAW_URL}")" -o /root/crowdsec-vps-node/vps.sh
 chmod 700 /root/crowdsec-vps-node/vps.sh
-bash /root/crowdsec-vps-node/vps.sh --unattended
+if ! grep -q -- '--unattended' /root/crowdsec-vps-node/vps.sh && ! grep -q 'CROWDSEC_VPS_UNATTENDED' /root/crowdsec-vps-node/vps.sh; then
+  echo "ERROR: downloaded vps.sh does not support unattended mode. Update crowdsec/vps.sh in the GitHub repository first." >&2
+  exit 90
+fi
+TERM=xterm CROWDSEC_VPS_UNATTENDED=1 bash /root/crowdsec-vps-node/vps.sh --unattended
 REMOTE
   chmod 600 "${out}"
 }
