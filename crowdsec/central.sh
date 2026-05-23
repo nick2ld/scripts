@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.1-i18n-submenu-return-fix"
+SCRIPT_VERSION="v0.7.2-i18n-menu-command-label-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -3355,7 +3355,7 @@ show_crowdsec_info() {
 
 disable_login_menu() { print_header; rm -f "${PROFILE_FILE}"; ok "Автозапуск меню отключён."; pause; }
 enable_login_menu() { print_header; install_menu_files; ok "Автозапуск меню включён."; pause; }
-repair_menu_installation() { print_header; update_menu_from_github; ok "Команда меню обновлена: sudo crowdsec-central-menu"; pause; }
+repair_menu_installation() { print_header; update_menu_from_github; ok "$(T "Скрипт обновлён из GitHub и установлен в систему: sudo crowdsec-central-menu" "Script updated from GitHub and installed into the system: sudo crowdsec-central-menu")"; pause; }
 
 show_versions() {
   local tmp
@@ -3606,7 +3606,7 @@ menu_loop_whiptail() {
           choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Настройки меню" "Menu settings") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 18 82 5 \
             "disable_autostart" "$(T "Отключить автозапуск меню при входе" "Disable menu autostart on login")" \
             "enable_autostart" "$(T "Включить автозапуск меню при входе" "Enable menu autostart on login")" \
-            "repair_menu" "$(T "Обновить или переустановить команду меню" "Update or reinstall menu command")" \
+            "repair_menu" "$(T "Восстановить команду меню" "Repair menu command")" \
             "language" "$(T "Изменить язык интерфейса" "Change interface language")" \
             3>&1 1>&2 2>&3)" || break
           ;;
@@ -4674,7 +4674,7 @@ action_description() {
     update_docker) T "Обновляет Docker и docker compose plugin." "Updates Docker and the docker compose plugin." ;;
     update_crowdsec) T "Обновляет CrowdSec engine и связанные пакеты из репозитория CrowdSec." "Updates CrowdSec engine and related packages from the CrowdSec repository." ;;
     versions) T "Показывает версии ОС, Docker, CrowdSec, cscli и контейнеров." "Shows OS, Docker, CrowdSec, cscli and container versions." ;;
-    repair_menu) T "Переустанавливает команду crowdsec-central-menu из текущего файла скрипта." "Reinstalls the crowdsec-central-menu command from the current script file." ;;
+    repair_menu) T "Скачивает свежий central.sh из GitHub, проверяет синтаксис и устанавливает его как /usr/local/sbin/crowdsec-central-menu. Используй для обновления самого скрипта меню." "Downloads the latest central.sh from GitHub, checks syntax, and installs it as /usr/local/sbin/crowdsec-central-menu. Use it to update the menu script itself." ;;
     language) T "Меняет язык интерфейса и сохраняет выбор в central.env." "Changes interface language and saves the choice to central.env." ;;
     disable_autostart) T "Отключает автозапуск меню при входе root в shell." "Disables automatic menu start when root logs into shell." ;;
     enable_autostart) T "Включает автозапуск меню при входе root в shell." "Enables automatic menu start when root logs into shell." ;;
@@ -4955,7 +4955,7 @@ menu_loop_whiptail() {
           choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" --title " $(T "Настройки меню" "Menu settings") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Настройки самого TUI-меню." "Settings of the TUI menu itself.")" 20 96 5 \
             "disable_autostart" "$(T "Отключить автозапуск меню" "Disable menu autostart")" "$(action_description disable_autostart)" \
             "enable_autostart" "$(T "Включить автозапуск меню" "Enable menu autostart")" "$(action_description enable_autostart)" \
-            "repair_menu" "$(T "Обновить/переустановить команду" "Update/reinstall command")" "$(action_description repair_menu)" \
+            "repair_menu" "$(T "Обновить скрипт меню из GitHub" "Update menu script from GitHub")" "$(action_description repair_menu)" \
             "language" "$(T "Изменить язык интерфейса" "Change interface language")" "$(action_description language)" \
             3>&1 1>&2 2>&3)" || break ;;
       esac
