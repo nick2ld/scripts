@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.4-console-options-no-return-fix"
+SCRIPT_VERSION="v0.7.5-docker-engine-no-host-cscli"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -722,28 +722,16 @@ install_or_update_docker() {
 }
 
 install_or_update_crowdsec_repo() {
-  log "Проверяю репозиторий CrowdSec..."
-  command -v curl >/dev/null 2>&1 || fail "Не найден curl. Установи curl перед настройкой репозитория CrowdSec."
-  local tmp
-  tmp="$(mktemp)"
-  curl -fsSL https://install.crowdsec.net -o "${tmp}"
-  bash -n "${tmp}"
-  if [[ "${CROWDSEC_ASSUME_YES:-0}" != "1" ]]; then
-    confirm_dangerous_action "Удалённый установщик CrowdSec" "Скрипт скачал официальный install.crowdsec.net во временный файл и проверил синтаксис. Следующий шаг выполнит этот файл от root для настройки apt-репозитория CrowdSec. Это безопаснее, чем curl | sh, но всё равно остаётся выполнением удалённого кода."
-  fi
-  bash "${tmp}"
-  rm -f "${tmp}"
-  apt-get update -y
-  ok "Репозиторий CrowdSec готов."
+  # Dockerized CrowdSec Manager mode does not need CrowdSec apt repository on the host.
+  # Kept as a compatibility stub so old menu actions do not accidentally install host cscli/crowdsec.
+  warn "$(T "CrowdSec apt repository на хосте не нужен в режиме CrowdSec Manager Docker. Пропускаю." "CrowdSec apt repository is not needed on the host in CrowdSec Manager Docker mode. Skipping.")"
 }
 
 install_or_update_crowdsec() {
-  install_or_update_crowdsec_repo
-  log "Устанавливаю или обновляю CrowdSec..."
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get install -y crowdsec
-  systemctl enable --now crowdsec || true
-  ok "CrowdSec установлен или обновлён."
+  # In this central script the active CrowdSec engine is the Docker container named "crowdsec".
+  # Installing the apt package on the host creates a second, confusing CrowdSec instance, so we do not do it.
+  warn "$(T "Host CrowdSec/cscli не устанавливается. Central использует Docker-контейнер crowdsec." "Host CrowdSec/cscli is not installed. Central uses the Docker container named crowdsec.")"
+  install_or_update_crowdsec_manager
 }
 
 ask_initial_settings() {
@@ -882,35 +870,35 @@ PY
 }
 
 create_or_update_webui_machine() {
+  # Legacy Simple Web UI helper.
+  # In the current CrowdSec Manager Docker mode we must never use host cscli.
   safe_source_env
   [[ -n "${WEBUI_PASSWORD:-}" ]] || WEBUI_PASSWORD="$(openssl rand -hex 24)"
   save_env
-  log "Создаю или обновляю machine account для веб-морды..."
-  cscli machines add crowdsec-web-ui --password "${WEBUI_PASSWORD}" --force --file /tmp/crowdsec-web-ui-creds.yaml >/dev/null || true
-  rm -f /tmp/crowdsec-web-ui-creds.yaml
-  systemctl restart crowdsec || true
-  ok "Machine account для веб-морды готов."
+  if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
+    log "$(T "Создаю или обновляю machine account внутри Docker engine..." "Creating/updating machine account inside the Docker engine...")"
+    docker exec crowdsec cscli machines add crowdsec-web-ui --password "${WEBUI_PASSWORD}" --force --file /tmp/crowdsec-web-ui-creds.yaml >/dev/null || true
+    docker exec crowdsec rm -f /tmp/crowdsec-web-ui-creds.yaml >/dev/null 2>&1 || true
+    (cd "${COMPOSE_DIR}" && docker compose restart crowdsec) >/dev/null 2>&1 || docker restart crowdsec >/dev/null 2>&1 || true
+    ok "$(T "Machine account для веб-морды готов в Docker engine." "Machine account for Web UI is ready in the Docker engine.")"
+  else
+    fail "$(T "Контейнер crowdsec не запущен. Host cscli не используется в этом central-скрипте." "The crowdsec container is not running. Host cscli is not used by this central script.")"
+  fi
 }
 
 create_or_update_shared_bouncer_key() {
   safe_source_env
   [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || SHARED_BOUNCER_KEY="$(openssl rand -hex 32)"
   save_env
-  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
-    if docker exec crowdsec cscli bouncers list 2>/dev/null | grep -q "shared-firewall-bouncer"; then
-      ok "Bouncer shared-firewall-bouncer уже существует в Docker."
-      return
-    fi
-    log "Создаю общий bouncer key для удалённых серверов в Docker..."
-    docker exec crowdsec cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
-  else
-    if cscli bouncers list 2>/dev/null | grep -q "shared-firewall-bouncer"; then
-      ok "Bouncer shared-firewall-bouncer уже существует."
-      return
-    fi
-    log "Создаю общий bouncer key для удалённых серверов..."
-    cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
+  if ! command -v docker >/dev/null 2>&1 || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
+    fail "$(T "Контейнер crowdsec не запущен. Host cscli не используется." "The crowdsec container is not running. Host cscli is not used.")"
   fi
+  if docker exec crowdsec cscli bouncers list 2>/dev/null | grep -q "shared-firewall-bouncer"; then
+    ok "Bouncer shared-firewall-bouncer уже существует в Docker."
+    return
+  fi
+  log "Создаю общий bouncer key для удалённых серверов в Docker..."
+  docker exec crowdsec cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
   ok "Bouncer key готов."
 }
 
@@ -960,15 +948,12 @@ create_named_vps_bouncer_key() {
 
 create_vps_connection_apply_common() {
   echo "Удаление старого bouncer: ${node_name}"
-  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
-    docker exec crowdsec cscli bouncers delete "${node_name}" || true
-    echo "Регистрация нового bouncer в Docker LAPI: ${node_name}"
-    docker exec crowdsec cscli bouncers add "${node_name}" --key "${bouncer_key}"
-  else
-    cscli bouncers delete "${node_name}" || true
-    echo "Регистрация нового bouncer в локальном LAPI: ${node_name}"
-    cscli bouncers add "${node_name}" --key "${bouncer_key}"
+  if ! command -v docker >/dev/null 2>&1 || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
+    fail "$(T "Контейнер crowdsec не запущен. Host cscli не используется." "The crowdsec container is not running. Host cscli is not used.")"
   fi
+  docker exec crowdsec cscli bouncers delete "${node_name}" || true
+  echo "Регистрация нового bouncer в Docker LAPI: ${node_name}"
+  docker exec crowdsec cscli bouncers add "${node_name}" --key "${bouncer_key}"
 
   echo "Сохранение central.env"
   save_env
@@ -1286,15 +1271,12 @@ create_named_vps_bouncer_key_manual() {
 
   create_named_vps_bouncer_key_apply() {
     echo "Удаление старого bouncer: ${node_name}"
-    if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
-      docker exec crowdsec cscli bouncers delete "${node_name}" || true
-      echo "Регистрация нового bouncer в Docker LAPI: ${node_name}"
-      docker exec crowdsec cscli bouncers add "${node_name}" --key "${bouncer_key}"
-    else
-      cscli bouncers delete "${node_name}" || true
-      echo "Регистрация нового bouncer в локальном LAPI: ${node_name}"
-      cscli bouncers add "${node_name}" --key "${bouncer_key}"
+    if ! command -v docker >/dev/null 2>&1 || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
+      fail "$(T "Контейнер crowdsec не запущен. Host cscli не используется." "The crowdsec container is not running. Host cscli is not used.")"
     fi
+    docker exec crowdsec cscli bouncers delete "${node_name}" || true
+    echo "Регистрация нового bouncer в Docker LAPI: ${node_name}"
+    docker exec crowdsec cscli bouncers add "${node_name}" --key "${bouncer_key}"
 
     echo "Сохранение central.env"
     save_env
@@ -1602,15 +1584,12 @@ create_openwrt_bouncer_connection() {
 
   create_openwrt_bouncer_apply() {
     echo "Удаление старого bouncer: ${node_name}"
-    if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
-      docker exec crowdsec cscli bouncers delete "${node_name}" || true
-      echo "Регистрация bouncer device в Docker LAPI: ${node_name}"
-      docker exec crowdsec cscli bouncers add "${node_name}" --key "${bouncer_key}"
-    else
-      cscli bouncers delete "${node_name}" || true
-      echo "Регистрация bouncer device в локальном LAPI: ${node_name}"
-      cscli bouncers add "${node_name}" --key "${bouncer_key}"
+    if ! command -v docker >/dev/null 2>&1 || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
+      fail "$(T "Контейнер crowdsec не запущен. Host cscli не используется." "The crowdsec container is not running. Host cscli is not used.")"
     fi
+    docker exec crowdsec cscli bouncers delete "${node_name}" || true
+    echo "Регистрация bouncer device в Docker LAPI: ${node_name}"
+    docker exec crowdsec cscli bouncers add "${node_name}" --key "${bouncer_key}"
 
     echo "Сохранение central.env"
     save_env
@@ -2792,11 +2771,14 @@ configure_public_lapi_url() {
 }
 
 crowdsec_cscli() {
+  # The central engine for this script is Dockerized CrowdSec.
+  # Do not fall back to host cscli: that would manage a different CrowdSec instance.
   safe_source_env
-  if [[ "${WEB_UI_TYPE:-manager}" == "manager" ]] && command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^crowdsec$'; then
+  if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
     docker exec crowdsec cscli "$@"
   else
-    cscli "$@"
+    echo "$(T "ОШИБКА: контейнер crowdsec не запущен. Host cscli намеренно не используется, чтобы не управлять другим CrowdSec instance." "ERROR: the crowdsec container is not running. Host cscli is intentionally not used to avoid managing another CrowdSec instance.")" >&2
+    return 1
   fi
 }
 
@@ -3086,13 +3068,11 @@ regenerate_bouncer_key() {
 
   SHARED_BOUNCER_KEY="$(openssl rand -hex 32)"
   save_env
-  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]]; then
-    docker exec crowdsec cscli bouncers delete shared-firewall-bouncer >/dev/null 2>&1 || true
-    docker exec crowdsec cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
-  else
-    cscli bouncers delete shared-firewall-bouncer >/dev/null 2>&1 || true
-    cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
+  if ! command -v docker >/dev/null 2>&1 || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
+    fail "$(T "Контейнер crowdsec не запущен. Host cscli не используется." "The crowdsec container is not running. Host cscli is not used.")"
   fi
+  docker exec crowdsec cscli bouncers delete shared-firewall-bouncer >/dev/null 2>&1 || true
+  docker exec crowdsec cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
     whiptail --title " Успех " --msgbox "Shared bouncer key обновлён." 8 78
@@ -3366,9 +3346,26 @@ show_versions() {
     print_header
     echo "Debian/Ubuntu:"
     [[ -f /etc/os-release ]] && grep PRETTY_NAME /etc/os-release | cut -d= -f2- | tr -d '"' || true
-    echo; echo "CrowdSec:"; command -v cscli >/dev/null 2>&1 && cscli version || echo "не установлен"
-    echo; echo "Docker:"; command -v docker >/dev/null 2>&1 && { docker --version; docker compose version; } || echo "не установлен"
-    echo; echo "CrowdSec Manager image:"; command -v docker >/dev/null 2>&1 && docker images "${MANAGER_IMAGE}" || true
+    echo
+    echo "Docker:"
+    command -v docker >/dev/null 2>&1 && { docker --version; docker compose version; } || echo "не установлен"
+    echo
+    echo "CrowdSec Docker engine:"
+    if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
+      docker exec crowdsec cscli version 2>&1 || true
+    else
+      echo "контейнер crowdsec не запущен"
+    fi
+    echo
+    echo "CrowdSec Manager image:"
+    command -v docker >/dev/null 2>&1 && docker images "${MANAGER_IMAGE}" || true
+    echo
+    echo "Host cscli:"
+    if command -v cscli >/dev/null 2>&1; then
+      echo "найден на хосте, но этим скриптом не используется"
+    else
+      echo "не установлен и не нужен для Dockerized central"
+    fi
   } >"${tmp}"
   show_file "Версии" "${tmp}"
   rm -f "${tmp}"
@@ -3751,10 +3748,14 @@ menu_loop() {
 DEVICE_CONNECTION_TYPE="BOUNCER_ONLY_DEVICE"
 
 crowdsec_cscli() {
-  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]] && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
+  # The central engine for this script is Dockerized CrowdSec.
+  # Do not fall back to host cscli: that would manage a different CrowdSec instance.
+  safe_source_env
+  if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
     docker exec crowdsec cscli "$@"
   else
-    cscli "$@"
+    echo "$(T "ОШИБКА: контейнер crowdsec не запущен. Host cscli намеренно не используется, чтобы не управлять другим CrowdSec instance." "ERROR: the crowdsec container is not running. Host cscli is intentionally not used to avoid managing another CrowdSec instance.")" >&2
+    return 1
   fi
 }
 
@@ -4768,7 +4769,7 @@ action_description() {
     update_system) T "Обновляет пакеты Debian/Ubuntu через apt." "Updates Debian/Ubuntu packages through apt." ;;
     update_docker) T "Обновляет Docker и docker compose plugin." "Updates Docker and the docker compose plugin." ;;
     update_crowdsec) T "Обновляет CrowdSec engine и связанные пакеты из репозитория CrowdSec." "Updates CrowdSec engine and related packages from the CrowdSec repository." ;;
-    versions) T "Показывает версии ОС, Docker, CrowdSec, cscli и контейнеров." "Shows OS, Docker, CrowdSec, cscli and container versions." ;;
+    versions) T "Показывает версии ОС, Docker, CrowdSec внутри контейнера и контейнеров. Host cscli не нужен." "Shows OS, Docker, CrowdSec inside the container and container versions. Host cscli is not needed." ;;
     repair_menu) T "Скачивает свежий central.sh из GitHub, проверяет синтаксис и устанавливает его как /usr/local/sbin/crowdsec-central-menu. Используй для обновления самого скрипта меню." "Downloads the latest central.sh from GitHub, checks syntax, and installs it as /usr/local/sbin/crowdsec-central-menu. Use it to update the menu script itself." ;;
     language) T "Меняет язык интерфейса и сохраняет выбор в central.env." "Changes interface language and saves the choice to central.env." ;;
     disable_autostart) T "Отключает автозапуск меню при входе root в shell." "Disables automatic menu start when root logs into shell." ;;
@@ -5267,16 +5268,19 @@ crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
     printf '%s' "docker: crowdsec"
   else
-    printf '%s' "host: cscli"
+    printf '%s' "docker: crowdsec (not running)"
   fi
 }
 
 crowdsec_cscli() {
+  # The central engine for this script is Dockerized CrowdSec.
+  # Do not fall back to host cscli: that would manage a different CrowdSec instance.
   safe_source_env
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
     docker exec crowdsec cscli "$@"
   else
-    cscli "$@"
+    echo "$(T "ОШИБКА: контейнер crowdsec не запущен. Host cscli намеренно не используется, чтобы не управлять другим CrowdSec instance." "ERROR: the crowdsec container is not running. Host cscli is intentionally not used to avoid managing another CrowdSec instance.")" >&2
+    return 1
   fi
 }
 
@@ -5336,7 +5340,7 @@ action_description() {
         update_system) T "Обновляет пакеты Debian/Ubuntu через apt." "Updates Debian/Ubuntu packages through apt." ;;
         update_docker) T "Обновляет Docker и docker compose plugin." "Updates Docker and the docker compose plugin." ;;
         update_crowdsec) T "Обновляет CrowdSec engine и связанные пакеты из репозитория CrowdSec." "Updates CrowdSec engine and related packages from the CrowdSec repository." ;;
-        versions) T "Показывает версии ОС, Docker, CrowdSec, cscli и контейнеров." "Shows OS, Docker, CrowdSec, cscli and container versions." ;;
+        versions) T "Показывает версии ОС, Docker, CrowdSec внутри контейнера и контейнеров. Host cscli не нужен." "Shows OS, Docker, CrowdSec inside the container and container versions. Host cscli is not needed." ;;
         repair_menu) T "Скачивает свежий central.sh из GitHub, проверяет синтаксис и устанавливает его как /usr/local/sbin/crowdsec-central-menu. Используй для обновления самого скрипта меню." "Downloads the latest central.sh from GitHub, checks syntax, and installs it as /usr/local/sbin/crowdsec-central-menu. Use it to update the menu script itself." ;;
         language) T "Меняет язык интерфейса и сохраняет выбор в central.env." "Changes interface language and saves the choice to central.env." ;;
         disable_autostart) T "Отключает автозапуск меню при входе root в shell." "Disables automatic menu start when root logs into shell." ;;
@@ -5436,7 +5440,7 @@ manage_capi_console_menu() {
   local choice
   while true; do
     if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      choice="$(whiptail --title " $(T "CrowdSec Console / CAPI" "CrowdSec Console / CAPI") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Здесь подключается текущий CrowdSec engine к облачной CrowdSec Console.\n\nЕсли используется CrowdSec Manager в Docker, команды автоматически выполняются внутри контейнера crowdsec, а не на хосте.\n\nПосле действия вы вернётесь сюда." "Connect the current CrowdSec engine to the cloud CrowdSec Console here.\n\nIf CrowdSec Manager runs in Docker, commands are executed inside the crowdsec container automatically, not on the host.\n\nAfter an action you will return here.")" 27 106 6 \
+      choice="$(whiptail --title " $(T "CrowdSec Console / CAPI" "CrowdSec Console / CAPI") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Здесь подключается текущий CrowdSec engine к облачной CrowdSec Console.\n\nКоманды выполняются внутри контейнера crowdsec. Host cscli намеренно не используется.\n\nПосле действия вы вернётесь сюда." "Connect the current CrowdSec engine to the cloud CrowdSec Console here.\n\nCommands run inside the crowdsec container. Host cscli is intentionally not used.\n\nAfter an action you will return here.")" 27 106 6 \
         "enroll" "$(T "Console enrollment key" "Console enrollment key")" "$(T "Вводит enrollment key или всю команду cscli console enroll из app.crowdsec.net." "Enter the enrollment key or the whole cscli console enroll command from app.crowdsec.net.")" \
         "capi" "$(T "CAPI register/status" "CAPI register/status")" "$(T "Выполняет cscli capi register в текущем engine и показывает статус." "Runs cscli capi register in the current engine and shows status.")" \
         "cti" "$(T "CTI API key" "CTI API key")" "$(T "Сохраняет CTI API key в config.yaml. Это отдельный ключ, не enrollment key." "Saves CTI API key to config.yaml. This is a separate key, not an enrollment key.")" \
