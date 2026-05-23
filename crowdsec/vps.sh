@@ -24,14 +24,38 @@ NC='\033[0m'
 CONFIG_DIR="/root/crowdsec-vps-node"
 ENV_FILE="${CONFIG_DIR}/node.env"
 FAIL2BAN_BACKUP_DIR="${CONFIG_DIR}/fail2ban-backup"
-SCRIPT_VERSION="v0.1"
+SCRIPT_VERSION="v0.2-secure-live"
 SCRIPT_RELEASE_DATE="2026-05-22"
+LOCK_FILE="/var/lock/crowdsec-vps-node.lock"
+LOCK_FD=200
+TMP_FILES=()
 
 log() { echo "==> $*"; }
 ok() { echo "OK: $*"; }
 warn() { echo "WARN: $*"; }
 fail() { echo "ERROR: $*" >&2; exit 1; }
 pause() { echo; read -rp "Нажми Enter для продолжения..." _ || true; }
+
+register_tmp() {
+  local item="$1"
+  TMP_FILES+=("${item}")
+}
+
+cleanup_tmp() {
+  local item
+  for item in "${TMP_FILES[@]:-}"; do
+    [[ -n "${item}" ]] && rm -rf "${item}" 2>/dev/null || true
+  done
+}
+
+acquire_lock() {
+  mkdir -p "$(dirname "${LOCK_FILE}")"
+  exec {LOCK_FD}>"${LOCK_FILE}"
+  if ! flock -n "${LOCK_FD}"; then
+    fail "Скрипт уже запущен в другом процессе. Заверши второй запуск или удали lock после проверки: ${LOCK_FILE}"
+  fi
+}
+
 is_interactive() { [[ -t 0 ]]; }
 safe_clear() {
   [[ -t 1 ]] || return 0
@@ -162,6 +186,18 @@ tui_input() {
   local default="${3:-}"
   whiptail --title " ${title} " --inputbox "${text}" 10 78 "${default}" 3>&1 1>&2 2>&3
 }
+
+tui_password() {
+  local title="$1"
+  local text="$2"
+  local default="${3:-}"
+  if [[ -n "${default}" ]]; then
+    whiptail --title " ${title} " --passwordbox "${text}\n\nТекущее значение уже сохранено. Оставь поле пустым, чтобы сохранить его без изменений." 13 86 "" 3>&1 1>&2 2>&3
+  else
+    whiptail --title " ${title} " --passwordbox "${text}" 10 78 "" 3>&1 1>&2 2>&3
+  fi
+}
+
 tui_yesno() {
   local title="$1"
   local text="$2"
@@ -228,6 +264,7 @@ on_error() {
   local line_no="${1:-unknown}"
   fail "Сбой на строке ${line_no}, код выхода ${exit_code}"
 }
+trap cleanup_tmp EXIT
 trap 'on_error ${LINENO}' ERR
 
 require_root() { [[ "${EUID}" -eq 0 ]] || fail "Запусти от root: sudo bash $0"; }
@@ -252,7 +289,7 @@ load_env_if_exists() {
       value="${line#*=}"
       key="$(printf '%s' "${key}" | tr -cd 'A-Za-z0-9_')"
       case "${key}" in
-        CENTRAL_LAPI_URL|AUTO_REG_TOKEN|SHARED_BOUNCER_KEY|MACHINE_NAME|INSTALL_FIREWALL_BOUNCER|COLLECTION_SELECTION_MODE|SELECTED_COLLECTIONS|HUB_ITEM_SELECTION_MODE|SELECTED_HUB_ITEMS|FIREWALL_BOUNCER_PACKAGE|FIREWALL_BOUNCER_MODE) ;;
+        CENTRAL_LAPI_URL|AUTO_REG_TOKEN|SHARED_BOUNCER_KEY|MACHINE_NAME|INSTALL_FIREWALL_BOUNCER|REMOVE_FAIL2BAN|COLLECTION_SELECTION_MODE|SELECTED_COLLECTIONS|HUB_ITEM_SELECTION_MODE|SELECTED_HUB_ITEMS|FIREWALL_BOUNCER_PACKAGE|FIREWALL_BOUNCER_MODE) ;;
         *) continue ;;
       esac
       parsed="${value}"
@@ -275,6 +312,7 @@ load_env_if_exists() {
   SHARED_BOUNCER_KEY="${SHARED_BOUNCER_KEY:-}"
   MACHINE_NAME="${MACHINE_NAME:-$(hostname -f 2>/dev/null || hostname)}"
   INSTALL_FIREWALL_BOUNCER="${INSTALL_FIREWALL_BOUNCER:-yes}"
+  REMOVE_FAIL2BAN="${REMOVE_FAIL2BAN:-yes}"
   COLLECTION_SELECTION_MODE="${COLLECTION_SELECTION_MODE:-manual}"
   SELECTED_COLLECTIONS="${SELECTED_COLLECTIONS:-}"
   HUB_ITEM_SELECTION_MODE="${HUB_ITEM_SELECTION_MODE:-none}"
@@ -295,6 +333,7 @@ AUTO_REG_TOKEN=$(quote_env "${AUTO_REG_TOKEN}")
 SHARED_BOUNCER_KEY=$(quote_env "${SHARED_BOUNCER_KEY}")
 MACHINE_NAME=$(quote_env "${MACHINE_NAME}")
 INSTALL_FIREWALL_BOUNCER=$(quote_env "${INSTALL_FIREWALL_BOUNCER}")
+REMOVE_FAIL2BAN=$(quote_env "${REMOVE_FAIL2BAN}")
 COLLECTION_SELECTION_MODE=$(quote_env "${COLLECTION_SELECTION_MODE}")
 SELECTED_COLLECTIONS=$(quote_env "${SELECTED_COLLECTIONS}")
 HUB_ITEM_SELECTION_MODE=$(quote_env "${HUB_ITEM_SELECTION_MODE}")
@@ -311,13 +350,25 @@ ask_settings() {
     tui_theme
     whiptail --title " CrowdSec VPS Node " --msgbox "Подключение VPS к центральному CrowdSec LAPI.\n\nДанные возьми в меню центрального сервера: sudo crowdsec-central-menu" 12 78
     CENTRAL_LAPI_URL="$(tui_input "Central LAPI" "Central LAPI URL" "${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}")" || exit 1
-    AUTO_REG_TOKEN="$(tui_input "Central LAPI" "AUTO_REG_TOKEN" "${AUTO_REG_TOKEN:-}")" || exit 1
-    SHARED_BOUNCER_KEY="$(tui_input "Firewall Bouncer" "BOUNCER_KEY\n\nЛучше создать индивидуальное подключение на central:\nПодключения VPS и LAPI -> Создать подключение VPS.\nТогда имя будет видно в CrowdSec Manager." "${SHARED_BOUNCER_KEY:-}")" || exit 1
+    local new_auto_token new_bouncer_key
+    new_auto_token="$(tui_password "Central LAPI" "AUTO_REG_TOKEN" "${AUTO_REG_TOKEN:-}")" || exit 1
+    if [[ -n "${new_auto_token}" || -z "${AUTO_REG_TOKEN:-}" ]]; then
+      AUTO_REG_TOKEN="${new_auto_token}"
+    fi
+    new_bouncer_key="$(tui_password "Firewall Bouncer" "BOUNCER_KEY\n\nЛучше создать индивидуальное подключение на central:\nПодключения VPS и LAPI -> Создать подключение VPS.\nТогда имя будет видно в CrowdSec Manager." "${SHARED_BOUNCER_KEY:-}")" || exit 1
+    if [[ -n "${new_bouncer_key}" || -z "${SHARED_BOUNCER_KEY:-}" ]]; then
+      SHARED_BOUNCER_KEY="${new_bouncer_key}"
+    fi
     MACHINE_NAME="$(tui_input "Machine" "Machine name" "${MACHINE_NAME}")" || exit 1
     if tui_yesno "Firewall Bouncer" "Ставить firewall-bouncer для автоматической блокировки IP?"; then
       INSTALL_FIREWALL_BOUNCER="yes"
     else
       INSTALL_FIREWALL_BOUNCER="no"
+    fi
+    if tui_yesno "Fail2Ban" "Если Fail2Ban найден, остановить, отключить, сделать backup и удалить его?\n\nЕсли оставить Fail2Ban вместе с CrowdSec, возможны конфликты правил блокировки."; then
+      REMOVE_FAIL2BAN="yes"
+    else
+      REMOVE_FAIL2BAN="no"
     fi
     COLLECTION_SELECTION_MODE="$(whiptail --title " Collections " --cancel-button "Отмена" --ok-button "Выбрать" --notags --menu "Как выбрать CrowdSec collections после установки агента?" 16 86 3 \
       "manual" "Показать список из CrowdSec Hub и выбрать вручную" \
@@ -331,6 +382,9 @@ ask_settings() {
     [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "Central LAPI URL не может быть пустым."
     [[ "${CENTRAL_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]] || fail "Central LAPI URL должен начинаться с http:// или https://"
     normalize_lapi_url
+    if [[ "${CENTRAL_LAPI_URL}" =~ ^http:// ]]; then
+      tui_yesno " Предупреждение " "Central LAPI указан через HTTP, токены и ключи передаются без TLS. Продолжить?" || exit 1
+    fi
     [[ -n "${AUTO_REG_TOKEN}" ]] || fail "AUTO_REG_TOKEN не может быть пустым."
     [[ "${AUTO_REG_TOKEN}" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "AUTO_REG_TOKEN содержит недопустимые символы."
     if [[ -n "${SHARED_BOUNCER_KEY}" ]] && [[ ! "${SHARED_BOUNCER_KEY}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
@@ -356,6 +410,11 @@ ask_settings() {
   [[ -n "${CENTRAL_LAPI_URL}" ]] || fail "Central LAPI URL не может быть пустым."
   [[ "${CENTRAL_LAPI_URL}" =~ ^https?://[^[:space:]]+$ ]] || fail "Central LAPI URL должен начинаться с http:// или https://"
   normalize_lapi_url
+  if [[ "${CENTRAL_LAPI_URL}" =~ ^http:// ]]; then
+    warn "Central LAPI указан через HTTP. Токены и ключи передаются без TLS."
+    read -rp "Продолжить? [y/N]: " http_confirm
+    [[ "${http_confirm:-N}" =~ ^[Yy]$ ]] || fail "Отменено пользователем."
+  fi
 
   prompt_default input_token "AUTO_REG_TOKEN: " "${AUTO_REG_TOKEN:-}"
   AUTO_REG_TOKEN="${input_token:-${AUTO_REG_TOKEN}}"
@@ -383,6 +442,14 @@ ask_settings() {
   fi
 
   echo
+  prompt_default input_remove_fail2ban "Если Fail2Ban найден, удалить его после backup? [Y/n]: " "Y"
+  if [[ "${input_remove_fail2ban:-Y}" =~ ^[Nn]$ ]]; then
+    REMOVE_FAIL2BAN="no"
+  else
+    REMOVE_FAIL2BAN="yes"
+  fi
+
+  echo
   echo "CrowdSec collections будут выбраны после установки агента из реального списка CrowdSec Hub."
   echo "manual - показать checklist и выбрать вручную"
   echo "auto   - поставить базовые и похожие на найденный софт"
@@ -405,6 +472,11 @@ install_base() {
 }
 
 remove_fail2ban_if_installed() {
+  load_env_if_exists
+  if [[ "${REMOVE_FAIL2BAN:-yes}" != "yes" ]]; then
+    warn "Удаление Fail2Ban отключено пользователем. Возможны конфликты с CrowdSec firewall bouncer."
+    return 0
+  fi
   log "Проверяю Fail2Ban..."
   local fail2ban_found="no"
   command -v fail2ban-client >/dev/null 2>&1 && fail2ban_found="yes"
@@ -432,7 +504,15 @@ remove_fail2ban_if_installed() {
 
 install_crowdsec_repo() {
   log "Подключаю официальный репозиторий CrowdSec..."
-  curl -fsSL https://install.crowdsec.net | sh
+  local tmp_installer
+  tmp_installer="$(mktemp)"
+  register_tmp "${tmp_installer}"
+  curl -fsSL https://install.crowdsec.net -o "${tmp_installer}"
+  if [[ ! -s "${tmp_installer}" ]]; then
+    fail "Скачанный установщик CrowdSec пустой."
+  fi
+  bash -n "${tmp_installer}"
+  bash "${tmp_installer}"
   apt-get update -y
   ok "Репозиторий CrowdSec подключён."
 }
@@ -1055,6 +1135,7 @@ manage_existing_installation() {
 
 main() {
   require_root
+  acquire_lock
   detect_debian
   require_interactive_install
   bootstrap_installer_tui || true
