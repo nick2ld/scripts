@@ -1057,6 +1057,16 @@ remote_run_runner() {
   fi
 }
 
+remote_restart_vps_services_after_validate() {
+  local cmd
+  cmd="systemctl reset-failed crowdsec || true; systemctl restart crowdsec; systemctl restart crowdsec-firewall-bouncer || true; systemctl status crowdsec --no-pager -l || true; cscli lapi status || true"
+  if [[ "${ssh_user}" == "root" ]]; then
+    remote_ssh_base "${cmd}"
+  else
+    printf '%s\n' "${ssh_password}" | remote_ssh_base "sudo -S -p '' bash -lc $(shell_quote "${cmd}")"
+  fi
+}
+
 create_named_vps_remote_install() {
   safe_source_env
   local rc tmp summary
@@ -1170,7 +1180,11 @@ create_named_vps_remote_install() {
   fi
   rm -f "${runner}"
 
-  run_with_live_progress "$(T "Ожидание и validate ${node_name}" "Waiting and validating ${node_name}")" wait_for_machine_and_validate "${node_name}" 300 || true
+  if run_with_live_progress "$(T "Ожидание и validate ${node_name}" "Waiting and validating ${node_name}")" wait_for_machine_and_validate "${node_name}" 300; then
+    run_with_live_progress "$(T "Перезапуск CrowdSec на VPS после validate" "Restarting CrowdSec on VPS after validate")" remote_restart_vps_services_after_validate || true
+  else
+    warn "$(T "Machine не была подтверждена автоматически. После ручного validate перезапусти CrowdSec на VPS." "Machine was not validated automatically. After manual validate, restart CrowdSec on the VPS.")"
+  fi
 
   tmp="$(mktemp)"
   {

@@ -130,7 +130,7 @@ change_language() {
 CONFIG_DIR="/root/crowdsec-vps-node"
 ENV_FILE="${CONFIG_DIR}/node.env"
 FAIL2BAN_BACKUP_DIR="${CONFIG_DIR}/fail2ban-backup"
-SCRIPT_VERSION="v0.4-i18n-unattended-notty"
+SCRIPT_VERSION="v0.4.1-i18n-unattended-validate-restart"
 SCRIPT_RELEASE_DATE="2026-05-22"
 LOCK_FILE="/var/lock/crowdsec-vps-node.lock"
 LOCK_FD=200
@@ -1015,7 +1015,24 @@ test_config() {
 restart_services() {
   log "Перезапускаю сервисы..."
   systemctl reset-failed crowdsec || true
+
+  local crowdsec_rc=0
+  set +e
   systemctl restart crowdsec
+  crowdsec_rc=$?
+  set -e
+
+  if [[ "${crowdsec_rc}" -ne 0 ]]; then
+    if [[ "${CROWDSEC_VPS_UNATTENDED:-0}" == "1" ]]; then
+      warn "CrowdSec пока не запустился. При удалённой установке это обычно означает, что machine ещё не подтверждена на central LAPI."
+      warn "Central продолжит установку, выполнит validate, затем перезапустит CrowdSec на VPS."
+      systemctl status crowdsec --no-pager -l || true
+      journalctl -u crowdsec --no-pager -n 80 || true
+    else
+      return "${crowdsec_rc}"
+    fi
+  fi
+
   if [[ "${INSTALL_FIREWALL_BOUNCER}" == "yes" ]]; then
     systemctl restart crowdsec-firewall-bouncer || true
   fi
@@ -1249,6 +1266,7 @@ manage_existing_installation() {
 run_unattended_install() {
   export DEBIAN_FRONTEND=noninteractive
   export TERM="${TERM:-xterm}"
+  export CROWDSEC_VPS_UNATTENDED=1
   require_root
   acquire_lock
   load_saved_language || true
