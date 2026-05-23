@@ -149,12 +149,13 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.6.7-i18n-device-management"
+SCRIPT_VERSION="v0.6.8-i18n-filtered-device-events"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
 SYSLOG_DEVICES_FILE="${CONFIG_DIR}/bouncer-syslog-devices.tsv"
 REMOTE_SYSLOG_DIR="/var/log/crowdsec-remote"
+REMOTE_SYSLOG_DIAG_DIR="/var/log/crowdsec-remote-diagnostic"
 DEFAULT_REMOTE_SYSLOG_PORT="5140"
 
 log() { echo "==> $*"; }
@@ -1386,39 +1387,63 @@ restart_crowdsec_runtime() {
 install_or_update_remote_syslog_receiver() {
   local port="${1:-${DEFAULT_REMOTE_SYSLOG_PORT}}"
   local proto="${2:-udp}"
-  local cfg_dir acquis_file rsyslog_conf logrotate_conf
+  local mode="${3:-filtered}"
+  local cfg_dir acquis_file rsyslog_conf logrotate_conf any_full="no"
 
   [[ "${port}" =~ ^[0-9]+$ ]] || fail "$(T "Некорректный порт syslog." "Invalid syslog port.")"
 
-  echo "Установка rsyslog и подготовка каталога удалённых логов..."
+  echo "Установка rsyslog и подготовка каталогов удалённых логов..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
   apt-get install -y rsyslog
 
-  mkdir -p "${REMOTE_SYSLOG_DIR}"
-  chmod 750 "${REMOTE_SYSLOG_DIR}"
+  mkdir -p "${REMOTE_SYSLOG_DIR}" "${REMOTE_SYSLOG_DIAG_DIR}"
+  chmod 750 "${REMOTE_SYSLOG_DIR}" "${REMOTE_SYSLOG_DIAG_DIR}"
+
+  if [[ -s "${SYSLOG_DEVICES_FILE}" ]] && awk -F'\t' '($5=="full"){found=1} END{exit found?0:1}' "${SYSLOG_DEVICES_FILE}"; then
+    any_full="yes"
+  fi
+  [[ "${mode}" == "full" ]] && any_full="yes"
 
   rsyslog_conf="/etc/rsyslog.d/30-crowdsec-remote-devices.conf"
   cat > "${rsyslog_conf}" <<EOF
 # Managed by crowdsec-central-menu.
-# Receives syslog from bouncer-only/API devices and writes it to files readable by CrowdSec.
+# Receives a COPY of remote syslog from routers/firewalls/bouncer-only devices.
+# By default only security/firewall/auth-like messages are written to CrowdSec intake.
+# Full diagnostic logging is optional and goes to ${REMOTE_SYSLOG_DIAG_DIR}, not to CrowdSec intake.
 module(load="imudp")
 input(type="imudp" port="${port}" ruleset="crowdsec_remote_devices")
 
 module(load="imtcp")
 input(type="imtcp" port="${port}" ruleset="crowdsec_remote_devices")
 
-template(name="CrowdSecRemoteDeviceFile" type="string" string="${REMOTE_SYSLOG_DIR}/%fromhost-ip%.log")
+template(name="CrowdSecRemoteSecurityFile" type="string" string="${REMOTE_SYSLOG_DIR}/%fromhost-ip%.security.log")
+template(name="CrowdSecRemoteDiagnosticFile" type="string" string="${REMOTE_SYSLOG_DIAG_DIR}/%fromhost-ip%.full.log")
 
 ruleset(name="crowdsec_remote_devices") {
-  action(type="omfile" dynaFile="CrowdSecRemoteDeviceFile" FileCreateMode="0640" DirCreateMode="0750")
+  # Keep only security/auth/firewall-ish events for CrowdSec:
+  # dropbear/sshd/login/auth failures and firewall/kernel/nftables/iptables drops/rejects.
+  if (
+      re_match(\$programname, "dropbear|sshd|firewall|fw3|fw4|kernel|nft|iptables") or
+      re_match(\$msg, "dropbear|sshd|auth|login|Login|failed|Failed|failure|invalid|Invalid|refused|Refused|denied|Denied|DROP|Drop|drop|REJECT|Reject|reject|blocked|Blocked|ban|Ban|nft|iptables|firewall|Firewall|kernel")
+     ) then {
+    action(type="omfile" dynaFile="CrowdSecRemoteSecurityFile" FileCreateMode="0640" DirCreateMode="0750")
+  }
+EOF
+  if [[ "${any_full}" == "yes" ]]; then
+    cat >> "${rsyslog_conf}" <<EOF
+  # Optional full diagnostic copy. This file is NOT read by CrowdSec acquisition.
+  action(type="omfile" dynaFile="CrowdSecRemoteDiagnosticFile" FileCreateMode="0640" DirCreateMode="0750")
+EOF
+  fi
+  cat >> "${rsyslog_conf}" <<'EOF'
   stop
 }
 EOF
 
   logrotate_conf="/etc/logrotate.d/crowdsec-remote-devices"
   cat > "${logrotate_conf}" <<EOF
-${REMOTE_SYSLOG_DIR}/*.log {
+${REMOTE_SYSLOG_DIR}/*.log ${REMOTE_SYSLOG_DIAG_DIR}/*.log {
     daily
     rotate 14
     missingok
@@ -1441,9 +1466,10 @@ EOF
   acquis_file="${cfg_dir}/acquis.d/remote-syslog-devices.yaml"
   cat > "${acquis_file}" <<EOF
 # Managed by crowdsec-central-menu.
-# Logs received by host rsyslog from routers/firewalls/bouncer-only devices.
+# Filtered security/firewall/auth logs received by host rsyslog from routers/firewalls/bouncer-only devices.
+# Full diagnostic logs are intentionally not read by CrowdSec.
 source: file
-filename: ${REMOTE_SYSLOG_DIR}/*.log
+filename: ${REMOTE_SYSLOG_DIR}/*.security.log
 labels:
   type: syslog
   service: remote-device
@@ -1451,18 +1477,22 @@ EOF
 
   echo "Acquisition создан: ${acquis_file}"
   restart_crowdsec_runtime || true
-  echo "Syslog intake готов на порту ${port}/udp и ${port}/tcp."
+  echo "Filtered syslog intake готов на порту ${port}/udp и ${port}/tcp."
+  if [[ "${any_full}" == "yes" ]]; then
+    echo "Full diagnostic copy включена: ${REMOTE_SYSLOG_DIAG_DIR}/*.full.log"
+  fi
 }
 
 record_remote_syslog_device() {
-  local name="$1" cidr="$2" port="$3" proto="$4"
+  local name="$1" cidr="$2" port="$3" proto="$4" mode="${5:-filtered}"
+  case "${mode}" in filtered|full) ;; *) mode="filtered" ;; esac
   mkdir -p "${CONFIG_DIR}"
   chmod 700 "${CONFIG_DIR}"
   touch "${SYSLOG_DEVICES_FILE}"
   chmod 600 "${SYSLOG_DEVICES_FILE}"
   awk -F'\t' -v name="${name}" '($1 != name)' "${SYSLOG_DEVICES_FILE}" >"${SYSLOG_DEVICES_FILE}.tmp" || true
   mv "${SYSLOG_DEVICES_FILE}.tmp" "${SYSLOG_DEVICES_FILE}"
-  printf '%s\t%s\t%s\t%s\t%s\n' "${name}" "${cidr}" "${port}" "${proto}" "$(date -Is)" >>"${SYSLOG_DEVICES_FILE}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${cidr}" "${port}" "${proto}" "${mode}" "$(date -Is)" >>"${SYSLOG_DEVICES_FILE}"
 }
 
 show_remote_syslog_devices() {
@@ -1472,17 +1502,16 @@ show_remote_syslog_devices() {
     echo "$(T "Устройства, которым открыт syslog intake на central:" "Devices allowed to send syslog to central:")"
     echo
     if [[ -s "${SYSLOG_DEVICES_FILE}" ]]; then
-      awk -F'\t' 'BEGIN {printf "%-28s %-24s %-8s %-8s %s\n", "NAME", "CIDR", "PORT", "PROTO", "ADDED"} {printf "%-28s %-24s %-8s %-8s %s\n", $1, $2, $3, $4, $5}' "${SYSLOG_DEVICES_FILE}"
+      awk -F'\t' 'BEGIN {printf "%-28s %-24s %-8s %-8s %-10s %s\n", "NAME", "CIDR", "PORT", "PROTO", "MODE", "ADDED"} {mode=$5; added=$6; if (mode=="" || mode ~ /^20/) {added=mode; mode="filtered"}; printf "%-28s %-24s %-8s %-8s %-10s %s\n", $1, $2, $3, $4, mode, added}' "${SYSLOG_DEVICES_FILE}"
     else
       echo "$(T "Пока нет устройств syslog." "No syslog devices yet.")"
     fi
     echo
-    echo "$(T "Важно: bouncer сам не отправляет события в CrowdSec. Для событий в CrowdSec Manager устройство должно отправлять syslog на central, а central должен читать эти логи через acquis." "Important: a bouncer does not send events to CrowdSec. To see events in CrowdSec Manager, the device must send syslog to central and central must read those logs through acquis.")"
+    echo "$(T "Важно: bouncer сам не отправляет события. OpenWrt/устройство отправляет копию syslog на central, локальный logread на устройстве при этом остаётся. По умолчанию central пишет в CrowdSec только отфильтрованные security/firewall/auth события, а не весь лог." "Important: a bouncer does not send events. OpenWrt/the device sends a syslog copy to central, while local logread on the device remains available. By default central writes only filtered security/firewall/auth events to CrowdSec, not the full log.")"
   } > "${tmp}"
   show_file "$(T "Syslog устройства" "Syslog devices")" "${tmp}"
   rm -f "${tmp}"
 }
-
 
 
 create_openwrt_bouncer_connection() {
@@ -1513,21 +1542,11 @@ create_openwrt_bouncer_connection() {
     set -e
     [[ "${rc}" -eq 0 ]] || return 0
 
-    if whiptail --title " $(T "Syslog в CrowdSec Manager" "Syslog in CrowdSec Manager") " --yes-button "$(T "Да" "Yes")" --no-button "$(T "Нет" "No")" --yesno "$(T "Bouncer сам не отправляет события в CrowdSec. Он только забирает decisions.\n\nЧтобы в CrowdSec Manager появились события от роутера/устройства, central должен принимать syslog от этого устройства.\n\nНастроить syslog intake на central и показать команды для устройства?" "A bouncer does not send events to CrowdSec. It only pulls decisions.\n\nTo see events from the router/device in CrowdSec Manager, central must receive syslog from that device.\n\nConfigure syslog intake on central and show device commands?")" 15 94; then
-      syslog_enable_raw="yes"
-      set +e
-      syslog_port_raw="$(whiptail --title " $(T "Syslog порт" "Syslog port") " --inputbox "$(T "Порт syslog на central.\n\n5140 выбран специально, чтобы не занимать привилегированный 514." "Syslog port on central.\n\n5140 is used to avoid the privileged 514 port.")" 11 86 "${DEFAULT_REMOTE_SYSLOG_PORT}" 3>&1 1>&2 2>&3)"
-      rc=$?
-      set -e
-      [[ "${rc}" -eq 0 ]] || return 0
-      syslog_proto_raw="both"
-    else
-      syslog_enable_raw="no"
-      syslog_port_raw="${DEFAULT_REMOTE_SYSLOG_PORT}"
-      syslog_proto_raw="both"
-    fi
+    syslog_enable_raw="no"
+    syslog_port_raw="${DEFAULT_REMOTE_SYSLOG_PORT}"
+    syslog_proto_raw="both"
 
-    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Создать" "Create")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Central создаст отдельный bouncer key и добавит IP/CIDR устройства в доступ к LAPI.\n\nЕсли включён syslog intake, central также настроит rsyslog и CrowdSec acquisition для удалённых логов.\n\nПродолжить?" "Central will create a dedicated bouncer key and add the device IP/CIDR to LAPI access.\n\nIf syslog intake is enabled, central will also configure rsyslog and CrowdSec acquisition for remote logs.\n\nContinue?")" 15 92 || return 0
+    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Создать" "Create")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Central создаст отдельный bouncer key и добавит IP/CIDR устройства в доступ к LAPI.\n\nСобытия от роутера/устройства НЕ включаются автоматически. Если нужны события, включи их отдельно в меню: События от роутера/устройства -> Включить filtered syslog intake.\n\nПродолжить?" "Central will create a dedicated bouncer key and add the device IP/CIDR to LAPI access.\n\nEvents from the router/device are NOT enabled automatically. If events are needed, enable them separately in the menu: Router/device event intake -> Enable filtered syslog intake.\n\nContinue?")" 16 92 || return 0
   else
     read -rp "$(T "Имя устройства / bouncer name [bouncer-device]: " "Device / bouncer name [bouncer-device]: ")" router_name_raw || return 0
     router_name_raw="${router_name_raw:-bouncer-device}"
@@ -1536,10 +1555,9 @@ create_openwrt_bouncer_connection() {
     [[ -n "${PUBLIC_LAPI_URL:-}" ]] && default_lapi="${VPS_LAPI_URL}"
     read -rp "$(T "LAPI URL для устройства [${default_lapi}]: " "LAPI URL for device [${default_lapi}]: ")" lapi_url_raw || return 0
     lapi_url_raw="${lapi_url_raw:-${default_lapi}}"
-    read -rp "$(T "Настроить syslog intake на central для событий в Manager? [Y/n]: " "Configure syslog intake on central for events in Manager? [Y/n]: ")" syslog_enable_raw || syslog_enable_raw="yes"
-    case "${syslog_enable_raw:-yes}" in n|N|no|NO|No) syslog_enable_raw="no" ;; *) syslog_enable_raw="yes" ;; esac
-    read -rp "$(T "Syslog port на central [${DEFAULT_REMOTE_SYSLOG_PORT}]: " "Syslog port on central [${DEFAULT_REMOTE_SYSLOG_PORT}]: ")" syslog_port_raw || syslog_port_raw="${DEFAULT_REMOTE_SYSLOG_PORT}"
-    syslog_port_raw="${syslog_port_raw:-${DEFAULT_REMOTE_SYSLOG_PORT}}"
+    echo "$(T "События от устройства не включаются при добавлении bouncer. Их можно включить отдельно в меню событий." "Device events are not enabled while adding a bouncer. You can enable them separately in the event intake menu.")"
+    syslog_enable_raw="no"
+    syslog_port_raw="${DEFAULT_REMOTE_SYSLOG_PORT}"
     syslog_proto_raw="both"
   fi
 
@@ -1648,7 +1666,7 @@ create_openwrt_bouncer_connection() {
       echo "central_syslog_host=${LAN_IP}"
       echo "central_syslog_port=${syslog_port_raw}"
       echo "central_syslog_protocol=${syslog_proto_raw}"
-      echo "central_log_files=${REMOTE_SYSLOG_DIR}/*.log"
+      echo "central_filtered_log_files=${REMOTE_SYSLOG_DIR}/*.security.log"
       echo
       echo "$(T "Важно: именно syslog нужен для появления событий/метрик устройства в CrowdSec Manager. Один bouncer показывает только Connected/Last Pull и не отправляет логи." "Important: syslog is required for the device events/metrics to appear in CrowdSec Manager. A bouncer alone only shows Connected/Last Pull and does not send logs.")"
       echo
@@ -1660,7 +1678,7 @@ create_openwrt_bouncer_connection() {
       echo "/etc/init.d/log restart"
       echo
       echo "$(T "Проверка поступления логов на central:" "Check log flow on central:")"
-      echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/${vps_ip}.log"
+      echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/${vps_ip}.security.log"
       echo "sudo docker exec crowdsec cscli metrics"
       echo
     else
@@ -2051,7 +2069,7 @@ configure_ufw_full_apply() {
 
   if [[ -s "${SYSLOG_DEVICES_FILE}" ]]; then
     echo "Открытие syslog intake для устройств с bouncer/API..."
-    while IFS=$'\t' read -r syslog_name syslog_cidr syslog_port syslog_proto _; do
+    while IFS=$'\t' read -r syslog_name syslog_cidr syslog_port syslog_proto syslog_mode _; do
       [[ -n "${syslog_cidr:-}" && -n "${syslog_port:-}" ]] || continue
       case "${syslog_proto:-both}" in
         udp)
@@ -3980,29 +3998,47 @@ check_bouncer_device_status() {
 
 configure_device_event_intake() {
   safe_source_env
-  local rec name ip cidr port proto tmp
+  local rec name ip cidr port proto mode tmp
   if ! select_bouncer_device_record rec "$(T "Включить события от устройства" "Enable device event intake")"; then return 0; fi
   name="$(printf '%s' "${rec}" | cut -f2)"
   ip="$(printf '%s' "${rec}" | cut -f3)"
   if [[ "${ip}" == *:* ]]; then cidr="${ip}/128"; else cidr="${ip}/32"; fi
   port="${DEFAULT_REMOTE_SYSLOG_PORT}"
   proto="both"
+  mode="filtered"
+
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    whiptail --title " $(T "События от устройства" "Device events") " --yes-button "$(T "Понимаю" "I understand")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Bouncer не отправляет события.\n\nДля событий central может принимать удалённый syslog от устройства. Это отдельный режим: включай его только если ты понимаешь, какие логи отправляет устройство.\n\nСкрипт настроит central на приём syslog только через firewall-правило для IP/CIDR этого устройства и покажет команды для устройства. Сам роутер он не изменит." "A bouncer does not send events.\n\nFor events, central can receive remote syslog from the device. This is a separate mode: enable it only if you understand what logs the device sends.\n\nThe script will configure central to receive syslog only through firewall rules for this device IP/CIDR and will show commands for the device. It will not change the router itself.")" 18 96 || return 0
-    port="$(whiptail --title " $(T "Syslog порт" "Syslog port") " --inputbox "$(T "Порт syslog на central" "Syslog port on central")" 10 80 "${DEFAULT_REMOTE_SYSLOG_PORT}" 3>&1 1>&2 2>&3)" || return 0
+    mode="$(whiptail --title " $(T "Режим логов устройства" "Device log mode") " \
+      --cancel-button "$(T "Отмена" "Cancel")" --ok-button "$(T "Выбрать" "Select")" --notags \
+      --menu "$(T "Выберите режим.\n\nFiltered security events - рекомендуемый режим. Устройство отправляет копию syslog на central, но central пишет в CrowdSec только security/firewall/auth строки. Локальный logread на OpenWrt остаётся.\n\nFull diagnostic syslog - весь syslog пишется только в диагностический файл, а CrowdSec всё равно читает только filtered security файл." "Choose mode.\n\nFiltered security events - recommended. The device sends a syslog copy to central, but central writes only security/firewall/auth lines to CrowdSec. Local OpenWrt logread remains.\n\nFull diagnostic syslog - full syslog is written only to a diagnostic file, while CrowdSec still reads only the filtered security file.")" \
+      22 100 2 \
+      "filtered" "$(T "Только security/firewall/auth события для CrowdSec" "Only security/firewall/auth events for CrowdSec")" \
+      "full" "$(T "Filtered для CrowdSec + полный диагностический лог отдельно" "Filtered for CrowdSec + separate full diagnostic log")" \
+      3>&1 1>&2 2>&3)" || return 0
+
+    port="$(whiptail --title " $(T "Syslog порт" "Syslog port") " --inputbox "$(T "Порт syslog на central.\n\n5140 выбран специально, чтобы не занимать привилегированный 514." "Syslog port on central.\n\n5140 is used to avoid the privileged 514 port.")" 11 86 "${DEFAULT_REMOTE_SYSLOG_PORT}" 3>&1 1>&2 2>&3)" || return 0
+
+    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Включить" "Enable")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Скрипт настроит central на приём копии syslog от выбранного устройства.\n\nПо умолчанию в CrowdSec попадут только отфильтрованные security/firewall/auth события. Весь лог НЕ будет читаться CrowdSec.\n\nСкрипт НЕ меняет роутер автоматически, а только покажет команды UCI." "The script will configure central to receive a syslog copy from the selected device.\n\nBy default only filtered security/firewall/auth events go to CrowdSec. The full log is NOT read by CrowdSec.\n\nThe script does NOT change the router automatically, it only shows UCI commands.")" 17 96 || return 0
   else
+    echo "$(T "Режим логов:" "Log mode:")"
+    echo "1) filtered - $(T "только security/firewall/auth события для CrowdSec" "only security/firewall/auth events for CrowdSec")"
+    echo "2) full - $(T "filtered для CrowdSec + полный диагностический лог отдельно" "filtered for CrowdSec + separate full diagnostic log")"
+    read -rp "$(T "Выбор [1/2]: " "Choice [1/2]: ")" mode || return 0
+    case "${mode}" in 2|full) mode="full" ;; *) mode="filtered" ;; esac
     read -rp "$(T "Syslog port на central [${DEFAULT_REMOTE_SYSLOG_PORT}]: " "Syslog port on central [${DEFAULT_REMOTE_SYSLOG_PORT}]: ")" port || return 0
     port="${port:-${DEFAULT_REMOTE_SYSLOG_PORT}}"
   fi
+
   port="$(printf '%s' "${port}" | tr -cd '0-9')"
   is_valid_port "${port}" || fail "$(T "Некорректный syslog port." "Invalid syslog port.")"
+  case "${mode}" in filtered|full) ;; *) mode="filtered" ;; esac
 
   configure_device_event_intake_apply() {
-    install_or_update_remote_syslog_receiver "${port}" "${proto}"
-    record_remote_syslog_device "${name}" "${cidr}" "${port}" "${proto}"
+    record_remote_syslog_device "${name}" "${cidr}" "${port}" "${proto}" "${mode}"
+    install_or_update_remote_syslog_receiver "${port}" "${proto}" "${mode}"
     configure_ufw_full
   }
-  run_with_live_progress "$(T "Настройка intake событий" "Configuring event intake")" configure_device_event_intake_apply || return 1
+  run_with_live_progress "$(T "Настройка filtered intake событий" "Configuring filtered event intake")" configure_device_event_intake_apply || return 1
 
   tmp="$(mktemp)"
   {
@@ -4010,25 +4046,36 @@ configure_device_event_intake() {
     echo
     echo "Device: ${name}"
     echo "Allowed IP/CIDR: ${cidr}"
+    echo "Mode: ${mode}"
     echo "Central syslog host: ${LAN_IP}"
     echo "Central syslog port: ${port}"
     echo
-    echo "OpenWrt 25 отправка syslog на central:"
+    echo "$(T "Как это работает:" "How it works:")"
+    echo "$(T "OpenWrt отправляет КОПИЮ syslog на central. Локальный logread на OpenWrt остаётся. Central фильтрует поток и отдаёт CrowdSec только security/firewall/auth события." "OpenWrt sends a syslog COPY to central. Local OpenWrt logread remains. Central filters the stream and gives CrowdSec only security/firewall/auth events.")"
+    echo
+    echo "OpenWrt 25 отправка syslog copy на central:"
     echo "uci set system.@system[0].log_ip='${LAN_IP}'"
     echo "uci set system.@system[0].log_port='${port}'"
     echo "uci set system.@system[0].log_proto='udp'"
     echo "uci commit system"
     echo "/etc/init.d/log restart"
     echo
-    echo "OpenWrt 25 отключить отправку обратно:"
+    echo "OpenWrt 25 отключить remote syslog обратно:"
     echo "uci delete system.@system[0].log_ip 2>/dev/null"
     echo "uci delete system.@system[0].log_port 2>/dev/null"
     echo "uci delete system.@system[0].log_proto 2>/dev/null"
     echo "uci commit system"
     echo "/etc/init.d/log restart"
     echo
-    echo "Проверка на central:"
-    echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/${ip}.log"
+    echo "Filtered log for CrowdSec:"
+    echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/${ip}.security.log"
+    if [[ "${mode}" == "full" ]]; then
+      echo
+      echo "Full diagnostic log, NOT read by CrowdSec:"
+      echo "sudo tail -f ${REMOTE_SYSLOG_DIAG_DIR}/${ip}.full.log"
+    fi
+    echo
+    echo "CrowdSec check:"
     echo "sudo docker exec crowdsec cscli metrics"
   } >"${tmp}"
   show_file "$(T "События от устройства" "Device events")" "${tmp}"
@@ -4050,6 +4097,16 @@ disable_device_event_intake() {
       awk -F'\t' -v name="${name}" '($1 != name)' "${SYSLOG_DEVICES_FILE}" >"${SYSLOG_DEVICES_FILE}.tmp" || true
       mv "${SYSLOG_DEVICES_FILE}.tmp" "${SYSLOG_DEVICES_FILE}"
     fi
+        if [[ ! -s "${SYSLOG_DEVICES_FILE}" ]]; then
+      rm -f /etc/rsyslog.d/30-crowdsec-remote-devices.conf /etc/logrotate.d/crowdsec-remote-devices
+      rm -f "$(get_crowdsec_config_dir)/acquis.d/remote-syslog-devices.yaml" 2>/dev/null || true
+      systemctl restart rsyslog 2>/dev/null || true
+      restart_crowdsec_runtime || true
+    else
+      local first_port first_proto first_mode
+      IFS=$'\t' read -r _ _ first_port first_proto first_mode _ < "${SYSLOG_DEVICES_FILE}" || true
+      install_or_update_remote_syslog_receiver "${first_port:-${DEFAULT_REMOTE_SYSLOG_PORT}}" "${first_proto:-both}" "${first_mode:-filtered}"
+    fi
     configure_ufw_full
   }
   run_with_live_progress "$(T "Отключение intake событий" "Disabling event intake")" disable_device_event_intake_apply || return 1
@@ -4065,13 +4122,20 @@ show_device_event_logs() {
   {
     echo "Device: ${name} [${ip}]"
     echo
-    echo "Log file: ${REMOTE_SYSLOG_DIR}/${ip}.log"
+    echo "Filtered security/firewall/auth log for CrowdSec: ${REMOTE_SYSLOG_DIR}/${ip}.security.log"
     echo
-    if [[ -f "${REMOTE_SYSLOG_DIR}/${ip}.log" ]]; then
-      echo "Last 120 lines:"
-      tail -n 120 "${REMOTE_SYSLOG_DIR}/${ip}.log"
+    if [[ -f "${REMOTE_SYSLOG_DIR}/${ip}.security.log" ]]; then
+      echo "Last 120 filtered lines:"
+      tail -n 120 "${REMOTE_SYSLOG_DIR}/${ip}.security.log"
     else
-      echo "$(T "Файл логов пока не найден. Проверь, что устройство отправляет syslog на central и UFW разрешает порт." "Log file not found yet. Check that the device sends syslog to central and UFW allows the port.")"
+      echo "$(T "Filtered файл логов пока не найден. Проверь, что устройство отправляет syslog на central, UFW разрешает порт, и в логе есть security/firewall/auth события." "Filtered log file not found yet. Check that the device sends syslog to central, UFW allows the port, and the log contains security/firewall/auth events.")"
+    fi
+    echo
+    echo "Full diagnostic log, if enabled: ${REMOTE_SYSLOG_DIAG_DIR}/${ip}.full.log"
+    if [[ -f "${REMOTE_SYSLOG_DIAG_DIR}/${ip}.full.log" ]]; then
+      echo
+      echo "Last 60 diagnostic lines:"
+      tail -n 60 "${REMOTE_SYSLOG_DIAG_DIR}/${ip}.full.log"
     fi
     echo
     echo "CrowdSec metrics:"
@@ -4107,8 +4171,8 @@ manage_device_events_menu() {
   local choice
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
     choice="$(whiptail --title " $(T "События от роутера/устройства" "Router/device event intake") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 19 94 5 \
-      "enable" "$(T "Включить remote syslog intake для устройства" "Enable remote syslog intake for a device")" \
-      "disable" "$(T "Отключить remote syslog intake для устройства" "Disable remote syslog intake for a device")" \
+      "enable" "$(T "Включить filtered syslog intake для устройства" "Enable filtered syslog intake for a device")" \
+      "disable" "$(T "Отключить syslog intake для устройства" "Disable syslog intake for a device")" \
       "show" "$(T "Показать настроенные syslog intake" "Show configured syslog intake")" \
       "logs" "$(T "Показать последние события устройства" "Show latest device events")" \
       3>&1 1>&2 2>&3)" || return 0
