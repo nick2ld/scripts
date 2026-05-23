@@ -3593,10 +3593,10 @@ menu_loop_whiptail() {
             "update_webui" "$(T "Обновить CrowdSec Manager" "Update CrowdSec Manager")" \
             "logs" "$(T "Показать логи Manager и CrowdSec" "Show Manager and CrowdSec logs")" \
             "reapply" "$(T "Повторно применить все настройки" "Reapply all settings")" \
-            "update_all" "$(T "Обновить весь стек" "Update full stack")" \
+            "update_all" "$(T "Обновить весь Dockerized stack" "Update full Dockerized stack")" \
             "update_system" "$(T "Обновить пакеты Debian" "Update Debian packages")" \
             "update_docker" "$(T "Обновить Docker" "Update Docker")" \
-            "update_crowdsec" "$(T "Обновить CrowdSec" "Update CrowdSec")" \
+            "update_crowdsec" "$(T "Обновить Dockerized CrowdSec" "Update Dockerized CrowdSec")" \
             "versions" "$(T "Показать версии ПО" "Show software versions")" \
             "syslog_devices" "$(T "Показать syslog intake" "Show syslog intake")" \
             3>&1 1>&2 2>&3)" || break
@@ -4255,11 +4255,12 @@ PY
     echo "CrowdSec allowlist parser written: ${parser_file}"
   fi
 
-  echo "Testing CrowdSec configuration..."
+  echo "Testing CrowdSec configuration inside Docker engine..."
   if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
     docker exec crowdsec crowdsec -c /etc/crowdsec/config.yaml -t
-  elif command -v crowdsec >/dev/null 2>&1; then
-    crowdsec -c /etc/crowdsec/config.yaml -t
+  else
+    echo "ERROR: container crowdsec is not running; host crowdsec is intentionally not used." >&2
+    return 1
   fi
 
   echo "Restarting CrowdSec runtime..."
@@ -4761,14 +4762,14 @@ action_description() {
     bouncer_key) T "Перегенерирует shared bouncer key. Индивидуальные bouncer keys устройств не меняет, но shared-key подключения потребуется обновить." "Regenerates the shared bouncer key. Individual device bouncer keys are not changed, but shared-key connections must be updated." ;;
     firewall) T "Показывает текущие правила UFW/firewall central: SSH, Web UI, LAPI и syslog intake." "Shows current central UFW/firewall rules: SSH, Web UI, LAPI and syslog intake." ;;
     test_lapi) T "Проверяет доступ CrowdSec Manager/Web UI к LAPI. Используй, если Manager показывает LAPI Offline." "Tests CrowdSec Manager/Web UI access to LAPI. Use it if Manager shows LAPI Offline." ;;
-    restart) T "Перезапускает CrowdSec, Docker контейнеры и Web UI. Используй после изменений или при зависании сервисов." "Restarts CrowdSec, Docker containers and Web UI. Use after changes or if services hang." ;;
+    restart) T "Перезапускает Dockerized CrowdSec Manager stack: контейнеры crowdsec и crowdsec-manager." "Restarts the Dockerized CrowdSec Manager stack: crowdsec and crowdsec-manager containers." ;;
     update_webui) T "Обновляет только CrowdSec Manager/Web UI контейнер, не трогая весь сервер." "Updates only the CrowdSec Manager/Web UI container, without touching the whole server." ;;
     logs) T "Показывает логи CrowdSec и Manager. Это основной пункт для поиска причин ошибок." "Shows CrowdSec and Manager logs. This is the main place to investigate errors." ;;
-    reapply) T "Повторно применяет сохранённые настройки: LAPI config, Docker, UFW и связанные параметры." "Reapplies saved settings: LAPI config, Docker, UFW and related parameters." ;;
-    update_all) T "Обновляет весь стек: системные пакеты, Docker, CrowdSec и Web UI. Используй для полного обслуживания." "Updates the full stack: system packages, Docker, CrowdSec and Web UI. Use for full maintenance." ;;
+    reapply) T "Повторно применяет настройки Dockerized CrowdSec: LAPI config, shared bouncer, UFW и команду меню." "Reapplies Dockerized CrowdSec settings: LAPI config, shared bouncer, UFW and menu command." ;;
+    update_all) T "Обновляет весь стек: системные пакеты, Docker, Dockerized CrowdSec Manager и firewall. Host CrowdSec/cscli не ставится." "Updates the full stack: system packages, Docker, Dockerized CrowdSec Manager and firewall. Host CrowdSec/cscli is not installed." ;;
     update_system) T "Обновляет пакеты Debian/Ubuntu через apt." "Updates Debian/Ubuntu packages through apt." ;;
     update_docker) T "Обновляет Docker и docker compose plugin." "Updates Docker and the docker compose plugin." ;;
-    update_crowdsec) T "Обновляет CrowdSec engine и связанные пакеты из репозитория CrowdSec." "Updates CrowdSec engine and related packages from the CrowdSec repository." ;;
+    update_crowdsec) T "Обновляет Dockerized CrowdSec engine внутри контейнера crowdsec. Host CrowdSec/cscli не устанавливается и не используется." "Updates the Dockerized CrowdSec engine inside the crowdsec container. Host CrowdSec/cscli is not installed or used." ;;
     versions) T "Показывает версии ОС, Docker, CrowdSec внутри контейнера и контейнеров. Host cscli не нужен." "Shows OS, Docker, CrowdSec inside the container and container versions. Host cscli is not needed." ;;
     repair_menu) T "Скачивает свежий central.sh из GitHub, проверяет синтаксис и устанавливает его как /usr/local/sbin/crowdsec-central-menu. Используй для обновления самого скрипта меню." "Downloads the latest central.sh from GitHub, checks syntax, and installs it as /usr/local/sbin/crowdsec-central-menu. Use it to update the menu script itself." ;;
     language) T "Меняет язык интерфейса и сохраняет выбор в central.env." "Changes interface language and saves the choice to central.env." ;;
@@ -5042,10 +5043,10 @@ menu_loop_whiptail() {
             "update_webui" "$(T "Обновить CrowdSec Manager" "Update CrowdSec Manager")" "$(action_description update_webui)" \
             "logs" "$(T "Показать логи" "Show logs")" "$(action_description logs)" \
             "reapply" "$(T "Повторно применить настройки" "Reapply settings")" "$(action_description reapply)" \
-            "update_all" "$(T "Обновить весь стек" "Update full stack")" "$(action_description update_all)" \
+            "update_all" "$(T "Обновить весь Dockerized stack" "Update full Dockerized stack")" "$(action_description update_all)" \
             "update_system" "$(T "Обновить Debian packages" "Update Debian packages")" "$(action_description update_system)" \
             "update_docker" "$(T "Обновить Docker" "Update Docker")" "$(action_description update_docker)" \
-            "update_crowdsec" "$(T "Обновить CrowdSec" "Update CrowdSec")" "$(action_description update_crowdsec)" \
+            "update_crowdsec" "$(T "Обновить Dockerized CrowdSec" "Update Dockerized CrowdSec")" "$(action_description update_crowdsec)" \
             "versions" "$(T "Показать версии" "Show versions")" "$(action_description versions)" \
             "syslog_devices" "$(T "Показать syslog intake" "Show syslog intake")" "$(action_description syslog_devices)" \
             3>&1 1>&2 2>&3)" || break ;;
@@ -5332,14 +5333,14 @@ action_description() {
         bouncer_key) T "Перегенерирует shared bouncer key. Индивидуальные bouncer keys устройств не меняет, но shared-key подключения потребуется обновить." "Regenerates the shared bouncer key. Individual device bouncer keys are not changed, but shared-key connections must be updated." ;;
         firewall) T "Показывает текущие правила UFW/firewall central: SSH, Web UI, LAPI и syslog intake." "Shows current central UFW/firewall rules: SSH, Web UI, LAPI and syslog intake." ;;
         test_lapi) T "Проверяет доступ CrowdSec Manager/Web UI к LAPI. Используй, если Manager показывает LAPI Offline." "Tests CrowdSec Manager/Web UI access to LAPI. Use it if Manager shows LAPI Offline." ;;
-        restart) T "Перезапускает CrowdSec, Docker контейнеры и Web UI. Используй после изменений или при зависании сервисов." "Restarts CrowdSec, Docker containers and Web UI. Use after changes or if services hang." ;;
+        restart) T "Перезапускает Dockerized CrowdSec Manager stack: контейнеры crowdsec и crowdsec-manager." "Restarts the Dockerized CrowdSec Manager stack: crowdsec and crowdsec-manager containers." ;;
         update_webui) T "Обновляет только CrowdSec Manager/Web UI контейнер, не трогая весь сервер." "Updates only the CrowdSec Manager/Web UI container, without touching the whole server." ;;
         logs) T "Показывает логи CrowdSec и Manager. Это основной пункт для поиска причин ошибок." "Shows CrowdSec and Manager logs. This is the main place to investigate errors." ;;
-        reapply) T "Повторно применяет сохранённые настройки: LAPI config, Docker, UFW и связанные параметры." "Reapplies saved settings: LAPI config, Docker, UFW and related parameters." ;;
-        update_all) T "Обновляет весь стек: системные пакеты, Docker, CrowdSec и Web UI. Используй для полного обслуживания." "Updates the full stack: system packages, Docker, CrowdSec and Web UI. Use for full maintenance." ;;
+        reapply) T "Повторно применяет настройки Dockerized CrowdSec: LAPI config, shared bouncer, UFW и команду меню." "Reapplies Dockerized CrowdSec settings: LAPI config, shared bouncer, UFW and menu command." ;;
+        update_all) T "Обновляет весь стек: системные пакеты, Docker, Dockerized CrowdSec Manager и firewall. Host CrowdSec/cscli не ставится." "Updates the full stack: system packages, Docker, Dockerized CrowdSec Manager and firewall. Host CrowdSec/cscli is not installed." ;;
         update_system) T "Обновляет пакеты Debian/Ubuntu через apt." "Updates Debian/Ubuntu packages through apt." ;;
         update_docker) T "Обновляет Docker и docker compose plugin." "Updates Docker and the docker compose plugin." ;;
-        update_crowdsec) T "Обновляет CrowdSec engine и связанные пакеты из репозитория CrowdSec." "Updates CrowdSec engine and related packages from the CrowdSec repository." ;;
+        update_crowdsec) T "Обновляет Dockerized CrowdSec engine внутри контейнера crowdsec. Host CrowdSec/cscli не устанавливается и не используется." "Updates the Dockerized CrowdSec engine inside the crowdsec container. Host CrowdSec/cscli is not installed or used." ;;
         versions) T "Показывает версии ОС, Docker, CrowdSec внутри контейнера и контейнеров. Host cscli не нужен." "Shows OS, Docker, CrowdSec inside the container and container versions. Host cscli is not needed." ;;
         repair_menu) T "Скачивает свежий central.sh из GitHub, проверяет синтаксис и устанавливает его как /usr/local/sbin/crowdsec-central-menu. Используй для обновления самого скрипта меню." "Downloads the latest central.sh from GitHub, checks syntax, and installs it as /usr/local/sbin/crowdsec-central-menu. Use it to update the menu script itself." ;;
         language) T "Меняет язык интерфейса и сохраняет выбор в central.env." "Changes interface language and saves the choice to central.env." ;;
@@ -5496,6 +5497,256 @@ manage_protection_menu() {
       info) show_action_intro crowdsec_info || continue; show_crowdsec_info ;;
     esac
   done
+}
+
+
+
+# -----------------------------------------------------------------------------
+# v0.7.6 CrowdSec Manager Docker audit/fix
+# -----------------------------------------------------------------------------
+# Final overrides below make this script consistently manage the CrowdSec engine
+# used by CrowdSec Manager: the Docker container named "crowdsec".
+# Host crowdsec/cscli is intentionally not used.
+
+SCRIPT_VERSION="v0.7.6-manager-docker-audit-fix"
+
+ensure_manager_paths() {
+  if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
+    return 0
+  fi
+  if [[ -f "${COMPOSE_FILE}" ]] && grep -q 'crowdsec-manager' "${COMPOSE_FILE}" 2>/dev/null; then
+    MANAGER_COMPOSE_DIR="${COMPOSE_DIR}"
+    MANAGER_COMPOSE_FILE="${COMPOSE_FILE}"
+    return 0
+  fi
+  MANAGER_COMPOSE_DIR="/opt/crowdsec-manager"
+  MANAGER_COMPOSE_FILE="${MANAGER_COMPOSE_DIR}/docker-compose.yml"
+}
+
+crowdsec_container_running() {
+  command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'
+}
+
+manager_container_running() {
+  command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec-manager'
+}
+
+require_crowdsec_container() {
+  if ! crowdsec_container_running; then
+    echo "$(T "ОШИБКА: контейнер crowdsec не запущен. Host cscli/crowdsec намеренно не используется, чтобы не управлять другим instance." "ERROR: the crowdsec container is not running. Host cscli/crowdsec is intentionally not used to avoid managing another instance.")" >&2
+    return 1
+  fi
+}
+
+crowdsec_cscli() {
+  require_crowdsec_container || return 1
+  docker exec crowdsec cscli "$@"
+}
+
+get_crowdsec_config_dir() {
+  ensure_manager_paths
+  if [[ -f "${MANAGER_COMPOSE_DIR}/crowdsec-config/config.yaml" ]]; then
+    printf '%s' "${MANAGER_COMPOSE_DIR}/crowdsec-config"
+  else
+    printf '%s' "${MANAGER_COMPOSE_DIR}/crowdsec-config"
+  fi
+}
+
+restart_crowdsec_runtime() {
+  ensure_manager_paths
+  if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
+    (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
+  elif crowdsec_container_running; then
+    docker restart crowdsec
+  else
+    echo "$(T "ОШИБКА: контейнер crowdsec не запущен. Нечего перезапускать." "ERROR: the crowdsec container is not running. Nothing to restart.")" >&2
+    return 1
+  fi
+}
+
+configure_crowdsec_lapi() {
+  configure_docker_crowdsec_lapi
+}
+
+configure_docker_crowdsec_lapi() {
+  safe_source_env
+  ensure_manager_paths
+  local config_file="${MANAGER_COMPOSE_DIR}/crowdsec-config/config.yaml"
+  [[ -f "${config_file}" ]] || fail "$(T "Не найден config.yaml Dockerized CrowdSec:" "Dockerized CrowdSec config.yaml not found:") ${config_file}"
+  [[ -n "${AUTO_REG_TOKEN:-}" ]] || { AUTO_REG_TOKEN="$(openssl rand -hex 32)"; save_env; }
+  AUTO_REG_TOKEN="${AUTO_REG_TOKEN}" ALLOWED_RANGES="${ALLOWED_RANGES}" LOCAL_LAPI_ALLOWED_RANGES="${LOCAL_LAPI_ALLOWED_RANGES}" python3 - "${config_file}" <<'PY'
+import os, re, sys, yaml
+path = sys.argv[1]
+with open(path, "r", errors="replace") as f:
+    cfg = yaml.safe_load(f) or {}
+cfg.setdefault("api", {})
+cfg["api"].setdefault("server", {})
+cfg["api"]["server"]["listen_uri"] = "0.0.0.0:8080"
+ranges = []
+for env_name in ("LOCAL_LAPI_ALLOWED_RANGES", "ALLOWED_RANGES"):
+    for item in os.environ.get(env_name, "").split(","):
+        item = re.sub(r"[^0-9A-Fa-f:.\/]", "", item.strip())
+        if item and item not in ranges:
+            ranges.append(item)
+cfg["api"]["server"]["auto_registration"] = {
+    "enabled": True,
+    "token": os.environ["AUTO_REG_TOKEN"],
+    "allowed_ranges": ranges,
+}
+with open(path, "w") as f:
+    yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+PY
+}
+
+write_crowdsec_manager_compose() {
+  ensure_manager_paths
+  mkdir -p "${MANAGER_COMPOSE_DIR}"
+  chmod 755 "${MANAGER_COMPOSE_DIR}"
+  mkdir -p "${MANAGER_COMPOSE_DIR}/crowdsec-db" "${MANAGER_COMPOSE_DIR}/crowdsec-config"
+  chmod 700 "${MANAGER_COMPOSE_DIR}/crowdsec-db" "${MANAGER_COMPOSE_DIR}/crowdsec-config"
+  cat >"${MANAGER_COMPOSE_FILE}" <<EOF
+services:
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    restart: unless-stopped
+    environment:
+      - COLLECTIONS=crowdsecurity/linux crowdsecurity/sshd
+      - GID=1000
+    ports:
+      - "${LAPI_PORT}:8080"
+    volumes:
+      - "${MANAGER_COMPOSE_DIR}/crowdsec-db:/var/lib/crowdsec/data"
+      - "${MANAGER_COMPOSE_DIR}/crowdsec-config:/etc/crowdsec"
+      - /var/log:/var/log:ro
+      - ${REMOTE_SYSLOG_DIR}:${REMOTE_SYSLOG_DIR}:ro
+    networks:
+      - crowdsec_net
+
+  crowdsec-manager:
+    image: ${MANAGER_IMAGE}
+    container_name: crowdsec-manager
+    restart: unless-stopped
+    ports:
+      - "${LAN_IP}:${WEB_PORT}:8080"
+    environment:
+      - PORT=8080
+      - ENVIRONMENT=production
+      - DATABASE_PATH=/app/data/settings.db
+      - CONFIG_DIR=/app/config
+      - BACKUP_DIR=/app/backups
+      - INCLUDE_CROWDSEC=true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - crowdsec-manager-data:/app/data
+      - crowdsec-manager-config:/app/config
+      - crowdsec-manager-backups:/app/backups
+    networks:
+      - crowdsec_net
+    depends_on:
+      - crowdsec
+
+volumes:
+  crowdsec-manager-data:
+  crowdsec-manager-config:
+  crowdsec-manager-backups:
+
+networks:
+  crowdsec_net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.16.238.0/24
+EOF
+}
+
+install_or_update_crowdsec_manager() {
+  safe_source_env
+  ensure_manager_paths
+  if [[ "${WEB_PORT}" == "${LAPI_PORT}" ]]; then
+    fail "$(T "Ошибка конфигурации: WEB_PORT и LAPI_PORT не могут быть одинаковыми." "Configuration error: WEB_PORT and LAPI_PORT cannot be the same.")"
+  fi
+
+  echo "Preparing Dockerized CrowdSec Manager in ${MANAGER_COMPOSE_DIR}"
+  backup_and_remove_apt_crowdsec || true
+  docker rm -f crowdsec-web-ui >/dev/null 2>&1 || true
+
+  write_crowdsec_manager_compose
+
+  echo "Pulling CrowdSec and CrowdSec Manager images..."
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose pull)
+
+  echo "Starting CrowdSec Manager stack..."
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d --remove-orphans)
+
+  echo "Waiting for CrowdSec config initialization..."
+  local waited=0
+  while [[ ! -f "${MANAGER_COMPOSE_DIR}/crowdsec-config/config.yaml" && "${waited}" -lt 40 ]]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  [[ -f "${MANAGER_COMPOSE_DIR}/crowdsec-config/config.yaml" ]] || fail "$(T "Контейнер crowdsec не создал config.yaml." "The crowdsec container did not create config.yaml.")"
+
+  echo "Applying LAPI allowed ranges and auto-registration token..."
+  configure_docker_crowdsec_lapi
+
+  echo "Restarting CrowdSec container..."
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
+
+  echo "Waiting for CrowdSec API..."
+  waited=0
+  until docker exec crowdsec cscli version >/dev/null 2>&1; do
+    sleep 1
+    waited=$((waited + 1))
+    (( waited < 60 )) || fail "$(T "CrowdSec container did not become ready." "CrowdSec container did not become ready.")"
+  done
+
+  [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || { SHARED_BOUNCER_KEY="$(openssl rand -hex 32)"; save_env; }
+  echo "Ensuring shared-firewall-bouncer exists in Docker engine..."
+  docker exec crowdsec cscli bouncers delete shared-firewall-bouncer >/dev/null 2>&1 || true
+  docker exec crowdsec cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
+
+  WEB_UI_TYPE="manager"
+  save_env
+  echo "CrowdSec Manager ready: http://${LAN_IP}:${WEB_PORT}"
+}
+
+restart_services_cmd() {
+  ensure_manager_paths
+  if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
+    (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d)
+    (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec crowdsec-manager) || true
+  else
+    docker restart crowdsec crowdsec-manager >/dev/null 2>&1 || {
+      echo "$(T "ОШИБКА: compose-файл CrowdSec Manager не найден и контейнеры не запущены." "ERROR: CrowdSec Manager compose file was not found and containers are not running.")" >&2
+      return 1
+    }
+  fi
+}
+
+reapply_all_settings_cmd() {
+  WEB_UI_TYPE="manager"
+  ensure_manager_paths
+  configure_docker_crowdsec_lapi
+  create_or_update_shared_bouncer_key
+  restart_crowdsec_runtime || true
+  configure_ufw_full
+  install_menu_files
+}
+
+update_crowdsec_only() {
+  run_menu_step "$(T "Обновление Dockerized CrowdSec engine" "Updating Dockerized CrowdSec engine")" install_or_update_crowdsec_manager
+}
+
+update_web_ui_only() {
+  run_menu_step "$(T "Обновление CrowdSec Manager" "Updating CrowdSec Manager")" install_or_update_crowdsec_manager
+}
+
+update_installed_stack() {
+  run_menu_step "$(T "Обновление Docker" "Updating Docker")" install_or_update_docker
+  run_menu_step "$(T "Обновление Dockerized CrowdSec + Manager" "Updating Dockerized CrowdSec + Manager")" install_or_update_crowdsec_manager
+  run_menu_step "$(T "Настройка Firewall" "Configuring Firewall")" configure_ufw_full
 }
 
 
