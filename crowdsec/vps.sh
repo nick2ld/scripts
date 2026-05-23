@@ -24,7 +24,7 @@ NC='\033[0m'
 CONFIG_DIR="/root/crowdsec-vps-node"
 ENV_FILE="${CONFIG_DIR}/node.env"
 FAIL2BAN_BACKUP_DIR="${CONFIG_DIR}/fail2ban-backup"
-SCRIPT_VERSION="v0.2-secure-live"
+SCRIPT_VERSION="v0.2-secure-live-inputfix"
 SCRIPT_RELEASE_DATE="2026-05-22"
 LOCK_FILE="/var/lock/crowdsec-vps-node.lock"
 LOCK_FD=200
@@ -187,14 +187,14 @@ tui_input() {
   whiptail --title " ${title} " --inputbox "${text}" 10 78 "${default}" 3>&1 1>&2 2>&3
 }
 
-tui_password() {
+tui_secret_input() {
   local title="$1"
   local text="$2"
   local default="${3:-}"
   if [[ -n "${default}" ]]; then
-    whiptail --title " ${title} " --passwordbox "${text}\n\nТекущее значение уже сохранено. Оставь поле пустым, чтобы сохранить его без изменений." 13 86 "" 3>&1 1>&2 2>&3
+    whiptail --title " ${title} " --inputbox "${text}\n\nТекущее значение уже сохранено. Можно вставить новое значение или оставить как есть." 13 86 "${default}" 3>&1 1>&2 2>&3
   else
-    whiptail --title " ${title} " --passwordbox "${text}" 10 78 "" 3>&1 1>&2 2>&3
+    whiptail --title " ${title} " --inputbox "${text}" 10 78 "" 3>&1 1>&2 2>&3
   fi
 }
 
@@ -351,11 +351,11 @@ ask_settings() {
     whiptail --title " CrowdSec VPS Node " --msgbox "Подключение VPS к центральному CrowdSec LAPI.\n\nДанные возьми в меню центрального сервера: sudo crowdsec-central-menu" 12 78
     CENTRAL_LAPI_URL="$(tui_input "Central LAPI" "Central LAPI URL" "${CENTRAL_LAPI_URL:-http://1.2.3.4:8080}")" || exit 1
     local new_auto_token new_bouncer_key
-    new_auto_token="$(tui_password "Central LAPI" "AUTO_REG_TOKEN" "${AUTO_REG_TOKEN:-}")" || exit 1
+    new_auto_token="$(tui_secret_input "Central LAPI" "AUTO_REG_TOKEN" "${AUTO_REG_TOKEN:-}")" || exit 1
     if [[ -n "${new_auto_token}" || -z "${AUTO_REG_TOKEN:-}" ]]; then
       AUTO_REG_TOKEN="${new_auto_token}"
     fi
-    new_bouncer_key="$(tui_password "Firewall Bouncer" "BOUNCER_KEY\n\nЛучше создать индивидуальное подключение на central:\nПодключения VPS и LAPI -> Создать подключение VPS.\nТогда имя будет видно в CrowdSec Manager." "${SHARED_BOUNCER_KEY:-}")" || exit 1
+    new_bouncer_key="$(tui_secret_input "Firewall Bouncer" "BOUNCER_KEY\n\nЛучше создать индивидуальное подключение на central:\nПодключения VPS и LAPI -> Создать подключение VPS.\nТогда имя будет видно в CrowdSec Manager." "${SHARED_BOUNCER_KEY:-}")" || exit 1
     if [[ -n "${new_bouncer_key}" || -z "${SHARED_BOUNCER_KEY:-}" ]]; then
       SHARED_BOUNCER_KEY="${new_bouncer_key}"
     fi
