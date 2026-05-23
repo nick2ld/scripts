@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.6.6-i18n-bouncer-syslog"
+SCRIPT_VERSION="v0.6.7-i18n-device-management"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -3523,15 +3523,17 @@ menu_loop_whiptail() {
             3>&1 1>&2 2>&3)" || break
           ;;
         access)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " Подключения VPS и LAPI " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 20 86 8 \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " Подключения VPS и устройства " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 23 96 10 \
             "node_bouncer" "$(T "Создать подключение VPS/устройства" "Create VPS/device connection")" \
+            "device_manage" "$(T "Управление bouncer/API устройствами" "Manage bouncer/API devices")" \
+            "device_events" "$(T "События от роутера/устройства" "Router/device event intake")" \
             "validate_machine" "$(T "Подтвердить machine VPS" "Validate VPS machine")" \
             "connect" "$(T "Показать созданные подключения" "Show saved connections")" \
-            "syslog_devices" "$(T "Показать syslog-устройства" "Show syslog devices")" \
             "add_range" "$(T "Добавить IP/CIDR вручную" "Add IP/CIDR manually")" \
             "remove_range" "$(T "Удалить IP/CIDR из LAPI" "Remove IP/CIDR from LAPI")" \
             "replace_ranges" "$(T "Заменить весь список IP/CIDR" "Replace the full IP/CIDR list")" \
             "firewall" "$(T "Показать firewall/UFW" "Show firewall/UFW")" \
+            "syslog_devices" "$(T "Показать syslog intake" "Show syslog intake")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         network)
@@ -3596,8 +3598,10 @@ menu_loop_plain() {
     echo "$(T "[ ПОДКЛЮЧЕНИЯ VPS И LAPI ]" "[ VPS AND LAPI CONNECTIONS ]")"
     echo "  4) $(T "Создать подключение VPS/устройства" "Create VPS/device connection")"
     echo "  5) $(T "Подтвердить machine VPS" "Validate VPS machine")"
-    echo "  6) $(T "Удалить IP/CIDR из доступа к LAPI по номеру" "Remove IP/CIDR from LAPI access by number")"
-    echo "  7) $(T "Полностью заменить список IP/CIDR" "Replace full IP/CIDR list")"
+    echo "  6) $(T "Управление bouncer/API устройствами" "Manage bouncer/API devices")"
+    echo "  7) $(T "События от роутера/устройства" "Router/device event intake")"
+    echo "  8) $(T "Удалить IP/CIDR из доступа к LAPI по номеру" "Remove IP/CIDR from LAPI access by number")"
+    echo "  9) $(T "Полностью заменить список IP/CIDR" "Replace full IP/CIDR list")"
     echo
     echo "$(T "[ СЕТЬ И КЛЮЧИ ]" "[ NETWORK AND KEYS ]")"
     echo "  8) $(T "Изменить LAN IP или порт веб-морды" "Change LAN IP or Web UI port")"
@@ -3625,10 +3629,12 @@ menu_loop_plain() {
     echo " 28) Починить или переустановить команду меню"
     echo " 29) $(T "Проверить доступ Web UI к LAPI" "Test Web UI access to LAPI")"
     echo " 30) $(T "Изменить язык интерфейса" "Change interface language")"
+    echo " 31) $(T "Управление bouncer/API устройствами" "Manage bouncer/API devices")"
+    echo " 32) $(T "События от роутера/устройства" "Router/device event intake")"
     echo
     echo "  0) $(T "Выход" "Exit")"
     echo
-    if ! read -rp "$(T "Выбери действие [0-30]: " "Choose action [0-30]: ")" choice; then
+    if ! read -rp "$(T "Выбери действие [0-32]: " "Choose action [0-32]: ")" choice; then
       echo
       continue
     fi
@@ -3663,6 +3669,8 @@ menu_loop_plain() {
       28) repair_menu_installation ;;
       29) test_webui_lapi ;;
       30) change_language ;;
+      31) manage_bouncer_devices_menu ;;
+      32) manage_device_events_menu ;;
       0) exit 0 ;;
       *) echo "$(T "Неизвестный пункт меню." "Unknown menu item.")"; pause ;;
     esac
@@ -3677,6 +3685,484 @@ menu_loop() {
     pause
     menu_loop_plain
   fi
+}
+
+
+# -----------------------------------------------------------------------------
+# v0.6.7 device management overrides
+# -----------------------------------------------------------------------------
+# Важно: bouncer-only устройство не является machine и не отправляет события.
+# Оно только забирает decisions из LAPI. События от роутера/устройства - это
+# отдельная настройка удалённого log intake, включается и удаляется отдельно.
+
+DEVICE_CONNECTION_TYPE="BOUNCER_ONLY_DEVICE"
+
+crowdsec_cscli() {
+  if [[ "${WEB_UI_TYPE:-simple}" == "manager" ]] && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
+    docker exec crowdsec cscli "$@"
+  else
+    cscli "$@"
+  fi
+}
+
+normalize_cidr_input() {
+  local raw="${1:-}" ip cidr
+  raw="$(printf '%s' "${raw}" | tr -cd '0-9A-Fa-f:.\/')"
+  [[ -n "${raw}" ]] || return 1
+  if [[ "${raw}" == */* ]]; then
+    cidr="${raw}"
+  elif [[ "${raw}" == *:* ]]; then
+    cidr="${raw}/128"
+  else
+    cidr="${raw}/32"
+  fi
+  printf '%s' "${cidr}"
+}
+
+add_allowed_range_exact() {
+  local cidr="$1"
+  if [[ -z "${ALLOWED_RANGES:-}" ]]; then
+    ALLOWED_RANGES="${cidr}"
+  elif ! echo ",${ALLOWED_RANGES}," | grep -q ",${cidr},"; then
+    ALLOWED_RANGES="${ALLOWED_RANGES},${cidr}"
+  fi
+}
+
+remove_allowed_range_exact() {
+  local target="$1" out="" old_ifs item
+  old_ifs="${IFS}"
+  IFS=','
+  for item in ${ALLOWED_RANGES:-}; do
+    IFS="${old_ifs}"
+    item="$(echo "${item}" | xargs)"
+    [[ -n "${item}" ]] || continue
+    [[ "${item}" == "${target}" ]] && continue
+    out="${out:+${out},}${item}"
+    IFS=','
+  done
+  IFS="${old_ifs}"
+  ALLOWED_RANGES="${out}"
+}
+
+record_connection_line() {
+  local name="$1" ip="$2" lapi="$3" type="$4" key="$5"
+  mkdir -p "${CONFIG_DIR}"
+  chmod 700 "${CONFIG_DIR}"
+  touch "${CONNECTIONS_FILE}"
+  chmod 600 "${CONNECTIONS_FILE}"
+  awk -F'\t' -v name="${name}" '($2 != name)' "${CONNECTIONS_FILE}" >"${CONNECTIONS_FILE}.tmp" || true
+  mv "${CONNECTIONS_FILE}.tmp" "${CONNECTIONS_FILE}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -Is)" "${name}" "${ip}" "${lapi}" "${type}" "${key}" >>"${CONNECTIONS_FILE}"
+}
+
+select_bouncer_device_record() {
+  local __var="$1" title="${2:-Bouncer/API devices}" lines=() line menu_args=() i name ip type choice
+  [[ -s "${CONNECTIONS_FILE}" ]] || return 1
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ -n "${line}" ]] || continue
+    type="$(printf '%s' "${line}" | cut -f5)"
+    case "${type}" in
+      BOUNCER_ONLY_DEVICE|BOUNCER_ONLY_OPENWRT) lines+=("${line}") ;;
+    esac
+  done < "${CONNECTIONS_FILE}"
+  ((${#lines[@]} > 0)) || return 1
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    for i in "${!lines[@]}"; do
+      name="$(printf '%s' "${lines[$i]}" | cut -f2)"
+      ip="$(printf '%s' "${lines[$i]}" | cut -f3)"
+      menu_args+=("$((i+1))" "${name} [${ip}]")
+    done
+    choice="$(whiptail --title " ${title} " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите устройство:" "Choose a device:")" 18 92 10 "${menu_args[@]}" 3>&1 1>&2 2>&3)" || return 1
+  else
+    echo
+    echo "${title}:"
+    for i in "${!lines[@]}"; do
+      name="$(printf '%s' "${lines[$i]}" | cut -f2)"
+      ip="$(printf '%s' "${lines[$i]}" | cut -f3)"
+      echo "$((i+1))) ${name} [${ip}]"
+    done
+    read -rp "$(T "Номер устройства: " "Device number: ")" choice || return 1
+  fi
+  [[ "${choice}" =~ ^[0-9]+$ ]] || return 1
+  ((choice >= 1 && choice <= ${#lines[@]})) || return 1
+  printf -v "${__var}" '%s' "${lines[$((choice-1))]}"
+}
+
+create_openwrt_bouncer_connection() {
+  safe_source_env
+  local name_raw cidr_raw lapi_url_raw rc tmp
+  local node_name router_cidr vps_ip bouncer_key default_lapi
+
+  default_lapi="${LOCAL_LAPI_URL}"
+  [[ -n "${PUBLIC_LAPI_URL:-}" ]] && default_lapi="${VPS_LAPI_URL}"
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    set +e
+    name_raw="$(whiptail --title " $(T "Bouncer/API device" "Bouncer/API device") " --inputbox "$(T "Имя устройства / bouncer name.\n\nНапример: openwrt-router, home-router, gateway-1, edge-bouncer.\nЭто имя будет видно в CrowdSec Manager только в списке bouncers." "Device name / bouncer name.\n\nExample: openwrt-router, home-router, gateway-1, edge-bouncer.\nThis name will be visible in CrowdSec Manager only in the bouncers list.")" 14 94 "bouncer-device" 3>&1 1>&2 2>&3)"
+    rc=$?; set -e; [[ "${rc}" -eq 0 ]] || return 0
+    set +e
+    cidr_raw="$(whiptail --title " $(T "Device IP/CIDR" "Device IP/CIDR") " --inputbox "$(T "IP или CIDR устройства, которому разрешить доступ к LAPI.\n\nДля роутера в LAN обычно: 192.168.1.1/32.\nЭто не включает сбор логов. Это только доступ bouncer к LAPI." "Device IP or CIDR allowed to access LAPI.\n\nFor a router in LAN usually: 192.168.1.1/32.\nThis does not enable log collection. This is only LAPI access for the bouncer.")" 15 96 "" 3>&1 1>&2 2>&3)"
+    rc=$?; set -e; [[ "${rc}" -eq 0 ]] || return 0
+    set +e
+    lapi_url_raw="$(whiptail --title " $(T "Bouncer/API LAPI URL" "Bouncer/API LAPI URL") " --inputbox "$(T "Какой LAPI URL прописать на устройстве?\n\nДля LAN обычно:\n${LOCAL_LAPI_URL}\n\nЧерез NPM/TLS:\n${VPS_LAPI_URL}" "Which LAPI URL should be configured on the device?\n\nFor LAN usually:\n${LOCAL_LAPI_URL}\n\nThrough NPM/TLS:\n${VPS_LAPI_URL}")" 17 96 "${default_lapi}" 3>&1 1>&2 2>&3)"
+    rc=$?; set -e; [[ "${rc}" -eq 0 ]] || return 0
+    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Создать" "Create")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Будет создан только bouncer key и доступ к LAPI.\n\nУстройство появится в CrowdSec Manager в разделе Bouncers.\nВ Machines, Alerts и Events оно не появится, пока отдельно не включён сбор событий/логов.\n\nПродолжить?" "Only a bouncer key and LAPI access will be created.\n\nThe device will appear in CrowdSec Manager under Bouncers.\nIt will not appear in Machines, Alerts or Events unless event/log intake is configured separately.\n\nContinue?")" 16 94 || return 0
+  else
+    read -rp "$(T "Имя устройства / bouncer name [bouncer-device]: " "Device / bouncer name [bouncer-device]: ")" name_raw || return 0
+    name_raw="${name_raw:-bouncer-device}"
+    read -rp "$(T "IP/CIDR устройства для доступа к LAPI, например 192.168.1.1/32: " "Device IP/CIDR for LAPI access, e.g. 192.168.1.1/32: ")" cidr_raw || return 0
+    read -rp "$(T "LAPI URL для устройства [${default_lapi}]: " "LAPI URL for device [${default_lapi}]: ")" lapi_url_raw || return 0
+    lapi_url_raw="${lapi_url_raw:-${default_lapi}}"
+  fi
+
+  node_name="$(printf '%s' "${name_raw:-}" | tr -cd 'A-Za-z0-9._:-')"
+  [[ -n "${node_name}" ]] || fail "$(T "Имя bouncer не может быть пустым." "Bouncer name cannot be empty.")"
+  router_cidr="$(normalize_cidr_input "${cidr_raw:-}")" || fail "$(T "IP/CIDR устройства не может быть пустым." "Device IP/CIDR cannot be empty.")"
+  vps_ip="${router_cidr%%/*}"
+  lapi_url_raw="${lapi_url_raw%/}"
+  [[ "${lapi_url_raw}" =~ ^https?://[^[:space:]]+$ ]] || fail "$(T "LAPI URL должен начинаться с http:// или https://" "LAPI URL must start with http:// or https://")"
+
+  add_allowed_range_exact "${router_cidr}"
+  bouncer_key="$(openssl rand -hex 32)"
+
+  create_bouncer_device_apply() {
+    echo "Удаление старого bouncer: ${node_name}"
+    crowdsec_cscli bouncers delete "${node_name}" || true
+    echo "Регистрация bouncer/API device: ${node_name}"
+    crowdsec_cscli bouncers add "${node_name}" --key "${bouncer_key}"
+    echo "Сохранение central.env"
+    save_env
+    echo "Обновление config.yaml CrowdSec LAPI"
+    configure_docker_crowdsec_lapi
+    echo "Перезапуск CrowdSec"
+    restart_crowdsec_runtime || true
+    echo "Обновление UFW"
+    configure_ufw_full
+    echo "Запись подключения"
+    record_connection_line "${node_name}" "${vps_ip}" "${lapi_url_raw}" "${DEVICE_CONNECTION_TYPE}" "${bouncer_key}"
+  }
+
+  run_with_live_progress "$(T "Регистрация bouncer/API device" "Registering bouncer/API device")" create_bouncer_device_apply || return 1
+
+  tmp="$(mktemp)"
+  {
+    echo "$(T "Данные для подключения устройства с bouncer/API:" "Bouncer/API device connection data:")"
+    echo
+    echo "Bouncer name: ${node_name}"
+    echo "Allowed IP/CIDR: ${router_cidr}"
+    echo "API URL: ${lapi_url_raw}/"
+    echo "API key: ${bouncer_key}"
+    echo
+    echo "$(T "Важно:" "Important:")"
+    echo "- $(T "Это bouncer-only устройство. Validate не нужен." "This is a bouncer-only device. No validate is required.")"
+    echo "- $(T "Оно видно в CrowdSec Manager только в разделе Bouncers." "It is visible in CrowdSec Manager only under Bouncers.")"
+    echo "- $(T "События/логи не появятся, пока отдельно не включён intake событий." "Events/logs will not appear unless event intake is configured separately.")"
+    echo
+    echo "LuCI / generic settings:"
+    echo "enabled=1"
+    echo "api_url=${lapi_url_raw}/"
+    echo "api_key=${bouncer_key}"
+    echo
+    echo "OpenWrt UCI variant 1 (/etc/config/crowdsec):"
+    echo "uci set crowdsec.@bouncer[0].enabled='1'"
+    echo "uci set crowdsec.@bouncer[0].api_url='${lapi_url_raw}/'"
+    echo "uci set crowdsec.@bouncer[0].api_key='${bouncer_key}'"
+    echo "uci commit crowdsec"
+    echo "/etc/init.d/crowdsec-firewall-bouncer restart"
+    echo
+    echo "OpenWrt UCI variant 2 (/etc/config/crowdsec-firewall-bouncer):"
+    echo "uci set crowdsec-firewall-bouncer.@bouncer[0].enabled='1'"
+    echo "uci set crowdsec-firewall-bouncer.@bouncer[0].api_url='${lapi_url_raw}/'"
+    echo "uci set crowdsec-firewall-bouncer.@bouncer[0].api_key='${bouncer_key}'"
+    echo "uci commit crowdsec-firewall-bouncer"
+    echo "/etc/init.d/crowdsec-firewall-bouncer restart"
+  } >"${tmp}"
+  show_file "$(T "Bouncer/API device" "Bouncer/API device")" "${tmp}"
+  rm -f "${tmp}"
+}
+
+show_connection_info() {
+  safe_source_env
+  local tmp
+  tmp="$(mktemp)"
+  {
+    echo "$(T "Сохранённые подключения:" "Saved connections:")"
+    echo
+    if [[ -s "${CONNECTIONS_FILE}" ]]; then
+      awk -F'\t' 'BEGIN {printf "%-20s %-24s %-18s %-42s %-22s\n", "TYPE", "NAME", "IP", "LAPI", "CREATED"} {printf "%-20s %-24s %-18s %-42s %-22s\n", $5, $2, $3, $4, $1}' "${CONNECTIONS_FILE}"
+    else
+      echo "$(T "Пока нет сохранённых подключений." "No saved connections yet.")"
+    fi
+    echo
+    echo "$(T "Пояснение:" "Note:")"
+    echo "- VPS machine появляется в Machines и требует validate."
+    echo "- Bouncer/API device появляется только в Bouncers и validate не требует."
+  } >"${tmp}"
+  show_file "$(T "Подключения" "Connections")" "${tmp}"
+  rm -f "${tmp}"
+}
+
+show_bouncer_devices() {
+  safe_source_env
+  local tmp
+  tmp="$(mktemp)"
+  {
+    echo "$(T "Bouncer/API устройства, сохранённые скриптом:" "Bouncer/API devices saved by the script:")"
+    echo
+    if [[ -s "${CONNECTIONS_FILE}" ]]; then
+      awk -F'\t' '$5=="BOUNCER_ONLY_DEVICE" || $5=="BOUNCER_ONLY_OPENWRT" {found=1; printf "%-24s %-20s %-42s %-22s\n", $2, $3, $4, $1} END {if (!found) print "нет сохранённых bouncer-only устройств"}' "${CONNECTIONS_FILE}"
+    else
+      echo "$(T "Пока нет устройств." "No devices yet.")"
+    fi
+    echo
+    echo "$(T "Текущий список bouncers в CrowdSec:" "Current CrowdSec bouncers list:")"
+    echo
+    crowdsec_cscli bouncers list 2>&1 || true
+  } >"${tmp}"
+  show_file "$(T "Bouncer/API устройства" "Bouncer/API devices")" "${tmp}"
+  rm -f "${tmp}"
+}
+
+remove_bouncer_device() {
+  safe_source_env
+  local rec name ip cidr key tmp
+  if ! select_bouncer_device_record rec "$(T "Удалить bouncer/API устройство" "Remove bouncer/API device")"; then
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+      whiptail --title " $(T "Удаление" "Removal") " --msgbox "$(T "Нет bouncer/API устройств для удаления." "No bouncer/API devices to remove.")" 8 80 || true
+    fi
+    return 0
+  fi
+  name="$(printf '%s' "${rec}" | cut -f2)"
+  ip="$(printf '%s' "${rec}" | cut -f3)"
+  key="$(printf '%s' "${rec}" | cut -f6)"
+  if [[ "${ip}" == *:* ]]; then cidr="${ip}/128"; else cidr="${ip}/32"; fi
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    whiptail --title " $(T "Удаление" "Removal") " --yes-button "$(T "Удалить" "Remove")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Удалить bouncer, запись подключения и IP/CIDR из LAPI/UFW?" "Remove bouncer, connection record and IP/CIDR from LAPI/UFW?")\n\n${name} [${ip}]" 12 88 || return 0
+  fi
+
+  remove_bouncer_device_apply() {
+    echo "Удаление bouncer ${name}"
+    crowdsec_cscli bouncers delete "${name}" || true
+    echo "Удаление записи подключения"
+    awk -F'\t' -v name="${name}" '($2 != name)' "${CONNECTIONS_FILE}" >"${CONNECTIONS_FILE}.tmp" || true
+    mv "${CONNECTIONS_FILE}.tmp" "${CONNECTIONS_FILE}"
+    echo "Удаление event intake записи, если была"
+    if [[ -f "${SYSLOG_DEVICES_FILE}" ]]; then
+      awk -F'\t' -v name="${name}" '($1 != name)' "${SYSLOG_DEVICES_FILE}" >"${SYSLOG_DEVICES_FILE}.tmp" || true
+      mv "${SYSLOG_DEVICES_FILE}.tmp" "${SYSLOG_DEVICES_FILE}"
+    fi
+    echo "Удаление ${cidr} из ALLOWED_RANGES"
+    remove_allowed_range_exact "${cidr}"
+    save_env
+    configure_docker_crowdsec_lapi
+    restart_crowdsec_runtime || true
+    configure_ufw_full
+  }
+  run_with_live_progress "$(T "Удаление bouncer/API device" "Removing bouncer/API device")" remove_bouncer_device_apply || return 1
+}
+
+check_bouncer_device_status() {
+  safe_source_env
+  local tmp
+  tmp="$(mktemp)"
+  {
+    echo "$(T "Статус bouncer/API устройств:" "Bouncer/API device status:")"
+    echo
+    crowdsec_cscli bouncers list 2>&1 || true
+    echo
+    echo "$(T "Если Last API pull обновляется, устройство подключено к LAPI. События это не показывает: bouncer не отправляет логи." "If Last API pull updates, the device is connected to LAPI. This does not show events: a bouncer does not send logs.")"
+  } >"${tmp}"
+  show_file "$(T "Статус bouncers" "Bouncer status")" "${tmp}"
+  rm -f "${tmp}"
+}
+
+configure_device_event_intake() {
+  safe_source_env
+  local rec name ip cidr port proto tmp
+  if ! select_bouncer_device_record rec "$(T "Включить события от устройства" "Enable device event intake")"; then return 0; fi
+  name="$(printf '%s' "${rec}" | cut -f2)"
+  ip="$(printf '%s' "${rec}" | cut -f3)"
+  if [[ "${ip}" == *:* ]]; then cidr="${ip}/128"; else cidr="${ip}/32"; fi
+  port="${DEFAULT_REMOTE_SYSLOG_PORT}"
+  proto="both"
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    whiptail --title " $(T "События от устройства" "Device events") " --yes-button "$(T "Понимаю" "I understand")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Bouncer не отправляет события.\n\nДля событий central может принимать удалённый syslog от устройства. Это отдельный режим: включай его только если ты понимаешь, какие логи отправляет устройство.\n\nСкрипт настроит central на приём syslog только через firewall-правило для IP/CIDR этого устройства и покажет команды для устройства. Сам роутер он не изменит." "A bouncer does not send events.\n\nFor events, central can receive remote syslog from the device. This is a separate mode: enable it only if you understand what logs the device sends.\n\nThe script will configure central to receive syslog only through firewall rules for this device IP/CIDR and will show commands for the device. It will not change the router itself.")" 18 96 || return 0
+    port="$(whiptail --title " $(T "Syslog порт" "Syslog port") " --inputbox "$(T "Порт syslog на central" "Syslog port on central")" 10 80 "${DEFAULT_REMOTE_SYSLOG_PORT}" 3>&1 1>&2 2>&3)" || return 0
+  else
+    read -rp "$(T "Syslog port на central [${DEFAULT_REMOTE_SYSLOG_PORT}]: " "Syslog port on central [${DEFAULT_REMOTE_SYSLOG_PORT}]: ")" port || return 0
+    port="${port:-${DEFAULT_REMOTE_SYSLOG_PORT}}"
+  fi
+  port="$(printf '%s' "${port}" | tr -cd '0-9')"
+  is_valid_port "${port}" || fail "$(T "Некорректный syslog port." "Invalid syslog port.")"
+
+  configure_device_event_intake_apply() {
+    install_or_update_remote_syslog_receiver "${port}" "${proto}"
+    record_remote_syslog_device "${name}" "${cidr}" "${port}" "${proto}"
+    configure_ufw_full
+  }
+  run_with_live_progress "$(T "Настройка intake событий" "Configuring event intake")" configure_device_event_intake_apply || return 1
+
+  tmp="$(mktemp)"
+  {
+    echo "$(T "Intake событий включён на central." "Event intake enabled on central.")"
+    echo
+    echo "Device: ${name}"
+    echo "Allowed IP/CIDR: ${cidr}"
+    echo "Central syslog host: ${LAN_IP}"
+    echo "Central syslog port: ${port}"
+    echo
+    echo "OpenWrt 25 отправка syslog на central:"
+    echo "uci set system.@system[0].log_ip='${LAN_IP}'"
+    echo "uci set system.@system[0].log_port='${port}'"
+    echo "uci set system.@system[0].log_proto='udp'"
+    echo "uci commit system"
+    echo "/etc/init.d/log restart"
+    echo
+    echo "OpenWrt 25 отключить отправку обратно:"
+    echo "uci delete system.@system[0].log_ip 2>/dev/null"
+    echo "uci delete system.@system[0].log_port 2>/dev/null"
+    echo "uci delete system.@system[0].log_proto 2>/dev/null"
+    echo "uci commit system"
+    echo "/etc/init.d/log restart"
+    echo
+    echo "Проверка на central:"
+    echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/${ip}.log"
+    echo "sudo docker exec crowdsec cscli metrics"
+  } >"${tmp}"
+  show_file "$(T "События от устройства" "Device events")" "${tmp}"
+  rm -f "${tmp}"
+}
+
+disable_device_event_intake() {
+  safe_source_env
+  local rec name ip cidr
+  if ! select_bouncer_device_record rec "$(T "Отключить события от устройства" "Disable device event intake")"; then return 0; fi
+  name="$(printf '%s' "${rec}" | cut -f2)"
+  ip="$(printf '%s' "${rec}" | cut -f3)"
+  if [[ "${ip}" == *:* ]]; then cidr="${ip}/128"; else cidr="${ip}/32"; fi
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    whiptail --title " $(T "Отключить intake" "Disable intake") " --yes-button "$(T "Отключить" "Disable")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Отключить syslog intake для устройства?\n\nЭто удалит запись из списка intake и пересоберёт UFW. Настройку отправки логов на самом роутере нужно удалить отдельно." "Disable syslog intake for the device?\n\nThis removes the intake record and rebuilds UFW. Log forwarding on the router itself must be removed separately.")\n\n${name} [${cidr}]" 14 92 || return 0
+  fi
+  disable_device_event_intake_apply() {
+    if [[ -f "${SYSLOG_DEVICES_FILE}" ]]; then
+      awk -F'\t' -v name="${name}" '($1 != name)' "${SYSLOG_DEVICES_FILE}" >"${SYSLOG_DEVICES_FILE}.tmp" || true
+      mv "${SYSLOG_DEVICES_FILE}.tmp" "${SYSLOG_DEVICES_FILE}"
+    fi
+    configure_ufw_full
+  }
+  run_with_live_progress "$(T "Отключение intake событий" "Disabling event intake")" disable_device_event_intake_apply || return 1
+}
+
+show_device_event_logs() {
+  safe_source_env
+  local rec name ip tmp
+  if ! select_bouncer_device_record rec "$(T "Просмотр событий устройства" "View device events")"; then return 0; fi
+  name="$(printf '%s' "${rec}" | cut -f2)"
+  ip="$(printf '%s' "${rec}" | cut -f3)"
+  tmp="$(mktemp)"
+  {
+    echo "Device: ${name} [${ip}]"
+    echo
+    echo "Log file: ${REMOTE_SYSLOG_DIR}/${ip}.log"
+    echo
+    if [[ -f "${REMOTE_SYSLOG_DIR}/${ip}.log" ]]; then
+      echo "Last 120 lines:"
+      tail -n 120 "${REMOTE_SYSLOG_DIR}/${ip}.log"
+    else
+      echo "$(T "Файл логов пока не найден. Проверь, что устройство отправляет syslog на central и UFW разрешает порт." "Log file not found yet. Check that the device sends syslog to central and UFW allows the port.")"
+    fi
+    echo
+    echo "CrowdSec metrics:"
+    crowdsec_cscli metrics 2>&1 || true
+  } >"${tmp}"
+  show_file "$(T "События устройства" "Device events")" "${tmp}"
+  rm -f "${tmp}"
+}
+
+manage_bouncer_devices_menu() {
+  local choice
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    choice="$(whiptail --title " $(T "Bouncer/API устройства" "Bouncer/API devices") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 18 90 5 \
+      "show" "$(T "Показать устройства и статус bouncers" "Show devices and bouncer status")" \
+      "create" "$(T "Добавить bouncer/API устройство" "Add bouncer/API device")" \
+      "remove" "$(T "Удалить bouncer/API устройство" "Remove bouncer/API device")" \
+      "check" "$(T "Проверить bouncer Last Pull" "Check bouncer Last Pull")" \
+      3>&1 1>&2 2>&3)" || return 0
+  else
+    echo "1) show  2) create  3) remove  4) check"
+    read -rp "> " choice || return 0
+    case "${choice}" in 1) choice=show;; 2) choice=create;; 3) choice=remove;; 4) choice=check;; esac
+  fi
+  case "${choice}" in
+    show) show_bouncer_devices ;;
+    create) create_openwrt_bouncer_connection ;;
+    remove) remove_bouncer_device ;;
+    check) check_bouncer_device_status ;;
+  esac
+}
+
+manage_device_events_menu() {
+  local choice
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    choice="$(whiptail --title " $(T "События от роутера/устройства" "Router/device event intake") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 19 94 5 \
+      "enable" "$(T "Включить remote syslog intake для устройства" "Enable remote syslog intake for a device")" \
+      "disable" "$(T "Отключить remote syslog intake для устройства" "Disable remote syslog intake for a device")" \
+      "show" "$(T "Показать настроенные syslog intake" "Show configured syslog intake")" \
+      "logs" "$(T "Показать последние события устройства" "Show latest device events")" \
+      3>&1 1>&2 2>&3)" || return 0
+  else
+    echo "1) enable  2) disable  3) show  4) logs"
+    read -rp "> " choice || return 0
+    case "${choice}" in 1) choice=enable;; 2) choice=disable;; 3) choice=show;; 4) choice=logs;; esac
+  fi
+  case "${choice}" in
+    enable) configure_device_event_intake ;;
+    disable) disable_device_event_intake ;;
+    show) show_remote_syslog_devices ;;
+    logs) show_device_event_logs ;;
+  esac
+}
+
+run_menu_action() {
+  safe_source_env
+  case "${1}" in
+    status) show_status; pause ;;
+    connect) show_connection_info; pause ;;
+    envfile) show_tokens_file; pause ;;
+    add_range) add_allowed_range ;;
+    remove_range) remove_allowed_range ;;
+    replace_ranges) replace_allowed_ranges ;;
+    web_addr) change_lan_ip_or_web_port ;;
+    lapi_port) change_lapi_port ;;
+    public_addr) change_public_addr ;;
+    public_lapi_url) configure_public_lapi_url ;;
+    validate_machine) validate_machine_prompt ;;
+    auto_token) regenerate_auto_token ;;
+    bouncer_key) regenerate_bouncer_key ;;
+    firewall) show_firewall; pause ;;
+    test_lapi) test_webui_lapi; pause ;;
+    restart) restart_services ;;
+    update_webui) update_web_ui_only ;;
+    logs) show_logs; pause ;;
+    crowdsec_info) show_crowdsec_info; pause ;;
+    reapply) reapply_all_settings ;;
+    update_all) update_installed_stack ;;
+    update_system) update_system_only ;;
+    update_docker) update_docker_only ;;
+    update_crowdsec) update_crowdsec_only ;;
+    versions) show_versions; pause ;;
+    disable_autostart) disable_login_menu ;;
+    enable_autostart) enable_login_menu ;;
+    repair_menu) repair_menu_installation ;;
+    node_bouncer) create_named_vps_bouncer_key ;;
+    device_manage) manage_bouncer_devices_menu ;;
+    device_events) manage_device_events_menu ;;
+    syslog_devices) show_remote_syslog_devices ;;
+    language) change_language ;;
+    *) warn "$(T "Неизвестное действие меню." "Unknown menu action.")"; pause ;;
+  esac
 }
 
 acquire_script_lock
