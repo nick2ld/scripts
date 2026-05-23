@@ -83,7 +83,9 @@ choose_language_if_needed() {
   fi
   if tui_available && [[ -t 0 && -t 1 ]]; then
     local choice
-    choice="$(whiptail --title " Language / Язык " --cancel-button "Exit" --ok-button "OK" --notags --menu "Choose interface language / Выберите язык интерфейса:" 12 70 2 \
+    tui_theme
+    export CROWDSEC_TUI_MODE="${CROWDSEC_TUI_MODE:-installer}"
+    choice="$(whiptail --backtitle "CrowdSec Central" --title " CrowdSec Central " --cancel-button "Exit" --ok-button "OK" --notags --menu "Choose interface language / Выберите язык интерфейса:" 14 88 2 \
       "ru" "Русский" \
       "en" "English" \
       3>&1 1>&2 2>&3)" || choice="ru"
@@ -107,7 +109,8 @@ change_language() {
   load_saved_language
   local choice
   if tui_available && [[ -t 0 && -t 1 ]]; then
-    choice="$(whiptail --title "$(T "$(T "Язык интерфейса" "Interface language")" "Interface language")" --cancel-button "$(T "$(T "Назад" "Back")" "Back")" --ok-button "OK" --notags --menu "$(T "Выберите язык интерфейса:" "Choose interface language:")" 12 70 2 \
+    tui_theme
+    choice="$(whiptail --backtitle "CrowdSec Central" --title "$(T " Язык интерфейса " " Interface language ")" --cancel-button "$(T "Назад" "Back")" --ok-button "OK" --notags --menu "$(T "Выберите язык интерфейса:" "Choose interface language:")" 14 88 2 \
       "ru" "Русский" \
       "en" "English" \
       3>&1 1>&2 2>&3)" || return 0
@@ -124,7 +127,7 @@ change_language() {
   fi
   save_language_only
   if tui_available && [[ -t 0 && -t 1 ]]; then
-    whiptail --title "$(T "$(T "Готово" "Done")" "Done")" --msgbox "$(T "Язык сохранён." "Language saved.")" 8 60 || true
+    whiptail --backtitle "CrowdSec Central" --title "$(T " Готово " " Done ")" --msgbox "$(T "Язык сохранён." "Language saved.")" 8 70 || true
   else
     echo "$(T "Язык сохранён." "Language saved.")"
   fi
@@ -146,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.5-i18n"
+SCRIPT_VERSION="v0.5.1-i18n-langdialog"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 
@@ -602,6 +605,7 @@ WEB_UI_TYPE=${WEB_UI_TYPE}
 PUBLIC_LAPI_MODE=${PUBLIC_LAPI_MODE}
 PUBLIC_LAPI_URL=${PUBLIC_LAPI_URL}
 NPM_ALLOWED_CIDR=${NPM_ALLOWED_CIDR}
+UI_LANG=${UI_LANG}
 ENV
   chmod 600 "${ENV_FILE}"
 }
