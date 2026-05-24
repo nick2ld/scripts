@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.19-openwrt-nc-forwarder-fix"
+SCRIPT_VERSION="v0.7.20-openwrt-busybox-nc-tcp-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4240,10 +4240,8 @@ if ! command -v nc >/dev/null 2>&1; then
   fi
 fi
 if ! command -v nc >/dev/null 2>&1; then
-  echo 'ERROR: nc/netcat is required on OpenWrt because BusyBox logger has no remote -n/-P options.' >&2
-  echo 'Install one of these packages and run this helper again:' >&2
-  echo '  opkg update && opkg install netcat-openbsd' >&2
-  echo 'or:' >&2
+  echo 'ERROR: nc/netcat is required on OpenWrt. BusyBox nc with TCP mode is enough.' >&2
+  echo 'Install netcat and run this helper again:' >&2
   echo '  opkg update && opkg install netcat' >&2
   exit 33
 fi
@@ -4262,10 +4260,23 @@ send_remote_syslog() {
   line="$1"
   ts="$(date '+%b %e %H:%M:%S' 2>/dev/null || date)"
   host="$(uci get system.@system[0].hostname 2>/dev/null || hostname 2>/dev/null || echo openwrt)"
-  # BusyBox logger in OpenWrt 25 has no -n/-P remote options, so send RFC3164-like UDP syslog via nc.
-  # PRI 134 = local0.info.
-  printf '<134>%s %s %s: %s\n' "$ts" "$host" "$TAG" "$line" | nc -u -w 1 "$CENTRAL_HOST" "$CENTRAL_PORT" >/dev/null 2>&1 || true
+  packet="$(printf '<134>%s %s %s: %s\n' "$ts" "$host" "$TAG" "$line")"
+  # OpenWrt 25 BusyBox logger has no remote -n/-P options.
+  # OpenWrt 25 BusyBox nc may also have no -u/-w options, so default to TCP syslog.
+  # Central rsyslog listens on both TCP and UDP on the selected port.
+  if nc -h 2>&1 | grep -q -- '-u'; then
+    printf '%s' "$packet" | nc -u -w 1 "$CENTRAL_HOST" "$CENTRAL_PORT" >/dev/null 2>&1 || true
+  elif command -v timeout >/dev/null 2>&1; then
+    printf '%s' "$packet" | timeout 3 nc "$CENTRAL_HOST" "$CENTRAL_PORT" >/dev/null 2>&1 || true
+  else
+    printf '%s' "$packet" | nc "$CENTRAL_HOST" "$CENTRAL_PORT" >/dev/null 2>&1 || true
+  fi
 }
+
+if [ "${1:-}" = "--send-test" ]; then
+  send_remote_syslog "crowdsec-forwarder-test dropbear login failed for root from 1.2.3.4"
+  exit 0
+fi
 
 while true; do
   logread -f 2>/dev/null | grep -Ei "\$PATTERN" | while IFS= read -r line; do
@@ -4306,6 +4317,8 @@ if ! ps w 2>/dev/null | grep '[c]rowdsec-log-forwarder' >/dev/null 2>&1; then
   logread | tail -80 || true
   exit 32
 fi
+# Send one direct test packet so central can verify that rsyslog really receives data.
+/bin/sh '${worker_path}' --send-test 2>/dev/null || true
 echo 'OK: crowdsec-log-forwarder installed and running'
 '${init_path}' status || true
 logread | tail -50
@@ -4461,6 +4474,25 @@ apply_openwrt_helper_via_ssh() {
     echo
     echo "==> Verifying installed files and process"
     openwrt_ssh_cmd 'test -x /usr/bin/crowdsec-log-forwarder && test -x /etc/init.d/crowdsec-log-forwarder && /etc/init.d/crowdsec-log-forwarder enabled >/dev/null 2>&1 && ps w | grep "[c]rowdsec-log-forwarder" >/dev/null'
+    echo
+    echo "==> Sending test syslog packet from OpenWrt"
+    openwrt_ssh_cmd '/bin/sh /usr/bin/crowdsec-log-forwarder --send-test || true'
+    echo "==> Checking central received at least one filtered syslog line"
+    local i found_file
+    found_file=""
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      found_file="$(find "${REMOTE_SYSLOG_DIR}" -maxdepth 1 -type f -name '*.security.log' -mmin -2 -print 2>/dev/null | head -n 1 || true)"
+      if [[ -n "${found_file}" ]]; then
+        echo "OK: central received syslog: ${found_file}"
+        tail -n 5 "${found_file}" || true
+        return 0
+      fi
+      sleep 1
+    done
+    echo "ERROR: OpenWrt helper was installed, but central did not receive syslog in ${REMOTE_SYSLOG_DIR}" >&2
+    echo "Check TCP 5140 listener: ss -ltnp | grep :5140" >&2
+    echo "Check rsyslog config: /etc/rsyslog.d/30-crowdsec-remote-devices.conf" >&2
+    return 41
   }
 
   openwrt_ssh_apply_logged() {
@@ -5277,7 +5309,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.19-openwrt-nc-forwarder-fix"
+SCRIPT_VERSION="v0.7.20-openwrt-busybox-nc-tcp-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5830,7 +5862,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.19-openwrt-nc-forwarder-fix"
+SCRIPT_VERSION="v0.7.20-openwrt-busybox-nc-tcp-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -6075,7 +6107,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.19-openwrt-nc-forwarder-fix"
+SCRIPT_VERSION="v0.7.20-openwrt-busybox-nc-tcp-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
