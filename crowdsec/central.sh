@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.14-openwrt-syslog-allowlists-fix"
+SCRIPT_VERSION="v0.7.15-device-events-menu-path-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -1647,7 +1647,7 @@ create_openwrt_bouncer_connection() {
     syslog_port_raw="${DEFAULT_REMOTE_SYSLOG_PORT}"
     syslog_proto_raw="both"
 
-    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Создать" "Create")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Central создаст отдельный bouncer key и добавит IP/CIDR устройства в доступ к LAPI.\n\nСобытия от роутера/устройства НЕ включаются автоматически. Если нужны события, включи их отдельно в меню: События от роутера/устройства -> Включить filtered syslog intake.\n\nПродолжить?" "Central will create a dedicated bouncer key and add the device IP/CIDR to LAPI access.\n\nEvents from the router/device are NOT enabled automatically. If events are needed, enable them separately in the menu: Router/device event intake -> Enable filtered syslog intake.\n\nContinue?")" 16 92 || return 0
+    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Создать" "Create")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Central создаст отдельный bouncer key и добавит IP/CIDR устройства в доступ к LAPI.\n\nСобытия от роутера/устройства НЕ включаются автоматически. Если нужны события, включи их отдельно в меню: Bouncer/API устройства -> События/логи от роутера или устройства -> Включить filtered syslog intake.\n\nПродолжить?" "Central will create a dedicated bouncer key and add the device IP/CIDR to LAPI access.\n\nEvents from the router/device are NOT enabled automatically. If events are needed, enable them separately in the menu: Bouncer/API devices -> Router/device events and logs -> Enable filtered syslog intake.\n\nContinue?")" 16 92 || return 0
   else
     read -rp "$(T "Имя устройства / bouncer name [bouncer-device]: " "Device / bouncer name [bouncer-device]: ")" router_name_raw || return 0
     router_name_raw="${router_name_raw:-bouncer-device}"
@@ -4960,7 +4960,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.14-openwrt-syslog-allowlists-fix"
+SCRIPT_VERSION="v0.7.15-device-events-menu-path-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5449,20 +5449,27 @@ manage_bouncer_devices_menu() {
   local choice
   while true; do
     if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      choice="$(whiptail --title " $(T "Bouncer/API устройства" "Bouncer/API devices") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Это устройства без CrowdSec agent: OpenWrt/router/firewall-bouncer. Они только забирают decisions и блокируют. После действия вы вернётесь сюда." "These are devices without a CrowdSec agent: OpenWrt/router/firewall-bouncer. They only pull decisions and block. After an action you will return here.")" 22 102 5 \
+      choice="$(whiptail --title " $(T "Bouncer/API устройства" "Bouncer/API devices") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Это устройства без CrowdSec agent: OpenWrt/router/firewall-bouncer. Они только забирают decisions и блокируют. Если нужны события/логи от роутера, отдельный пункт находится прямо здесь." "These are devices without a CrowdSec agent: OpenWrt/router/firewall-bouncer. They only pull decisions and block. If router/device events are needed, the separate event item is right here.")" 24 106 6 \
         "show" "$(T "Показать устройства и статус bouncers" "Show devices and bouncer status")" "$(T "Показывает сохранённые устройства и Last Pull bouncers." "Shows saved devices and bouncer Last Pull.")" \
         "create" "$(T "Добавить bouncer/API устройство" "Add bouncer/API device")" "$(T "Создаёт bouncer key и allowed range для устройства." "Creates bouncer key and allowed range for a device.")" \
+        "events" "$(T "События/логи от роутера или устройства" "Router/device events and logs")" "$(T "Включение filtered syslog intake, просмотр логов и отключение приёма событий." "Enable filtered syslog intake, view logs, and disable event intake.")" \
         "remove" "$(T "Удалить bouncer/API устройство" "Remove bouncer/API device")" "$(T "Удаляет bouncer, запись устройства и связанные разрешения." "Deletes bouncer, device record and related access rules.")" \
         "check" "$(T "Проверить bouncer Last Pull" "Check bouncer Last Pull")" "$(T "Проверяет, подключается ли устройство к central LAPI." "Checks whether the device pulls from central LAPI.")" \
         3>&1 1>&2 2>&3)" || return 0
     else
-      echo "1) show  2) create  3) remove  4) check  0) back"
+      echo "1) show"
+      echo "2) create"
+      echo "3) events/logs"
+      echo "4) remove"
+      echo "5) check"
+      echo "0) back"
       read -rp "> " choice || return 0
-      case "${choice}" in 0|q|back) return 0;; 1) choice=show;; 2) choice=create;; 3) choice=remove;; 4) choice=check;; esac
+      case "${choice}" in 0|q|back) return 0;; 1) choice=show;; 2) choice=create;; 3) choice=events;; 4) choice=remove;; 5) choice=check;; esac
     fi
     case "${choice}" in
       show) show_bouncer_devices ;;
       create) create_openwrt_bouncer_connection ;;
+      events) manage_device_events_menu ;;
       remove) remove_bouncer_device ;;
       check) check_bouncer_device_status ;;
     esac
@@ -5506,7 +5513,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.14-openwrt-syslog-allowlists-fix"
+SCRIPT_VERSION="v0.7.15-device-events-menu-path-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -5751,7 +5758,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.14-openwrt-syslog-allowlists-fix"
+SCRIPT_VERSION="v0.7.15-device-events-menu-path-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
