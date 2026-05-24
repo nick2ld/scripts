@@ -149,10 +149,11 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.8-remote-vps-install-log-name-fix"
+SCRIPT_VERSION="v0.7.9-remote-vps-clean-install-log-version-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
+REQUIRED_VPS_SCRIPT_VERSION="v0.4.6-clean-reinstall-cache-log-fix"
 SYSLOG_DEVICES_FILE="${CONFIG_DIR}/bouncer-syslog-devices.tsv"
 REMOTE_SYSLOG_DIR="/var/log/crowdsec-remote"
 REMOTE_SYSLOG_DIAG_DIR="/var/log/crowdsec-remote-diagnostic"
@@ -290,7 +291,9 @@ run_with_live_progress() {
       rm -f "${log_file}" "${rc_file}"
       return 0
     fi
-    whiptail --title " Ошибка: ${title} " --textbox "${log_file}" 30 120 || true
+    if [[ "${CROWDSEC_SUPPRESS_PROGRESS_ERROR:-0}" != "1" ]]; then
+      whiptail --title " Ошибка: ${title} " --textbox "${log_file}" 30 120 || true
+    fi
     rm -f "${log_file}" "${rc_file}"
     return "${rc}"
   fi
@@ -1023,17 +1026,56 @@ UI_LANG=$(shell_quote "${UI_LANG:-ru}")
 ENV
 chmod 600 /root/crowdsec-vps-node/node.env
 
-if command -v apt-get >/dev/null 2>&1; then
-  apt-get update -y
-  apt-get install -y curl ca-certificates
+EXPECTED_VPS_SCRIPT_VERSION=$(shell_quote "${REQUIRED_VPS_SCRIPT_VERSION}")
+VPS_SCRIPT_URL=$(shell_quote "${VPS_SCRIPT_RAW_URL}")
+CACHE_BUSTER="$(date +%s)-$$"
+rm -f /root/crowdsec-vps-node/vps.sh /root/crowdsec-vps-node/vps.sh.tmp
+
+download_vps_script() {
+  local url="$1"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --retry 3 --connect-timeout 20 \
+      -H "Cache-Control: no-cache" \
+      -H "Pragma: no-cache" \
+      -H "Expires: 0" \
+      "${url}" -o /root/crowdsec-vps-node/vps.sh.tmp
+    return $?
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    wget --no-cache --tries=3 --timeout=20 -O /root/crowdsec-vps-node/vps.sh.tmp "${url}"
+    return $?
+  fi
+  return 127
+}
+
+if ! download_vps_script "${VPS_SCRIPT_URL}?cache_bust=${CACHE_BUSTER}"; then
+  echo "WARN: download with cache buster failed, retrying plain URL." >&2
+  download_vps_script "${VPS_SCRIPT_URL}"
 fi
 
-curl -fsSL "$(shell_quote "${VPS_SCRIPT_RAW_URL}")" -o /root/crowdsec-vps-node/vps.sh
+if [[ ! -s /root/crowdsec-vps-node/vps.sh.tmp ]]; then
+  echo "ERROR: cannot download vps.sh. curl/wget may be missing, or GitHub raw is unavailable." >&2
+  exit 88
+fi
+
+mv /root/crowdsec-vps-node/vps.sh.tmp /root/crowdsec-vps-node/vps.sh
 chmod 700 /root/crowdsec-vps-node/vps.sh
+
 if ! grep -q -- '--unattended' /root/crowdsec-vps-node/vps.sh && ! grep -q 'CROWDSEC_VPS_UNATTENDED' /root/crowdsec-vps-node/vps.sh; then
   echo "ERROR: downloaded vps.sh does not support unattended mode. Update crowdsec/vps.sh in the GitHub repository first." >&2
   exit 90
 fi
+
+DOWNLOADED_VPS_SCRIPT_VERSION="$(grep -E '^SCRIPT_VERSION=' /root/crowdsec-vps-node/vps.sh | head -n1 | cut -d= -f2- | tr -d '"\047[:space:]')"
+echo "Downloaded vps.sh version: ${DOWNLOADED_VPS_SCRIPT_VERSION:-unknown}"
+echo "Required vps.sh version: ${EXPECTED_VPS_SCRIPT_VERSION}"
+if [[ "${DOWNLOADED_VPS_SCRIPT_VERSION:-}" != "${EXPECTED_VPS_SCRIPT_VERSION}" ]]; then
+  echo "ERROR: downloaded vps.sh version mismatch. This usually means an old cached script was downloaded." >&2
+  echo "Expected: ${EXPECTED_VPS_SCRIPT_VERSION}" >&2
+  echo "Got: ${DOWNLOADED_VPS_SCRIPT_VERSION:-unknown}" >&2
+  exit 91
+fi
+
 TERM=xterm CROWDSEC_VPS_UNATTENDED=1 bash /root/crowdsec-vps-node/vps.sh --unattended
 REMOTE
   chmod 600 "${out}"
@@ -1223,7 +1265,7 @@ create_named_vps_remote_install() {
     return "${PIPESTATUS[0]}"
   }
 
-  if ! run_with_live_progress "$(T "Удалённая установка VPS node" "Remote VPS node installation")" remote_install_apply; then
+  if ! CROWDSEC_SUPPRESS_PROGRESS_ERROR=1 run_with_live_progress "$(T "Удалённая установка VPS node" "Remote VPS node installation")" remote_install_apply; then
     local err_tmp
     err_tmp="$(mktemp)"
     {
@@ -1238,7 +1280,7 @@ create_named_vps_remote_install() {
     } > "${err_tmp}"
     show_file "$(T "Ошибка удалённой установки VPS" "Remote VPS installation error")" "${err_tmp}"
     rm -f "${err_tmp}" "${runner}"
-    return 1
+    return 0
   fi
   rm -f "${runner}"
 
@@ -3521,6 +3563,44 @@ LAPI:   ${VPS_LAPI_URL}
 EOF
 }
 
+
+show_remote_install_logs() {
+  local log_dir="${CONFIG_DIR}/remote-install-logs"
+  local tmp choice log_file rc
+  mkdir -p "${log_dir}"
+  chmod 700 "${log_dir}" 2>/dev/null || true
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]] && tui_available; then
+    local entries=()
+    while IFS= read -r log_file; do
+      [[ -n "${log_file}" ]] || continue
+      entries+=("${log_file}" "$(basename "${log_file}")")
+    done < <(find "${log_dir}" -maxdepth 1 -type f -name '*.log' -printf '%T@ %p\n' 2>/dev/null | sort -rn | awk 'NR<=30 {sub(/^[^ ]+ /,""); print}')
+    if [[ "${#entries[@]}" -eq 0 ]]; then
+      whiptail --title " $(T "Логи удалённой установки VPS" "Remote VPS install logs") " --msgbox "$(T "Логи удалённой установки VPS пока не найдены." "No remote VPS installation logs found yet.")" 8 78 || true
+      return 0
+    fi
+    set +e
+    choice="$(whiptail --title " $(T "Логи удалённой установки VPS" "Remote VPS install logs") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Открыть" "Open")" --notags --menu "$(T "Выберите лог для просмотра:" "Choose a log to view:")" 24 110 14 "${entries[@]}" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+    show_file "$(T "Лог удалённой установки VPS" "Remote VPS install log")" "${choice}"
+    return 0
+  fi
+
+  tmp="$(mktemp)"
+  {
+    echo "$(T "Логи удалённой установки VPS:" "Remote VPS installation logs:")"
+    echo
+    find "${log_dir}" -maxdepth 1 -type f -name '*.log' -printf '%TY-%Tm-%Td %TH:%TM  %p\n' 2>/dev/null | sort -r | head -n 30 || true
+    echo
+    echo "$(T "Открой нужный файл через less/cat." "Open the needed file with less/cat.")"
+  } >"${tmp}"
+  show_file "$(T "Логи удалённой установки VPS" "Remote VPS install logs")" "${tmp}"
+  rm -f "${tmp}"
+}
+
 run_menu_action() {
   safe_source_env
   case "${1}" in
@@ -3543,6 +3623,7 @@ run_menu_action() {
     restart) restart_services ;;
     update_webui) update_web_ui_only ;;
     logs) show_logs; pause ;;
+    remote_logs) show_remote_install_logs ;;
     crowdsec_info) show_crowdsec_info; pause ;;
     reapply) reapply_all_settings ;;
     update_all) update_installed_stack ;;
@@ -3553,7 +3634,7 @@ run_menu_action() {
     disable_autostart) disable_login_menu ;;
     enable_autostart) enable_login_menu ;;
     repair_menu) repair_menu_installation ;;
-    node_bouncer) create_named_vps_bouncer_key ;;
+    node_bouncer) create_named_vps_bouncer_key || true ;;
     device_manage) manage_bouncer_devices_menu ;;
     device_events) manage_device_events_menu ;;
     syslog_devices) show_remote_syslog_devices ;;
@@ -3641,11 +3722,12 @@ menu_loop_whiptail() {
             3>&1 1>&2 2>&3)" || break
           ;;
         service)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Обслуживание и диагностика" "Maintenance and diagnostics") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 24 96 11 \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Обслуживание и диагностика" "Maintenance and diagnostics") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 25 96 12 \
             "install_stack" "$(T "Установить/восстановить CrowdSec Manager + Dockerized CrowdSec" "Install/repair CrowdSec Manager + Dockerized CrowdSec")" \
             "restart" "$(T "Перезапустить CrowdSec, Docker и Web UI" "Restart CrowdSec, Docker and Web UI")" \
             "update_webui" "$(T "Обновить CrowdSec Manager" "Update CrowdSec Manager")" \
             "logs" "$(T "Показать логи Manager и CrowdSec" "Show Manager and CrowdSec logs")" \
+            "remote_logs" "$(T "Логи удалённой установки VPS" "Remote VPS install logs")" \
             "reapply" "$(T "Повторно применить все настройки" "Reapply all settings")" \
             "update_all" "$(T "Обновить весь Dockerized stack" "Update full Dockerized stack")" \
             "update_system" "$(T "Обновить пакеты Debian" "Update Debian packages")" \
@@ -3728,11 +3810,13 @@ menu_loop_plain() {
     echo " 35) $(T "Починить или переустановить команду меню" "Repair or reinstall menu command")"
     echo " 36) $(T "Изменить язык интерфейса" "Change interface language")"
     echo " 37) $(T "Отключить автозапуск меню" "Disable menu autostart")"
-    echo " 38) $(T "Включить автозапуск меню" "Enable menu autostart")"
+    echo " 38) $(T "Отключить автозапуск меню" "Disable menu autostart")"
+    echo " 39) $(T "Логи удалённой установки VPS" "Remote VPS install logs")"
+    echo " 40) $(T "Включить автозапуск меню" "Enable menu autostart")"
     echo
     echo "  0) $(T "Выход" "Exit")"
     echo
-    if ! read -rp "$(T "Выбери действие [0-39]: " "Choose action [0-39]: ")" choice; then
+    if ! read -rp "$(T "Выбери действие [0-40]: " "Choose action [0-40]: ")" choice; then
       echo
       continue
     fi
@@ -3775,7 +3859,8 @@ menu_loop_plain() {
       36) repair_menu_installation ;;
       37) change_language ;;
       38) disable_login_menu ;;
-      39) enable_login_menu ;;
+      39) show_remote_install_logs ;;
+      40) enable_login_menu ;;
       0) exit 0 ;;
       *) echo "$(T "Неизвестный пункт меню." "Unknown menu item.")"; pause ;;
     esac
@@ -4774,7 +4859,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.8-remote-vps-install-log-name-fix"
+SCRIPT_VERSION="v0.7.9-remote-vps-clean-install-log-version-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5320,7 +5405,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.8-remote-vps-install-log-name-fix"
+SCRIPT_VERSION="v0.7.9-remote-vps-clean-install-log-version-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -5565,7 +5650,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.8-remote-vps-install-log-name-fix"
+SCRIPT_VERSION="v0.7.9-remote-vps-clean-install-log-version-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then

@@ -130,7 +130,7 @@ change_language() {
 CONFIG_DIR="/root/crowdsec-vps-node"
 ENV_FILE="${CONFIG_DIR}/node.env"
 FAIL2BAN_BACKUP_DIR="${CONFIG_DIR}/fail2ban-backup"
-SCRIPT_VERSION="v0.4.5-bouncer-dpkg-recovery-fix"
+SCRIPT_VERSION="v0.4.6-clean-reinstall-cache-log-fix"
 SCRIPT_RELEASE_DATE="2026-05-22"
 LOCK_FILE="/var/lock/crowdsec-vps-node.lock"
 LOCK_FD=200
@@ -588,6 +588,60 @@ ask_settings() {
   HUB_ITEM_SELECTION_MODE="${input_hub_items:-none}"
 
   save_env
+}
+
+
+is_crowdsec_package_present() {
+  dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' "$@" 2>/dev/null | awk '$1 !~ /^un/ {found=1} END {exit found ? 0 : 1}'
+}
+
+force_clean_existing_crowdsec_install() {
+  # Clean broken or previous CrowdSec packages before any apt install.
+  # This is required when crowdsec-firewall-bouncer-* is half-configured:
+  # any unrelated apt install/upgrade can re-run the broken postinst and fail.
+  local pkgs=(
+    crowdsec-firewall-bouncer-nftables
+    crowdsec-firewall-bouncer-iptables
+    crowdsec-firewall-bouncer
+    crowdsec
+  )
+  local found="no"
+
+  if is_crowdsec_package_present "${pkgs[@]}"; then
+    found="yes"
+  fi
+  if dpkg --audit 2>/dev/null | grep -qiE 'crowdsec|firewall-bouncer'; then
+    found="yes"
+  fi
+
+  if [[ "${found}" != "yes" ]]; then
+    ok "$(T "Старые пакеты CrowdSec/firewall-bouncer не найдены." "No old CrowdSec/firewall-bouncer packages found.")"
+    return 0
+  fi
+
+  warn "$(T "Найдена старая или повреждённая установка CrowdSec/firewall-bouncer. Останавливаю и удаляю перед чистой установкой." "Old or broken CrowdSec/firewall-bouncer installation found. Stopping and removing it before clean installation.")"
+
+  systemctl stop crowdsec-firewall-bouncer 2>/dev/null || true
+  systemctl disable crowdsec-firewall-bouncer 2>/dev/null || true
+  systemctl reset-failed crowdsec-firewall-bouncer 2>/dev/null || true
+  systemctl stop crowdsec 2>/dev/null || true
+  systemctl disable crowdsec 2>/dev/null || true
+  systemctl reset-failed crowdsec 2>/dev/null || true
+
+  # Remove packages with service autostart blocked. Do not use plain apt here first:
+  # apt may try to configure a broken half-installed package before removing it.
+  with_policy_rcd_blocked dpkg --remove --force-all "${pkgs[@]}" 2>/dev/null || true
+  with_policy_rcd_blocked dpkg --purge --force-all "${pkgs[@]}" 2>/dev/null || true
+
+  rm -rf /etc/crowdsec /var/lib/crowdsec /var/log/crowdsec 2>/dev/null || true
+  rm -f /etc/systemd/system/crowdsec-firewall-bouncer.service 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+
+  export DEBIAN_FRONTEND=noninteractive
+  with_policy_rcd_blocked apt-get -f install -y 2>/dev/null || true
+  dpkg --audit 2>/dev/null || true
+
+  ok "$(T "Старая установка CrowdSec/firewall-bouncer очищена." "Old CrowdSec/firewall-bouncer installation cleaned.")"
 }
 
 install_base() {
@@ -1088,7 +1142,17 @@ install_firewall_bouncer_package_safely() {
   if [[ "${rc}" -ne 0 ]]; then
     warn "dpkg --configure -a вернул ошибку ${rc}. Пробую apt-get -f install после повторной записи config."
     write_firewall_bouncer_config
-    apt-get -f install -y
+    with_policy_rcd_blocked apt-get -f install -y
+    rc=$?
+  fi
+
+  if [[ "${rc}" -ne 0 ]]; then
+    warn "Пакет ${FIREWALL_BOUNCER_PACKAGE} всё ещё не настроен. Удаляю сломанный bouncer и ставлю заново."
+    with_policy_rcd_blocked dpkg --remove --force-all crowdsec-firewall-bouncer-nftables crowdsec-firewall-bouncer-iptables crowdsec-firewall-bouncer 2>/dev/null || true
+    with_policy_rcd_blocked dpkg --purge --force-all crowdsec-firewall-bouncer-nftables crowdsec-firewall-bouncer-iptables crowdsec-firewall-bouncer 2>/dev/null || true
+    rm -rf /etc/crowdsec/bouncers 2>/dev/null || true
+    write_firewall_bouncer_config
+    with_policy_rcd_blocked apt-get install -y "${FIREWALL_BOUNCER_PACKAGE}"
     rc=$?
   fi
 
@@ -1268,6 +1332,7 @@ full_install() {
   fi
   if tui_available && is_interactive && [[ -t 1 ]]; then
     tui_theme
+    run_install_step "$(T "Очищаю старую/битую установку CrowdSec" "Cleaning old/broken CrowdSec installation")" force_clean_existing_crowdsec_install
     run_install_step "$(T "Устанавливаю базовые пакеты" "Installing base packages")" install_base
     run_install_step "$(T "Удаляю Fail2Ban при наличии" "Removing Fail2Ban if present")" remove_fail2ban_if_installed
     run_install_step "$(T "Подключаю репозиторий CrowdSec" "Configuring CrowdSec repository")" install_crowdsec_repo
@@ -1283,6 +1348,7 @@ full_install() {
     run_install_step "$(T "Проверяю конфигурацию" "Checking configuration")" test_config
     run_install_step "$(T "Перезапускаю сервисы" "Restarting services")" restart_services
   else
+    force_clean_existing_crowdsec_install
     install_base
     remove_fail2ban_if_installed
     install_crowdsec_repo
