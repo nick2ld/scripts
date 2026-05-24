@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.17-openwrt-ssh-auto-apply-fix"
+SCRIPT_VERSION="v0.7.18-openwrt-ssh-verify-auto-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4245,7 +4245,7 @@ command -v logger >/dev/null 2>&1 || exit 127
 
 while true; do
   logread -f 2>/dev/null | grep -Ei "\$PATTERN" | while IFS= read -r line; do
-    logger -n "\$CENTRAL_HOST" -P "\$CENTRAL_PORT" -t "\$TAG" -- "\$line" 2>/dev/null || true
+    logger -n "\$CENTRAL_HOST" -P "\$CENTRAL_PORT" -t "\$TAG" "\$line" 2>/dev/null || true
   done
   sleep 2
 done
@@ -4260,16 +4260,29 @@ USE_PROCD=1
 
 start_service() {
   procd_open_instance
-  procd_set_param command /usr/bin/crowdsec-log-forwarder
+  procd_set_param command /bin/sh /usr/bin/crowdsec-log-forwarder
   procd_set_param respawn 5 5 0
   procd_close_instance
 }
 INIT_EOF
 chmod +x '${init_path}'
 
+'${init_path}' stop 2>/dev/null || true
 '${init_path}' enable
-'${init_path}' restart
-sleep 1
+if ! '${init_path}' start; then
+  echo 'ERROR: crowdsec-log-forwarder service failed to start' >&2
+  '${init_path}' status 2>&1 || true
+  logread | tail -80 || true
+  exit 31
+fi
+sleep 2
+if ! ps w 2>/dev/null | grep '[c]rowdsec-log-forwarder' >/dev/null 2>&1; then
+  echo 'ERROR: crowdsec-log-forwarder process is not running after start' >&2
+  '${init_path}' status 2>&1 || true
+  logread | tail -80 || true
+  exit 32
+fi
+echo 'OK: crowdsec-log-forwarder installed and running'
 '${init_path}' status || true
 logread | tail -50
 EOF
@@ -4295,7 +4308,7 @@ EOF
 
 apply_openwrt_helper_via_ssh() {
   local router_ip="$1" helper_script="$2" action_title="$3"
-  local ssh_host ssh_port ssh_user ssh_password rc
+  local ssh_host ssh_port ssh_user ssh_password rc log_dir apply_log test_out
 
   ssh_host="${router_ip}"
   ssh_port="22"
@@ -4322,7 +4335,7 @@ apply_openwrt_helper_via_ssh() {
     [[ "${rc}" -eq 0 ]] || return 0
 
     set +e
-    ssh_password="$(whiptail --title " OpenWrt SSH " --passwordbox "$(T "SSH пароль OpenWrt. Если настроен вход по ключу, оставь пустым." "OpenWrt SSH password. If key login is configured, leave empty.")" 11 84 "" 3>&1 1>&2 2>&3)"
+    ssh_password="$(whiptail --title " OpenWrt SSH " --passwordbox "$(T "SSH пароль OpenWrt. Символы в пароле допустимы. Если настроен вход по ключу, оставь пустым." "OpenWrt SSH password. Special characters are supported. If key login is configured, leave empty.")" 12 92 "" 3>&1 1>&2 2>&3)"
     rc=$?
     set -e
     [[ "${rc}" -eq 0 ]] || return 0
@@ -4345,27 +4358,108 @@ apply_openwrt_helper_via_ssh() {
   [[ -n "${ssh_user}" ]] || fail "$(T "SSH логин OpenWrt пустой." "OpenWrt SSH login is empty.")"
   [[ -f "${helper_script}" ]] || fail "$(T "Helper-скрипт не найден:" "Helper script not found:") ${helper_script}"
 
-  openwrt_ssh_apply_inner() {
+  log_dir="${CONFIG_DIR}/openwrt-helper-scripts"
+  mkdir -p "${log_dir}"
+  chmod 700 "${log_dir}" 2>/dev/null || true
+  apply_log="${log_dir}/$(printf '%s' "${ssh_host}" | tr -cd 'A-Za-z0-9._-')-apply-$(date +%Y%m%d-%H%M%S).log"
+
+  openwrt_ssh_cmd() {
+    local remote_cmd="$1"
     if [[ -n "${ssh_password}" ]]; then
       ensure_remote_ssh_tools >/dev/null
       SSHPASS="${ssh_password}" sshpass -e ssh \
         -o StrictHostKeyChecking=accept-new \
         -o UserKnownHostsFile=/root/.ssh/known_hosts \
         -o ConnectTimeout=20 \
+        -o BatchMode=no \
+        -o NumberOfPasswordPrompts=1 \
+        -o PreferredAuthentications=password,keyboard-interactive \
+        -o PubkeyAuthentication=no \
         -p "${ssh_port}" \
-        "${ssh_user}@${ssh_host}" 'sh -s' < "${helper_script}"
+        "${ssh_user}@${ssh_host}" "${remote_cmd}"
     else
       command -v ssh >/dev/null 2>&1 || apt-get install -y openssh-client >/dev/null
       ssh \
         -o StrictHostKeyChecking=accept-new \
         -o UserKnownHostsFile=/root/.ssh/known_hosts \
         -o ConnectTimeout=20 \
+        -o BatchMode=no \
+        -o NumberOfPasswordPrompts=1 \
         -p "${ssh_port}" \
-        "${ssh_user}@${ssh_host}" 'sh -s' < "${helper_script}"
+        "${ssh_user}@${ssh_host}" "${remote_cmd}"
     fi
   }
 
-  run_with_live_progress "${action_title}" openwrt_ssh_apply_inner
+  openwrt_ssh_apply_inner() {
+    echo "OpenWrt SSH apply log"
+    echo "Time: $(date -Is)"
+    echo "Target: ${ssh_user}@${ssh_host}:${ssh_port}"
+    echo "Helper: ${helper_script}"
+    echo
+    echo "==> Testing SSH login"
+    set +e
+    test_out="$(openwrt_ssh_cmd 'printf openwrt-ssh-ok' 2>&1)"
+    rc=$?
+    set -e
+    if [[ "${rc}" -ne 0 ]]; then
+      echo "ERROR: SSH login test failed" >&2
+      echo "${test_out}" >&2
+      return 21
+    fi
+    echo "${test_out}"
+    if [[ "${test_out}" != *"openwrt-ssh-ok"* ]]; then
+      echo "ERROR: unexpected SSH test output" >&2
+      return 22
+    fi
+    echo
+    echo "==> Uploading and running helper script"
+    if [[ -n "${ssh_password}" ]]; then
+      SSHPASS="${ssh_password}" sshpass -e ssh \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile=/root/.ssh/known_hosts \
+        -o ConnectTimeout=20 \
+        -o BatchMode=no \
+        -o NumberOfPasswordPrompts=1 \
+        -o PreferredAuthentications=password,keyboard-interactive \
+        -o PubkeyAuthentication=no \
+        -p "${ssh_port}" \
+        "${ssh_user}@${ssh_host}" 'sh -s' < "${helper_script}"
+    else
+      ssh \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile=/root/.ssh/known_hosts \
+        -o ConnectTimeout=20 \
+        -o BatchMode=no \
+        -o NumberOfPasswordPrompts=1 \
+        -p "${ssh_port}" \
+        "${ssh_user}@${ssh_host}" 'sh -s' < "${helper_script}"
+    fi
+    echo
+    echo "==> Verifying installed files and process"
+    openwrt_ssh_cmd 'test -x /usr/bin/crowdsec-log-forwarder && test -x /etc/init.d/crowdsec-log-forwarder && /etc/init.d/crowdsec-log-forwarder enabled >/dev/null 2>&1 && ps w | grep "[c]rowdsec-log-forwarder" >/dev/null'
+  }
+
+  openwrt_ssh_apply_logged() {
+    set +e
+    openwrt_ssh_apply_inner 2>&1 | tee -a "${apply_log}"
+    local inner_rc="${PIPESTATUS[0]}"
+    set -e
+    return "${inner_rc}"
+  }
+
+  if run_with_live_progress "${action_title}" openwrt_ssh_apply_logged; then
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+      whiptail --title " $(T "OpenWrt настроен" "OpenWrt configured") " --msgbox "$(T "Настройка применена на OpenWrt и проверена.\n\nЛог:" "Setup was applied to OpenWrt and verified.\n\nLog:")\n${apply_log}" 11 88 || true
+    fi
+    return 0
+  fi
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    whiptail --title " $(T "Ошибка OpenWrt SSH" "OpenWrt SSH error") " --textbox "${apply_log}" 30 120 || true
+  else
+    cat "${apply_log}" >&2 || true
+  fi
+  return 1
 }
 
 configure_device_event_intake() {
@@ -5155,7 +5249,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.17-openwrt-ssh-auto-apply-fix"
+SCRIPT_VERSION="v0.7.18-openwrt-ssh-verify-auto-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5708,7 +5802,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.17-openwrt-ssh-auto-apply-fix"
+SCRIPT_VERSION="v0.7.18-openwrt-ssh-verify-auto-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -5953,7 +6047,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.17-openwrt-ssh-auto-apply-fix"
+SCRIPT_VERSION="v0.7.18-openwrt-ssh-verify-auto-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
