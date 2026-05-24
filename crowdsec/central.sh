@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.15-device-events-menu-path-fix"
+SCRIPT_VERSION="v0.7.16-openwrt-forwarder-worker-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -160,6 +160,7 @@ REMOTE_SYSLOG_DIAG_DIR="/var/log/crowdsec-remote-diagnostic"
 DEFAULT_REMOTE_SYSLOG_PORT="5140"
 CROWDSEC_ALLOWLIST_FILE="${CONFIG_DIR}/crowdsec-allowlist.tsv"
 CROWDSEC_LAPI_ALLOWLIST_NAME="central-script-allowlist"
+OPENWRT_HELPER_DIR="${CONFIG_DIR}/openwrt-helper-scripts"
 # Legacy variable kept only for migration from older script versions.
 TRUSTED_IP_FILE="${CONFIG_DIR}/trusted-ip-allowlist.tsv"
 
@@ -4206,6 +4207,91 @@ check_bouncer_device_status() {
   rm -f "${tmp}"
 }
 
+
+write_openwrt_forwarder_helper_scripts() {
+  local name="$1" router_ip="$2" central_host="$3" port="$4" out_dir install_script uninstall_script worker_path init_path
+  out_dir="${OPENWRT_HELPER_DIR:-${CONFIG_DIR}/openwrt-helper-scripts}"
+  mkdir -p "${out_dir}"
+  chmod 700 "${out_dir}" 2>/dev/null || true
+  install_script="${out_dir}/${name}-install-crowdsec-log-forwarder.sh"
+  uninstall_script="${out_dir}/${name}-remove-crowdsec-log-forwarder.sh"
+  worker_path="/usr/bin/crowdsec-log-forwarder"
+  init_path="/etc/init.d/crowdsec-log-forwarder"
+
+  cat > "${install_script}" <<EOF
+#!/bin/sh
+set -eu
+
+CENTRAL_HOST='${central_host}'
+CENTRAL_PORT='${port}'
+TAG='openwrt-crowdsec'
+PATTERN='dropbear|sshd|auth|login|failed|failure|invalid|refused|denied|DROP|Drop|drop|REJECT|Reject|reject|blocked|Blocked|ban|Ban|nft|iptables|firewall|Firewall|kernel'
+
+uci delete system.@system[0].log_ip 2>/dev/null || true
+uci delete system.@system[0].log_port 2>/dev/null || true
+uci delete system.@system[0].log_proto 2>/dev/null || true
+uci commit system
+/etc/init.d/log restart || true
+
+cat > '${worker_path}' <<'WORKER_EOF'
+#!/bin/sh
+CENTRAL_HOST='${central_host}'
+CENTRAL_PORT='${port}'
+TAG='openwrt-crowdsec'
+PATTERN='dropbear|sshd|auth|login|failed|failure|invalid|refused|denied|DROP|Drop|drop|REJECT|Reject|reject|blocked|Blocked|ban|Ban|nft|iptables|firewall|Firewall|kernel'
+
+command -v logread >/dev/null 2>&1 || exit 127
+command -v logger >/dev/null 2>&1 || exit 127
+
+while true; do
+  logread -f 2>/dev/null | grep -Ei "\$PATTERN" | while IFS= read -r line; do
+    logger -n "\$CENTRAL_HOST" -P "\$CENTRAL_PORT" -t "\$TAG" -- "\$line" 2>/dev/null || true
+  done
+  sleep 2
+done
+WORKER_EOF
+chmod +x '${worker_path}'
+
+cat > '${init_path}' <<'INIT_EOF'
+#!/bin/sh /etc/rc.common
+START=99
+STOP=10
+USE_PROCD=1
+
+start_service() {
+  procd_open_instance
+  procd_set_param command /usr/bin/crowdsec-log-forwarder
+  procd_set_param respawn 5 5 0
+  procd_close_instance
+}
+INIT_EOF
+chmod +x '${init_path}'
+
+'${init_path}' enable
+'${init_path}' restart
+sleep 1
+'${init_path}' status || true
+logread | tail -50
+EOF
+
+  cat > "${uninstall_script}" <<'EOF'
+#!/bin/sh
+set -eu
+/etc/init.d/crowdsec-log-forwarder stop 2>/dev/null || true
+/etc/init.d/crowdsec-log-forwarder disable 2>/dev/null || true
+rm -f /etc/init.d/crowdsec-log-forwarder /usr/bin/crowdsec-log-forwarder
+uci delete system.@system[0].log_ip 2>/dev/null || true
+uci delete system.@system[0].log_port 2>/dev/null || true
+uci delete system.@system[0].log_proto 2>/dev/null || true
+uci commit system
+/etc/init.d/log restart || true
+logread | tail -50
+EOF
+
+  chmod 600 "${install_script}" "${uninstall_script}" 2>/dev/null || true
+  printf '%s\t%s\n' "${install_script}" "${uninstall_script}"
+}
+
 configure_device_event_intake() {
   safe_source_env
   local rec name ip cidr port proto mode tmp
@@ -4270,31 +4356,29 @@ configure_device_event_intake() {
     echo "uci commit system"
     echo "/etc/init.d/log restart"
     echo
-    echo "OpenWrt 25 рекомендуемая схема: отдельная копия через logread -f, без поломки локального системного журнала:"
-    echo "cat >/etc/init.d/crowdsec-log-forwarder <<'EOF'"
-    echo "#!/bin/sh /etc/rc.common"
-    echo "START=99"
-    echo "STOP=10"
-    echo "USE_PROCD=1"
-    echo "start_service() {"
-    echo "  procd_open_instance"
-    echo "  procd_set_param command /bin/sh -c \"logread -f | grep -Ei 'dropbear|sshd|auth|login|failed|failure|invalid|refused|denied|DROP|Drop|drop|REJECT|Reject|reject|blocked|Blocked|ban|Ban|nft|iptables|firewall|Firewall|kernel' | while IFS= read -r line; do logger -n '${LAN_IP}' -P '${port}' -t openwrt-crowdsec -- \\\"\\\$line\\\"; done\""
-    echo "  procd_set_param respawn 5 5 0"
-    echo "  procd_close_instance"
-    echo "}"
-    echo "EOF"
-    echo "chmod +x /etc/init.d/crowdsec-log-forwarder"
-    echo "/etc/init.d/crowdsec-log-forwarder enable"
-    echo "/etc/init.d/crowdsec-log-forwarder restart"
+    local helper_paths install_helper uninstall_helper
+    helper_paths="$(write_openwrt_forwarder_helper_scripts "${name}" "${ip}" "${LAN_IP}" "${port}")"
+    install_helper="$(printf '%s' "${helper_paths}" | awk -F'	' 'NR==1{print $1}')"
+    uninstall_helper="$(printf '%s' "${helper_paths}" | awk -F'	' 'NR==1{print $2}')"
+    echo "OpenWrt 25 рекомендуемая схема: отдельный worker + procd init."
+    echo "Скрипт больше не вставляет длинную команду в procd_set_param command, потому что OpenWrt/LuCI/терминал ломают переносы, и получается: Command failed: Not found."
     echo
-    echo "Проверка на OpenWrt:"
+    echo "Самый удобный способ - выполнить с central одной короткой командой:"
+    echo "ssh root@${ip} 'sh -s' < ${install_helper}"
+    echo
+    echo "Если SSH с central на роутер недоступен, готовый install-скрипт лежит на central здесь:"
+    echo "${install_helper}"
+    echo
+    echo "Готовый скрипт удаления схемы на central:"
+    echo "${uninstall_helper}"
+    echo
+    echo "Проверка на OpenWrt после установки:"
     echo "/etc/init.d/crowdsec-log-forwarder status"
+    echo "ps w | grep crowdsec-log-forwarder | grep -v grep"
     echo "logread | tail -50"
     echo
-    echo "Отключить эту схему на OpenWrt:"
-    echo "/etc/init.d/crowdsec-log-forwarder stop 2>/dev/null || true"
-    echo "/etc/init.d/crowdsec-log-forwarder disable 2>/dev/null || true"
-    echo "rm -f /etc/init.d/crowdsec-log-forwarder"
+    echo "Проверка на central:"
+    echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/${ip}.security.log"
     echo
     echo "Filtered log for CrowdSec:"
     echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/${ip}.security.log"
@@ -4960,7 +5044,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.15-device-events-menu-path-fix"
+SCRIPT_VERSION="v0.7.16-openwrt-forwarder-worker-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5513,7 +5597,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.15-device-events-menu-path-fix"
+SCRIPT_VERSION="v0.7.16-openwrt-forwarder-worker-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -5758,7 +5842,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.15-device-events-menu-path-fix"
+SCRIPT_VERSION="v0.7.16-openwrt-forwarder-worker-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
