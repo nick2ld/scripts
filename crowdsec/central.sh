@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.5-docker-engine-no-host-cscli"
+SCRIPT_VERSION="v0.7.6-first-install-manager-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -3487,6 +3487,7 @@ run_menu_action() {
     bouncer_key) regenerate_bouncer_key ;;
     firewall) show_firewall; pause ;;
     test_lapi) test_webui_lapi; pause ;;
+    install_stack) install_or_repair_full_stack ;;
     restart) restart_services ;;
     update_webui) update_web_ui_only ;;
     logs) show_logs; pause ;;
@@ -3588,7 +3589,8 @@ menu_loop_whiptail() {
             3>&1 1>&2 2>&3)" || break
           ;;
         service)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Обслуживание и диагностика" "Maintenance and diagnostics") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 23 90 10 \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Обслуживание и диагностика" "Maintenance and diagnostics") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 24 96 11 \
+            "install_stack" "$(T "Установить/восстановить CrowdSec Manager + Dockerized CrowdSec" "Install/repair CrowdSec Manager + Dockerized CrowdSec")" \
             "restart" "$(T "Перезапустить CrowdSec, Docker и Web UI" "Restart CrowdSec, Docker and Web UI")" \
             "update_webui" "$(T "Обновить CrowdSec Manager" "Update CrowdSec Manager")" \
             "logs" "$(T "Показать логи Manager и CrowdSec" "Show Manager and CrowdSec logs")" \
@@ -3678,7 +3680,7 @@ menu_loop_plain() {
     echo
     echo "  0) $(T "Выход" "Exit")"
     echo
-    if ! read -rp "$(T "Выбери действие [0-38]: " "Choose action [0-38]: ")" choice; then
+    if ! read -rp "$(T "Выбери действие [0-39]: " "Choose action [0-39]: ")" choice; then
       echo
       continue
     fi
@@ -3717,10 +3719,11 @@ menu_loop_plain() {
       32) update_docker_only ;;
       33) update_crowdsec_only ;;
       34) show_versions; pause ;;
-      35) repair_menu_installation ;;
-      36) change_language ;;
-      37) disable_login_menu ;;
-      38) enable_login_menu ;;
+      35) install_or_repair_full_stack ;;
+      36) repair_menu_installation ;;
+      37) change_language ;;
+      38) disable_login_menu ;;
+      39) enable_login_menu ;;
       0) exit 0 ;;
       *) echo "$(T "Неизвестный пункт меню." "Unknown menu item.")"; pause ;;
     esac
@@ -4686,6 +4689,7 @@ run_menu_action() {
     bouncer_key) regenerate_bouncer_key ;;
     firewall) show_firewall; pause ;;
     test_lapi) test_webui_lapi; pause ;;
+    install_stack) install_or_repair_full_stack ;;
     restart) restart_services ;;
     update_webui) update_web_ui_only ;;
     logs) show_logs; pause ;;
@@ -4952,6 +4956,7 @@ run_menu_action() {
     bouncer_key) regenerate_bouncer_key ;;
     firewall) show_firewall; pause ;;
     test_lapi) test_webui_lapi; pause ;;
+    install_stack) install_or_repair_full_stack ;;
     restart) restart_services ;;
     update_webui) update_web_ui_only ;;
     logs) show_logs; pause ;;
@@ -5750,15 +5755,64 @@ update_installed_stack() {
 }
 
 
+
+# -----------------------------------------------------------------------------
+# v0.7.6 first-install and CrowdSec Manager stack fixes
+# -----------------------------------------------------------------------------
+
+is_crowdsec_manager_stack_installed() {
+  # Do not use the mere existence of central.env as an installation marker:
+  # first language selection writes UI_LANG there before the stack is installed.
+  [[ -f "${MANAGER_COMPOSE_FILE}" ]] && return 0
+  if command -v docker >/dev/null 2>&1; then
+    docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Eq '^(crowdsec|crowdsec-manager)$' && return 0
+  fi
+  return 1
+}
+
+install_or_repair_full_stack() {
+  require_root
+  safe_source_env
+  if [[ ! -f "${ENV_FILE}" ]] || ! grep -q '^WEB_PORT=' "${ENV_FILE}" 2>/dev/null || ! grep -q '^LAPI_PORT=' "${ENV_FILE}" 2>/dev/null; then
+    if [[ "${CROWDSEC_TUI_MODE:-}" =~ ^(whiptail|installer)$ ]] && tui_available; then
+      ask_initial_settings_tui
+    else
+      ask_initial_settings
+    fi
+  fi
+
+  run_menu_step "$(T "Установка базовых пакетов" "Installing base packages")" install_base
+  run_menu_step "$(T "Установка/обновление Docker" "Installing/updating Docker")" install_or_update_docker
+  WEB_UI_TYPE="manager"
+  save_env
+  run_menu_step "$(T "Установка/восстановление CrowdSec Manager + Dockerized CrowdSec" "Installing/repairing CrowdSec Manager + Dockerized CrowdSec")" install_or_update_crowdsec_manager
+  run_menu_step "$(T "Применение базовой защиты CrowdSec" "Applying base CrowdSec protection")" apply_initial_protection_baseline
+  run_menu_step "$(T "Настройка UFW firewall" "Configuring UFW firewall")" configure_ufw_full
+  run_menu_step "$(T "Установка команды меню" "Installing menu command")" install_menu_files
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" =~ ^(whiptail|installer)$ ]] && tui_available; then
+    show_install_result_tui
+  else
+    show_install_result
+    pause
+  fi
+}
+
 acquire_script_lock
 load_saved_language
 choose_language_if_needed
 
 case "${1:-}" in
-  --install) full_install ;;
-  --menu) menu_loop ;;
+  --install)
+    full_install
+    ;;
+  --menu)
+    menu_loop
+    ;;
   *)
-    if [[ "$(basename "$0")" == "crowdsec-central-menu" || -f "${ENV_FILE}" ]]; then
+    if [[ "$(basename "$0")" == "crowdsec-central-menu" ]]; then
+      menu_loop
+    elif is_crowdsec_manager_stack_installed; then
       menu_loop
     else
       full_install
