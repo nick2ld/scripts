@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.13-direct-machine-credentials-fix"
+SCRIPT_VERSION="v0.7.14-openwrt-syslog-allowlists-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -159,6 +159,7 @@ REMOTE_SYSLOG_DIR="/var/log/crowdsec-remote"
 REMOTE_SYSLOG_DIAG_DIR="/var/log/crowdsec-remote-diagnostic"
 DEFAULT_REMOTE_SYSLOG_PORT="5140"
 CROWDSEC_ALLOWLIST_FILE="${CONFIG_DIR}/crowdsec-allowlist.tsv"
+CROWDSEC_LAPI_ALLOWLIST_NAME="central-script-allowlist"
 # Legacy variable kept only for migration from older script versions.
 TRUSTED_IP_FILE="${CONFIG_DIR}/trusted-ip-allowlist.tsv"
 
@@ -1607,7 +1608,7 @@ show_remote_syslog_devices() {
       echo "$(T "Пока нет устройств syslog." "No syslog devices yet.")"
     fi
     echo
-    echo "$(T "Важно: bouncer сам не отправляет события. OpenWrt/устройство отправляет копию syslog на central, локальный logread на устройстве при этом остаётся. По умолчанию central пишет в CrowdSec только отфильтрованные security/firewall/auth события, а не весь лог." "Important: a bouncer does not send events. OpenWrt/the device sends a syslog copy to central, while local logread on the device remains available. By default central writes only filtered security/firewall/auth events to CrowdSec, not the full log.")"
+    echo "$(T "Важно: bouncer сам не отправляет события. OpenWrt/устройство должно отправлять копию logread/syslog на central отдельным сервисом; не используй system.@system[0].log_ip, если из-за него пропадает локальный журнал. По умолчанию central пишет в CrowdSec только отфильтрованные security/firewall/auth события, а не весь лог." "Important: a bouncer does not send events. OpenWrt/the device should send a logread/syslog copy to central through a separate service; do not use system.@system[0].log_ip if it breaks the local log view. By default central writes only filtered security/firewall/auth events to CrowdSec, not the full log.")"
   } > "${tmp}"
   show_file "$(T "Syslog устройства" "Syslog devices")" "${tmp}"
   rm -f "${tmp}"
@@ -4219,7 +4220,7 @@ configure_device_event_intake() {
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
     mode="$(whiptail --title " $(T "Режим логов устройства" "Device log mode") " \
       --cancel-button "$(T "Отмена" "Cancel")" --ok-button "$(T "Выбрать" "Select")" --notags \
-      --menu "$(T "Выберите режим.\n\nFiltered security events - рекомендуемый режим. Устройство отправляет копию syslog на central, но central пишет в CrowdSec только security/firewall/auth строки. Локальный logread на OpenWrt остаётся.\n\nFull diagnostic syslog - весь syslog пишется только в диагностический файл, а CrowdSec всё равно читает только filtered security файл." "Choose mode.\n\nFiltered security events - recommended. The device sends a syslog copy to central, but central writes only security/firewall/auth lines to CrowdSec. Local OpenWrt logread remains.\n\nFull diagnostic syslog - full syslog is written only to a diagnostic file, while CrowdSec still reads only the filtered security file.")" \
+      --menu "$(T "Выберите режим.\n\nFiltered security events - рекомендуемый режим. Устройство отправляет копию logread/syslog на central отдельным сервисом, но central пишет в CrowdSec только security/firewall/auth строки. Локальный logread на OpenWrt остаётся.\n\nFull diagnostic syslog - весь syslog пишется только в диагностический файл, а CrowdSec всё равно читает только filtered security файл." "Choose mode.\n\nFiltered security events - recommended. The device sends a logread/syslog copy to central through a separate service, but central writes only security/firewall/auth lines to CrowdSec. Local OpenWrt logread remains.\n\nFull diagnostic syslog - full syslog is written only to a diagnostic file, while CrowdSec still reads only the filtered security file.")" \
       22 100 2 \
       "filtered" "$(T "Только security/firewall/auth события для CrowdSec" "Only security/firewall/auth events for CrowdSec")" \
       "full" "$(T "Filtered для CrowdSec + полный диагностический лог отдельно" "Filtered for CrowdSec + separate full diagnostic log")" \
@@ -4227,7 +4228,7 @@ configure_device_event_intake() {
 
     port="$(whiptail --title " $(T "Syslog порт" "Syslog port") " --inputbox "$(T "Порт syslog на central.\n\n5140 выбран специально, чтобы не занимать привилегированный 514." "Syslog port on central.\n\n5140 is used to avoid the privileged 514 port.")" 11 86 "${DEFAULT_REMOTE_SYSLOG_PORT}" 3>&1 1>&2 2>&3)" || return 0
 
-    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Включить" "Enable")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Скрипт настроит central на приём копии syslog от выбранного устройства.\n\nПо умолчанию в CrowdSec попадут только отфильтрованные security/firewall/auth события. Весь лог НЕ будет читаться CrowdSec.\n\nСкрипт НЕ меняет роутер автоматически, а только покажет команды UCI." "The script will configure central to receive a syslog copy from the selected device.\n\nBy default only filtered security/firewall/auth events go to CrowdSec. The full log is NOT read by CrowdSec.\n\nThe script does NOT change the router automatically, it only shows UCI commands.")" 17 96 || return 0
+    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Включить" "Enable")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Скрипт настроит central на приём копии syslog от выбранного устройства.\n\nПо умолчанию в CrowdSec попадут только отфильтрованные security/firewall/auth события. Весь лог НЕ будет читаться CrowdSec.\n\nСкрипт НЕ меняет роутер автоматически, а только покажет команды для отдельного OpenWrt-сервиса logread-forwarder." "The script will configure central to receive a syslog copy from the selected device.\n\nBy default only filtered security/firewall/auth events go to CrowdSec. The full log is NOT read by CrowdSec.\n\nThe script does NOT change the router automatically, it only shows commands for a separate OpenWrt logread-forwarder service.")" 17 96 || return 0
   else
     echo "$(T "Режим логов:" "Log mode:")"
     echo "1) filtered - $(T "только security/firewall/auth события для CrowdSec" "only security/firewall/auth events for CrowdSec")"
@@ -4262,19 +4263,38 @@ configure_device_event_intake() {
     echo "$(T "Как это работает:" "How it works:")"
     echo "$(T "OpenWrt отправляет КОПИЮ syslog на central. Локальный logread на OpenWrt остаётся. Central фильтрует поток и отдаёт CrowdSec только security/firewall/auth события." "OpenWrt sends a syslog COPY to central. Local OpenWrt logread remains. Central filters the stream and gives CrowdSec only security/firewall/auth events.")"
     echo
-    echo "OpenWrt 25 отправка syslog copy на central:"
-    echo "uci set system.@system[0].log_ip='${LAN_IP}'"
-    echo "uci set system.@system[0].log_port='${port}'"
-    echo "uci set system.@system[0].log_proto='udp'"
+    echo "OpenWrt 25: сначала откати старую схему через system.@system[0].log_ip, если она была включена:"
+    echo "uci delete system.@system[0].log_ip 2>/dev/null || true"
+    echo "uci delete system.@system[0].log_port 2>/dev/null || true"
+    echo "uci delete system.@system[0].log_proto 2>/dev/null || true"
     echo "uci commit system"
     echo "/etc/init.d/log restart"
     echo
-    echo "OpenWrt 25 отключить remote syslog обратно:"
-    echo "uci delete system.@system[0].log_ip 2>/dev/null"
-    echo "uci delete system.@system[0].log_port 2>/dev/null"
-    echo "uci delete system.@system[0].log_proto 2>/dev/null"
-    echo "uci commit system"
-    echo "/etc/init.d/log restart"
+    echo "OpenWrt 25 рекомендуемая схема: отдельная копия через logread -f, без поломки локального системного журнала:"
+    echo "cat >/etc/init.d/crowdsec-log-forwarder <<'EOF'"
+    echo "#!/bin/sh /etc/rc.common"
+    echo "START=99"
+    echo "STOP=10"
+    echo "USE_PROCD=1"
+    echo "start_service() {"
+    echo "  procd_open_instance"
+    echo "  procd_set_param command /bin/sh -c \"logread -f | grep -Ei 'dropbear|sshd|auth|login|failed|failure|invalid|refused|denied|DROP|Drop|drop|REJECT|Reject|reject|blocked|Blocked|ban|Ban|nft|iptables|firewall|Firewall|kernel' | while IFS= read -r line; do logger -n '${LAN_IP}' -P '${port}' -t openwrt-crowdsec -- \\\"\\\$line\\\"; done\""
+    echo "  procd_set_param respawn 5 5 0"
+    echo "  procd_close_instance"
+    echo "}"
+    echo "EOF"
+    echo "chmod +x /etc/init.d/crowdsec-log-forwarder"
+    echo "/etc/init.d/crowdsec-log-forwarder enable"
+    echo "/etc/init.d/crowdsec-log-forwarder restart"
+    echo
+    echo "Проверка на OpenWrt:"
+    echo "/etc/init.d/crowdsec-log-forwarder status"
+    echo "logread | tail -50"
+    echo
+    echo "Отключить эту схему на OpenWrt:"
+    echo "/etc/init.d/crowdsec-log-forwarder stop 2>/dev/null || true"
+    echo "/etc/init.d/crowdsec-log-forwarder disable 2>/dev/null || true"
+    echo "rm -f /etc/init.d/crowdsec-log-forwarder"
     echo
     echo "Filtered log for CrowdSec:"
     echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/${ip}.security.log"
@@ -4337,7 +4357,7 @@ show_device_event_logs() {
       echo "Last 120 filtered lines:"
       tail -n 120 "${REMOTE_SYSLOG_DIR}/${ip}.security.log"
     else
-      echo "$(T "Filtered файл логов пока не найден. Проверь, что устройство отправляет syslog на central, UFW разрешает порт, и в логе есть security/firewall/auth события." "Filtered log file not found yet. Check that the device sends syslog to central, UFW allows the port, and the log contains security/firewall/auth events.")"
+      echo "$(T "Filtered файл логов пока не найден. Проверь, что устройство отправляет syslog на central, UFW разрешает порт, и в логе есть security/firewall/auth события." "Filtered log file not found yet. Check that the OpenWrt forwarder service is running, the device sends logs to central, UFW allows the port, and the log contains security/firewall/auth events.")"
     fi
     echo
     echo "Full diagnostic log, if enabled: ${REMOTE_SYSLOG_DIAG_DIR}/${ip}.full.log"
@@ -4380,10 +4400,55 @@ crowdsec_allowlist_is_listed() {
 }
 
 apply_crowdsec_allowlist() {
-  local data_file parser_file
+  local data_file parser_file allowlist_name
   data_file="$(crowdsec_allowlist_data_file)"
   parser_file="$(crowdsec_allowlist_parser_path)"
+  allowlist_name="${CROWDSEC_LAPI_ALLOWLIST_NAME:-central-script-allowlist}"
 
+  if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
+    echo "ERROR: container crowdsec is not running; host crowdsec is intentionally not used." >&2
+    return 1
+  fi
+
+  # CrowdSec Manager v2.x shows the new LAPI-level allowlists, not old parser whitelist files.
+  # CrowdSec 1.7 provides `cscli allowlists ...`. Use that as the primary path and keep
+  # the old parser file only as a fallback for engines that do not support LAPI allowlists.
+  if docker exec crowdsec cscli allowlists list >/dev/null 2>&1; then
+    echo "Applying real LAPI allowlist visible in CrowdSec Manager: ${allowlist_name}"
+
+    # Recreate the managed allowlist so removals from the script are reflected in Manager too.
+    docker exec crowdsec cscli allowlists delete "${allowlist_name}" >/dev/null 2>&1 || true
+
+    if [[ ! -s "${data_file}" ]]; then
+      rm -f "${parser_file}"
+      echo "CrowdSec allowlist is empty. Removed managed LAPI allowlist if it existed."
+    else
+      docker exec crowdsec cscli allowlists create "${allowlist_name}" \
+        --description "Managed by crowdsec-central-menu" >/dev/null 2>&1 || true
+
+      while IFS=$'\t' read -r value _ comment _; do
+        [[ -n "${value:-}" ]] || continue
+        value="$(printf '%s' "${value}" | tr -cd '0-9A-Fa-f:.\/')"
+        [[ -n "${value}" ]] || continue
+        comment="$(printf '%s' "${comment:-managed-by-central-script}" | tr -cd 'A-Za-z0-9А-Яа-яёЁ ._:@/%+=,-')"
+        [[ -n "${comment}" ]] || comment="managed-by-central-script"
+        echo "Add to LAPI allowlist: ${value}"
+        docker exec crowdsec cscli allowlists add "${allowlist_name}" "${value}" --comment "${comment}" >/dev/null
+      done < "${data_file}"
+
+      # Remove the legacy parser to avoid having two different allowlist systems with different UI visibility.
+      rm -f "${parser_file}"
+      echo "LAPI allowlist applied. It should now be visible in CrowdSec Manager -> Allowlists."
+      echo "Current LAPI allowlist:"
+      docker exec crowdsec cscli allowlists inspect "${allowlist_name}" || true
+    fi
+
+    echo "Restarting CrowdSec runtime..."
+    restart_crowdsec_runtime
+    return 0
+  fi
+
+  echo "WARN: this CrowdSec engine does not support cscli allowlists. Falling back to legacy parser whitelist."
   if [[ ! -s "${data_file}" ]]; then
     rm -f "${parser_file}"
     echo "CrowdSec allowlist is empty. Removed parser: ${parser_file}"
@@ -4411,7 +4476,7 @@ with open(data_file, "r", errors="replace") as f:
 
 doc = {
     "name": "nick/local-allowlist",
-    "description": "Local CrowdSec allowlist managed by crowdsec-central-menu",
+    "description": "Local CrowdSec parser whitelist managed by crowdsec-central-menu",
     "whitelist": {
         "reason": "local-crowdsec-allowlist",
     },
@@ -4425,25 +4490,21 @@ with open(parser_file, "w") as f:
     yaml.safe_dump(doc, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 PY
     chmod 640 "${parser_file}" 2>/dev/null || true
-    echo "CrowdSec allowlist parser written: ${parser_file}"
+    echo "Legacy CrowdSec allowlist parser written: ${parser_file}"
   fi
 
   echo "Testing CrowdSec configuration inside Docker engine..."
-  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
-    docker exec crowdsec crowdsec -c /etc/crowdsec/config.yaml -t
-  else
-    echo "ERROR: container crowdsec is not running; host crowdsec is intentionally not used." >&2
-    return 1
-  fi
+  docker exec crowdsec crowdsec -c /etc/crowdsec/config.yaml -t
 
   echo "Restarting CrowdSec runtime..."
   restart_crowdsec_runtime
 }
 
 show_trusted_ip_list() {
-  local tmp data_file parser_file
+  local tmp data_file parser_file allowlist_name
   data_file="$(crowdsec_allowlist_data_file)"
   parser_file="$(crowdsec_allowlist_parser_path)"
+  allowlist_name="${CROWDSEC_LAPI_ALLOWLIST_NAME:-central-script-allowlist}"
   tmp="$(mktemp)"
   {
     echo "$(T "CrowdSec allowlist IP/CIDR:" "CrowdSec allowlist IP/CIDR:")"
@@ -4454,16 +4515,23 @@ show_trusted_ip_list() {
       echo "$(T "Список пуст." "The list is empty.")"
     fi
     echo
-    echo "$(T "Это реальная настройка CrowdSec allowlist, а не отдельный список скрипта." "This is a real CrowdSec allowlist configuration, not a separate script-only list.")"
-    echo "$(T "Скрипт записывает parser:" "The script writes parser:")"
-    echo "  ${parser_file}"
+    echo "$(T "Это реальная LAPI allowlist CrowdSec, которую должен видеть CrowdSec Manager." "This is a real CrowdSec LAPI allowlist that CrowdSec Manager should display.")"
+    echo "LAPI allowlist name: ${allowlist_name}"
     echo
-    if [[ -f "${parser_file}" ]]; then
-      echo "$(T "Текущий parser:" "Current parser:")"
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec' && docker exec crowdsec cscli allowlists list >/dev/null 2>&1; then
+      echo "=== cscli allowlists list ==="
+      docker exec crowdsec cscli allowlists list 2>&1 || true
       echo
-      cat "${parser_file}"
+      echo "=== cscli allowlists inspect ${allowlist_name} ==="
+      docker exec crowdsec cscli allowlists inspect "${allowlist_name}" 2>&1 || true
     else
-      echo "$(T "Parser ещё не создан. Добавь IP/CIDR и примени allowlist." "Parser has not been created yet. Add IP/CIDR and apply the allowlist.")"
+      echo "This CrowdSec engine does not expose cscli allowlists; legacy parser fallback is used."
+      echo "Parser path:"
+      echo "  ${parser_file}"
+      if [[ -f "${parser_file}" ]]; then
+        echo
+        cat "${parser_file}"
+      fi
     fi
   } >"${tmp}"
   show_file "$(T "CrowdSec allowlist" "CrowdSec allowlist")" "${tmp}"
@@ -4892,7 +4960,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.13-direct-machine-credentials-fix"
+SCRIPT_VERSION="v0.7.14-openwrt-syslog-allowlists-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5438,7 +5506,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.13-direct-machine-credentials-fix"
+SCRIPT_VERSION="v0.7.14-openwrt-syslog-allowlists-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -5683,7 +5751,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.13-direct-machine-credentials-fix"
+SCRIPT_VERSION="v0.7.14-openwrt-syslog-allowlists-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
