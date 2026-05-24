@@ -130,7 +130,7 @@ change_language() {
 CONFIG_DIR="/root/crowdsec-vps-node"
 ENV_FILE="${CONFIG_DIR}/node.env"
 FAIL2BAN_BACKUP_DIR="${CONFIG_DIR}/fail2ban-backup"
-SCRIPT_VERSION="v0.4.6-clean-reinstall-cache-log-fix"
+SCRIPT_VERSION="v0.4.7-dpkg-conffile-noninteractive-fix"
 SCRIPT_RELEASE_DATE="2026-05-22"
 LOCK_FILE="/var/lock/crowdsec-vps-node.lock"
 LOCK_FD=200
@@ -219,6 +219,21 @@ normalize_lapi_url() {
   CENTRAL_LAPI_URL="${CENTRAL_LAPI_URL%/}"
 }
 
+apt_noninteractive() {
+  DEBIAN_FRONTEND=noninteractive \
+  UCF_FORCE_CONFFNEW=1 \
+  apt-get \
+    -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confnew" \
+    "$@"
+}
+
+dpkg_force_noninteractive() {
+  DEBIAN_FRONTEND=noninteractive \
+  UCF_FORCE_CONFFNEW=1 \
+  dpkg --force-confdef --force-confnew "$@"
+}
+
 sanitize_machine_name() {
   # Keep the machine name accepted by cscli and readable in CrowdSec Manager.
   # This avoids failures with spaces, slashes, colons or locale characters.
@@ -295,8 +310,8 @@ bootstrap_installer_tui() {
   safe_clear
   echo "Подготовка интерактивного установщика..."
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y >/tmp/crowdsec-vps-bootstrap.log 2>&1 || return 1
-  apt-get install -y dialog whiptail >>/tmp/crowdsec-vps-bootstrap.log 2>&1 || return 1
+  apt_noninteractive update -y >/tmp/crowdsec-vps-bootstrap.log 2>&1 || return 1
+  apt_noninteractive install -y dialog whiptail >>/tmp/crowdsec-vps-bootstrap.log 2>&1 || return 1
   tui_available
 }
 tui_input() {
@@ -630,15 +645,15 @@ force_clean_existing_crowdsec_install() {
 
   # Remove packages with service autostart blocked. Do not use plain apt here first:
   # apt may try to configure a broken half-installed package before removing it.
-  with_policy_rcd_blocked dpkg --remove --force-all "${pkgs[@]}" 2>/dev/null || true
-  with_policy_rcd_blocked dpkg --purge --force-all "${pkgs[@]}" 2>/dev/null || true
+  with_policy_rcd_blocked dpkg_force_noninteractive --remove --force-all "${pkgs[@]}" 2>/dev/null || true
+  with_policy_rcd_blocked dpkg_force_noninteractive --purge --force-all "${pkgs[@]}" 2>/dev/null || true
 
   rm -rf /etc/crowdsec /var/lib/crowdsec /var/log/crowdsec 2>/dev/null || true
   rm -f /etc/systemd/system/crowdsec-firewall-bouncer.service 2>/dev/null || true
   systemctl daemon-reload 2>/dev/null || true
 
   export DEBIAN_FRONTEND=noninteractive
-  with_policy_rcd_blocked apt-get -f install -y 2>/dev/null || true
+  with_policy_rcd_blocked apt_noninteractive -f install -y 2>/dev/null || true
   dpkg --audit 2>/dev/null || true
 
   ok "$(T "Старая установка CrowdSec/firewall-bouncer очищена." "Old CrowdSec/firewall-bouncer installation cleaned.")"
@@ -647,8 +662,8 @@ force_clean_existing_crowdsec_install() {
 install_base() {
   log "Устанавливаю базовые пакеты..."
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
-  apt-get install -y curl ca-certificates gnupg lsb-release apt-transport-https python3 python3-yaml jq sudo iproute2 procps nano rsync iptables nftables dialog whiptail less
+  apt_noninteractive update -y
+  apt_noninteractive install -y curl ca-certificates gnupg lsb-release apt-transport-https python3 python3-yaml jq sudo iproute2 procps nano rsync iptables nftables dialog whiptail less
   ok "Базовые пакеты установлены."
 }
 
@@ -677,8 +692,8 @@ remove_fail2ban_if_installed() {
   systemctl disable fail2ban 2>/dev/null || true
   systemctl mask fail2ban 2>/dev/null || true
   export DEBIAN_FRONTEND=noninteractive
-  apt-get purge -y fail2ban || true
-  apt-get autoremove -y || true
+  apt_noninteractive purge -y fail2ban || true
+  apt_noninteractive autoremove -y || true
   rm -rf /var/run/fail2ban 2>/dev/null || true
   ok "Fail2Ban остановлен, отключён и удалён."
 }
@@ -694,14 +709,14 @@ install_crowdsec_repo() {
   fi
   bash -n "${tmp_installer}"
   bash "${tmp_installer}"
-  apt-get update -y
+  apt_noninteractive update -y
   ok "Репозиторий CrowdSec подключён."
 }
 
 install_crowdsec_agent() {
   log "Устанавливаю CrowdSec agent..."
   export DEBIAN_FRONTEND=noninteractive
-  apt-get install -y crowdsec
+  apt_noninteractive install -y crowdsec
   systemctl enable crowdsec || true
   ok "CrowdSec установлен."
 }
@@ -1089,7 +1104,7 @@ EOF
 write_firewall_bouncer_config() {
   # Write the real central LAPI config before any dpkg recovery attempt.
   # This is required when crowdsec-firewall-bouncer-* is left half-configured:
-  # dpkg postinst starts the service during `dpkg --configure -a`, and it fails
+  # dpkg postinst starts the service during `dpkg_force_noninteractive --configure -a`, and it fails
   # if the package default config still points to the wrong LAPI/key.
   [[ -n "${CENTRAL_LAPI_URL:-}" ]] || fail "CENTRAL_LAPI_URL пустой. Нельзя настроить firewall bouncer."
   [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || fail "SHARED_BOUNCER_KEY пустой. Нельзя настроить firewall bouncer."
@@ -1129,30 +1144,30 @@ install_firewall_bouncer_package_safely() {
   write_firewall_bouncer_config
 
   set +e
-  with_policy_rcd_blocked apt-get install -y "${FIREWALL_BOUNCER_PACKAGE}"
+  with_policy_rcd_blocked apt_noninteractive install -y "${FIREWALL_BOUNCER_PACKAGE}"
   rc=$?
 
   if [[ "${rc}" -ne 0 ]]; then
-    warn "apt install вернул ошибку ${rc}. Перезаписываю bouncer config и пробую dpkg --configure -a."
+    warn "apt install вернул ошибку ${rc}. Перезаписываю bouncer config и пробую dpkg_force_noninteractive --configure -a."
     write_firewall_bouncer_config
-    dpkg --configure -a
+    dpkg_force_noninteractive --configure -a
     rc=$?
   fi
 
   if [[ "${rc}" -ne 0 ]]; then
-    warn "dpkg --configure -a вернул ошибку ${rc}. Пробую apt-get -f install после повторной записи config."
+    warn "dpkg_force_noninteractive --configure -a вернул ошибку ${rc}. Пробую apt-get -f install после повторной записи config."
     write_firewall_bouncer_config
-    with_policy_rcd_blocked apt-get -f install -y
+    with_policy_rcd_blocked apt_noninteractive -f install -y
     rc=$?
   fi
 
   if [[ "${rc}" -ne 0 ]]; then
     warn "Пакет ${FIREWALL_BOUNCER_PACKAGE} всё ещё не настроен. Удаляю сломанный bouncer и ставлю заново."
-    with_policy_rcd_blocked dpkg --remove --force-all crowdsec-firewall-bouncer-nftables crowdsec-firewall-bouncer-iptables crowdsec-firewall-bouncer 2>/dev/null || true
-    with_policy_rcd_blocked dpkg --purge --force-all crowdsec-firewall-bouncer-nftables crowdsec-firewall-bouncer-iptables crowdsec-firewall-bouncer 2>/dev/null || true
+    with_policy_rcd_blocked dpkg_force_noninteractive --remove --force-all crowdsec-firewall-bouncer-nftables crowdsec-firewall-bouncer-iptables crowdsec-firewall-bouncer 2>/dev/null || true
+    with_policy_rcd_blocked dpkg_force_noninteractive --purge --force-all crowdsec-firewall-bouncer-nftables crowdsec-firewall-bouncer-iptables crowdsec-firewall-bouncer 2>/dev/null || true
     rm -rf /etc/crowdsec/bouncers 2>/dev/null || true
     write_firewall_bouncer_config
-    with_policy_rcd_blocked apt-get install -y "${FIREWALL_BOUNCER_PACKAGE}"
+    with_policy_rcd_blocked apt_noninteractive install -y "${FIREWALL_BOUNCER_PACKAGE}"
     rc=$?
   fi
 

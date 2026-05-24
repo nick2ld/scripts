@@ -149,11 +149,11 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.10-remote-runner-heredoc-fix"
+SCRIPT_VERSION="v0.7.11-vps-047-version-check-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
-REQUIRED_VPS_SCRIPT_VERSION="v0.4.6-clean-reinstall-cache-log-fix"
+REQUIRED_VPS_SCRIPT_VERSION="v0.4.7-dpkg-conffile-noninteractive-fix"
 SYSLOG_DEVICES_FILE="${CONFIG_DIR}/bouncer-syslog-devices.tsv"
 REMOTE_SYSLOG_DIR="/var/log/crowdsec-remote"
 REMOTE_SYSLOG_DIAG_DIR="/var/log/crowdsec-remote-diagnostic"
@@ -4861,7 +4861,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.10-remote-runner-heredoc-fix"
+SCRIPT_VERSION="v0.7.11-vps-047-version-check-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5407,7 +5407,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.10-remote-runner-heredoc-fix"
+SCRIPT_VERSION="v0.7.11-vps-047-version-check-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -5652,7 +5652,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.10-remote-runner-heredoc-fix"
+SCRIPT_VERSION="v0.7.11-vps-047-version-check-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
