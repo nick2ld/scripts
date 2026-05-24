@@ -103,7 +103,7 @@ change_language() {
   load_saved_language
   local choice
   if tui_available && [[ -t 0 && -t 1 ]]; then
-    choice="$(whiptail --title "$(T "$(T "Язык интерфейса" "Interface language")" "Interface language")" --cancel-button "$(T "$(T "Назад" "Back")" "Back")" --ok-button "OK" --notags --menu "$(T "Выберите язык интерфейса:" "Choose interface language:")" 12 70 2 \
+    choice="$(whiptail --title "$(T "Язык интерфейса" "Interface language")" --cancel-button "$(T "$(T "Назад" "Back")" "Back")" --ok-button "OK" --notags --menu "$(T "Выберите язык интерфейса:" "Choose interface language:")" 12 70 2 \
       "ru" "Русский" \
       "en" "English" \
       3>&1 1>&2 2>&3)" || return 0
@@ -120,7 +120,7 @@ change_language() {
   fi
   save_language_only
   if tui_available && [[ -t 0 && -t 1 ]]; then
-    whiptail --title "$(T "$(T "Готово" "Done")" "Done")" --msgbox "$(T "Язык сохранён." "Language saved.")" 8 60 || true
+    whiptail --title "$(T "Готово" "Done")" --msgbox "$(T "Язык сохранён." "Language saved.")" 8 60 || true
   else
     echo "$(T "Язык сохранён." "Language saved.")"
   fi
@@ -130,7 +130,7 @@ change_language() {
 CONFIG_DIR="/root/crowdsec-vps-node"
 ENV_FILE="${CONFIG_DIR}/node.env"
 FAIL2BAN_BACKUP_DIR="${CONFIG_DIR}/fail2ban-backup"
-SCRIPT_VERSION="v0.4.2-i18n-unattended-restart-trap-fix"
+SCRIPT_VERSION="v0.4.3-remote-name-log-fix"
 SCRIPT_RELEASE_DATE="2026-05-22"
 LOCK_FILE="/var/lock/crowdsec-vps-node.lock"
 LOCK_FD=200
@@ -217,6 +217,19 @@ quote_env() {
 }
 normalize_lapi_url() {
   CENTRAL_LAPI_URL="${CENTRAL_LAPI_URL%/}"
+}
+
+sanitize_machine_name() {
+  # Keep the machine name accepted by cscli and readable in CrowdSec Manager.
+  # This avoids failures with spaces, slashes, colons or locale characters.
+  local raw="${1:-}" cleaned
+  cleaned="$(printf '%s' "${raw}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//; s/-{2,}/-/g')"
+  if [[ -z "${cleaned}" ]]; then
+    cleaned="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo vps-node)"
+    cleaned="$(printf '%s' "${cleaned}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//; s/-{2,}/-/g')"
+  fi
+  [[ -n "${cleaned}" ]] || cleaned="vps-node"
+  printf '%s' "${cleaned}"
 }
 tui_theme() {
   local dialogrc="/tmp/crowdsec-dialogrc-${UID:-0}"
@@ -417,6 +430,11 @@ load_env_if_exists() {
   AUTO_REG_TOKEN="${AUTO_REG_TOKEN:-}"
   SHARED_BOUNCER_KEY="${SHARED_BOUNCER_KEY:-}"
   MACHINE_NAME="${MACHINE_NAME:-$(hostname -f 2>/dev/null || hostname)}"
+  local original_machine_name="${MACHINE_NAME}"
+  MACHINE_NAME="$(sanitize_machine_name "${MACHINE_NAME}")"
+  if [[ -n "${original_machine_name}" && "${original_machine_name}" != "${MACHINE_NAME}" ]]; then
+    warn "$(T "Machine name был нормализован для CrowdSec:" "Machine name was normalized for CrowdSec:") ${original_machine_name} -> ${MACHINE_NAME}"
+  fi
   INSTALL_FIREWALL_BOUNCER="${INSTALL_FIREWALL_BOUNCER:-yes}"
   REMOVE_FAIL2BAN="${REMOVE_FAIL2BAN:-yes}"
   COLLECTION_SELECTION_MODE="${COLLECTION_SELECTION_MODE:-manual}"
@@ -662,15 +680,19 @@ detected_software_text() {
 list_hub_collections() {
   cscli hub update >/dev/null 2>&1 || true
   if cscli collections list -o json >/tmp/crowdsec-collections.json 2>/dev/null; then
+    set +e
     python3 - /tmp/crowdsec-collections.json <<'PY'
 import json, sys
 path = sys.argv[1]
-with open(path, "r", encoding="utf-8", errors="replace") as f:
-    data = json.load(f)
+try:
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(1)
 if isinstance(data, dict):
     data = data.get("collections") or data.get("items") or data.get("data") or []
 rows = []
-for item in data:
+for item in data if isinstance(data, list) else []:
     if not isinstance(item, dict):
         continue
     name = item.get("name") or item.get("path") or item.get("full_path") or item.get("fullpath")
@@ -684,10 +706,13 @@ for item in data:
 for name, desc in sorted(set(rows)):
     print(f"{name}\t{desc}")
 PY
-    return
+    local parse_rc=$?
+    set -e
+    [[ "${parse_rc}" -eq 0 ]] && return 0
   fi
-  cscli collections list -a 2>/dev/null | awk '/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+/ {for (i=1;i<=NF;i++) if ($i ~ /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/) print $i "\t"}' | sort -u
+  cscli collections list -a 2>/dev/null | awk '/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+/ {for (i=1;i<=NF;i++) if ($i ~ /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/) print $i "\t"}' | sort -u || true
 }
+
 
 list_hub_items_by_type() {
   local item_type="$1"
@@ -892,7 +917,9 @@ register_to_central_lapi() {
   load_env_if_exists
   normalize_lapi_url
   local reg_log reg_rc
-  log "Регистрирую VPS на центральном LAPI..."
+  MACHINE_NAME="$(sanitize_machine_name "${MACHINE_NAME}")"
+  save_env
+  log "Регистрирую VPS на центральном LAPI как machine: ${MACHINE_NAME}"
   mkdir -p /etc/crowdsec
   preflight_lapi_access
 
@@ -933,7 +960,7 @@ YAML
   if [[ "${reg_rc}" -ne 0 ]]; then
     cat "${reg_log}"
     rm -f "${reg_log}"
-    fail "Не удалось зарегистрировать VPS на central LAPI. Если /health доступен, чаще всего причина: неверный AUTO_REG_TOKEN, IP VPS не добавлен в allowed_ranges на central или machine с таким именем уже существует."
+    fail "Не удалось зарегистрировать VPS на central LAPI для machine '${MACHINE_NAME}'. Если /health доступен, чаще всего причина: неверный AUTO_REG_TOKEN, IP VPS не добавлен в allowed_ranges на central или machine с таким именем уже существует."
   fi
   cat "${reg_log}" || true
   rm -f "${reg_log}"
@@ -1273,6 +1300,8 @@ run_unattended_install() {
   load_saved_language || true
   detect_debian
   load_env_if_exists
+  MACHINE_NAME="$(sanitize_machine_name "${MACHINE_NAME:-}")"
+  save_env
   [[ -n "${CENTRAL_LAPI_URL:-}" ]] || fail "$(T "CENTRAL_LAPI_URL не задан в ${ENV_FILE}." "CENTRAL_LAPI_URL is not set in ${ENV_FILE}.")"
   [[ -n "${AUTO_REG_TOKEN:-}" ]] || fail "$(T "AUTO_REG_TOKEN не задан в ${ENV_FILE}." "AUTO_REG_TOKEN is not set in ${ENV_FILE}.")"
   [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || fail "$(T "SHARED_BOUNCER_KEY не задан в ${ENV_FILE}." "SHARED_BOUNCER_KEY is not set in ${ENV_FILE}.")"

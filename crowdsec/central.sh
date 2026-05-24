@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.7-ufw-ssh-connection-unset-fix"
+SCRIPT_VERSION="v0.7.8-remote-vps-install-log-name-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -907,6 +907,14 @@ shell_quote() {
   printf '%q' "${1:-}"
 }
 
+sanitize_node_name() {
+  # CrowdSec machine/bouncer names are safest when kept lowercase and simple.
+  # Spaces, slashes, colons and locale characters can break cscli or make Manager output confusing.
+  local raw="${1:-}" cleaned
+  cleaned="$(printf '%s' "${raw}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//; s/-{2,}/-/g')"
+  printf '%s' "${cleaned}"
+}
+
 create_named_vps_bouncer_key() {
   safe_source_env
   local mode rc
@@ -1135,7 +1143,7 @@ create_named_vps_remote_install() {
     esac
   fi
 
-  node_name="$(printf '%s' "${node_name_raw:-}" | tr -cd 'A-Za-z0-9._:-')"
+  node_name="$(sanitize_node_name "${node_name_raw:-}")"
   vps_ip="$(printf '%s' "${vps_ip_raw:-}" | tr -cd '0-9A-Fa-f:.')"
   ssh_host="$(printf '%s' "${ssh_host_raw:-}" | tr -cd 'A-Za-z0-9._:-')"
   ssh_port="$(printf '%s' "${ssh_port_raw:-22}" | tr -cd '0-9')"
@@ -1185,17 +1193,51 @@ create_named_vps_remote_install() {
     return 1
   fi
 
+  local remote_install_log_dir remote_install_log
+  remote_install_log_dir="${CONFIG_DIR}/remote-install-logs"
+  mkdir -p "${remote_install_log_dir}"
+  chmod 700 "${remote_install_log_dir}" 2>/dev/null || true
+  remote_install_log="${remote_install_log_dir}/${node_name}-$(date +%Y%m%d-%H%M%S).log"
+
   remote_install_apply() {
-    echo "Проверка SSH-доступа к ${ssh_user}@${ssh_host}:${ssh_port}"
-    remote_ssh_base "echo ssh-ok"
-    echo "Загрузка установщика на VPS"
-    remote_upload_runner "${runner}"
-    echo "Запуск удалённой установки VPS"
-    remote_run_runner
+    local step_rc
+    {
+      echo "Remote VPS install log"
+      echo "Time: $(date -Is)"
+      echo "Node: ${node_name}"
+      echo "SSH: ${ssh_user}@${ssh_host}:${ssh_port}"
+      echo
+      echo "Проверка SSH-доступа к ${ssh_user}@${ssh_host}:${ssh_port}"
+      remote_ssh_base "echo ssh-ok"
+      echo
+      echo "Загрузка установщика на VPS"
+      remote_upload_runner "${runner}"
+      echo
+      echo "Запуск удалённой установки VPS"
+      remote_run_runner
+      step_rc=$?
+      echo
+      echo "Remote installer exit code: ${step_rc}"
+      return "${step_rc}"
+    } 2>&1 | tee -a "${remote_install_log}"
+    return "${PIPESTATUS[0]}"
   }
 
   if ! run_with_live_progress "$(T "Удалённая установка VPS node" "Remote VPS node installation")" remote_install_apply; then
-    rm -f "${runner}"
+    local err_tmp
+    err_tmp="$(mktemp)"
+    {
+      echo "$(T "Удалённая установка VPS завершилась ошибкой." "Remote VPS installation failed.")"
+      echo
+      echo "$(T "Полный лог сохранён на central:" "Full log saved on central:")"
+      echo "${remote_install_log}"
+      echo
+      echo "$(T "Последние строки лога:" "Last log lines:")"
+      echo
+      tail -n 160 "${remote_install_log}" 2>/dev/null || true
+    } > "${err_tmp}"
+    show_file "$(T "Ошибка удалённой установки VPS" "Remote VPS installation error")" "${err_tmp}"
+    rm -f "${err_tmp}" "${runner}"
     return 1
   fi
   rm -f "${runner}"
@@ -1250,7 +1292,7 @@ create_named_vps_bouncer_key_manual() {
     read -rp "Внешний IP VPS для доступа к LAPI: " vps_ip
   fi
 
-  node_name="$(printf '%s' "${node_name:-}" | tr -cd 'A-Za-z0-9._:-')"
+  node_name="$(sanitize_node_name "${node_name:-}")"
   [[ -n "${node_name}" ]] || fail "Имя bouncer не может быть пустым."
   vps_ip="$(printf '%s' "${vps_ip:-}" | tr -cd '0-9A-Fa-f:.')"
   [[ -n "${vps_ip}" ]] || fail "IP VPS не может быть пустым."
@@ -1546,7 +1588,7 @@ create_openwrt_bouncer_connection() {
     syslog_proto_raw="both"
   fi
 
-  node_name="$(printf '%s' "${router_name_raw:-}" | tr -cd 'A-Za-z0-9._:-')"
+  node_name="$(sanitize_node_name "${router_name_raw:-}")"
   [[ -n "${node_name}" ]] || fail "$(T "Имя bouncer не может быть пустым." "Bouncer name cannot be empty.")"
 
   router_ip_raw="$(printf '%s' "${router_ip_raw:-}" | tr -cd '0-9A-Fa-f:.\/')"
@@ -3883,7 +3925,7 @@ create_openwrt_bouncer_connection() {
     lapi_url_raw="${lapi_url_raw:-${default_lapi}}"
   fi
 
-  node_name="$(printf '%s' "${name_raw:-}" | tr -cd 'A-Za-z0-9._:-')"
+  node_name="$(sanitize_node_name "${name_raw:-}")"
   [[ -n "${node_name}" ]] || fail "$(T "Имя bouncer не может быть пустым." "Bouncer name cannot be empty.")"
   router_cidr="$(normalize_cidr_input "${cidr_raw:-}")" || fail "$(T "IP/CIDR устройства не может быть пустым." "Device IP/CIDR cannot be empty.")"
   vps_ip="${router_cidr%%/*}"
@@ -4732,7 +4774,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.7-ufw-ssh-connection-unset-fix"
+SCRIPT_VERSION="v0.7.8-remote-vps-install-log-name-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5278,7 +5320,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.7-ufw-ssh-connection-unset-fix"
+SCRIPT_VERSION="v0.7.8-remote-vps-install-log-name-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -5523,7 +5565,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.7-ufw-ssh-connection-unset-fix"
+SCRIPT_VERSION="v0.7.8-remote-vps-install-log-name-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
@@ -5825,7 +5867,7 @@ case "${1:-}" in
     elif is_crowdsec_manager_stack_installed; then
       menu_loop
     else
-      full_install
+      install_or_repair_full_stack
     fi
     ;;
 esac
