@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.20-openwrt-busybox-nc-tcp-fix"
+SCRIPT_VERSION="v0.7.21-openwrt-nc-timeout-hang-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4261,16 +4261,20 @@ send_remote_syslog() {
   ts="$(date '+%b %e %H:%M:%S' 2>/dev/null || date)"
   host="$(uci get system.@system[0].hostname 2>/dev/null || hostname 2>/dev/null || echo openwrt)"
   packet="$(printf '<134>%s %s %s: %s\n' "$ts" "$host" "$TAG" "$line")"
-  # OpenWrt 25 BusyBox logger has no remote -n/-P options.
-  # OpenWrt 25 BusyBox nc may also have no -u/-w options, so default to TCP syslog.
-  # Central rsyslog listens on both TCP and UDP on the selected port.
+  # OpenWrt 25 often has BusyBox logger without remote -n/-P.
+  # BusyBox nc may also have no -u and no -w, and TCP nc can wait forever
+  # because rsyslog keeps the connection open. Therefore every nc send is
+  # killed after a short grace period. This keeps --send-test and the daemon
+  # from hanging the installer or the procd service.
   if nc -h 2>&1 | grep -q -- '-u'; then
-    printf '%s' "$packet" | nc -u -w 1 "$CENTRAL_HOST" "$CENTRAL_PORT" >/dev/null 2>&1 || true
-  elif command -v timeout >/dev/null 2>&1; then
-    printf '%s' "$packet" | timeout 3 nc "$CENTRAL_HOST" "$CENTRAL_PORT" >/dev/null 2>&1 || true
+    ( printf '%s' "$packet" | nc -u "$CENTRAL_HOST" "$CENTRAL_PORT" >/dev/null 2>&1 ) &
   else
-    printf '%s' "$packet" | nc "$CENTRAL_HOST" "$CENTRAL_PORT" >/dev/null 2>&1 || true
+    ( printf '%s' "$packet" | nc "$CENTRAL_HOST" "$CENTRAL_PORT" >/dev/null 2>&1 ) &
   fi
+  nc_pid="$!"
+  sleep 1
+  kill "$nc_pid" 2>/dev/null || true
+  wait "$nc_pid" 2>/dev/null || true
 }
 
 if [ "${1:-}" = "--send-test" ]; then
@@ -5309,7 +5313,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.20-openwrt-busybox-nc-tcp-fix"
+SCRIPT_VERSION="v0.7.21-openwrt-nc-timeout-hang-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5862,7 +5866,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.20-openwrt-busybox-nc-tcp-fix"
+SCRIPT_VERSION="v0.7.21-openwrt-nc-timeout-hang-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -6107,7 +6111,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.20-openwrt-busybox-nc-tcp-fix"
+SCRIPT_VERSION="v0.7.21-openwrt-nc-timeout-hang-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
