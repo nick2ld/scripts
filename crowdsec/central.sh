@@ -149,18 +149,13 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.22-openwrt-central-pull-collector-fix"
+SCRIPT_VERSION="v0.7.23-clean-vps-menu"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
 REQUIRED_VPS_SCRIPT_VERSION="v0.4.9-direct-machine-credentials-fix"
-SYSLOG_DEVICES_FILE="${CONFIG_DIR}/bouncer-syslog-devices.tsv"
-REMOTE_SYSLOG_DIR="/var/log/crowdsec-remote"
-REMOTE_SYSLOG_DIAG_DIR="/var/log/crowdsec-remote-diagnostic"
-DEFAULT_REMOTE_SYSLOG_PORT="5140"
 CROWDSEC_ALLOWLIST_FILE="${CONFIG_DIR}/crowdsec-allowlist.tsv"
 CROWDSEC_LAPI_ALLOWLIST_NAME="central-script-allowlist"
-OPENWRT_HELPER_DIR="${CONFIG_DIR}/openwrt-helper-scripts"
 # Legacy variable kept only for migration from older script versions.
 TRUSTED_IP_FILE="${CONFIG_DIR}/trusted-ip-allowlist.tsv"
 
@@ -938,25 +933,22 @@ create_named_vps_bouncer_key() {
     mode="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" \
       --title " $(T "Добавление VPS" "Add VPS") " \
       --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags \
-      --menu "$(T "Выбери способ подключения:\n\n1. Удалённая VPS - central подключится к VPS по SSH, сам запустит установку и потом выполнит validate.\n2. Ручная VPS - как раньше: central покажет данные, а vps.sh запускается вручную на VPS.\n3. Устройство только с bouncer/API - роутер, OpenWrt или другой хост без CrowdSec agent: central создаст bouncer key и покажет настройки." "Choose connection type:\n\n1. Remote VPS - central connects over SSH, runs the installation, and then validates the machine.\n2. Manual VPS - old behavior: central shows values and vps.sh is run manually on the VPS.\n3. Bouncer-only/API device - router, OpenWrt or another host without CrowdSec agent: central creates a bouncer key and shows settings.")" \
-      21 100 3 \
+      --menu "$(T "Выбери способ подключения VPS:\n\n1. Автоматически по SSH - central подключится к VPS, установит и настроит CrowdSec node.\n2. Ручной режим - central создаст данные подключения, а vps.sh запускается вручную на VPS." "Choose VPS connection mode:\n\n1. Automatic over SSH - central connects to the VPS and installs/configures the CrowdSec node.\n2. Manual mode - central creates connection data and vps.sh is run manually on the VPS.")" \
+      18 100 2 \
       "remote" "$(T "VPS: подключиться по SSH и установить автоматически" "VPS: connect over SSH and install automatically")" \
       "manual" "$(T "VPS: ручное добавление с ожиданием регистрации" "VPS: manual setup with registration wait")" \
-      "openwrt" "$(T "Устройство с bouncer/API: добавить bouncer key" "Bouncer/API device: add bouncer key")" \
       3>&1 1>&2 2>&3)"
     rc=$?
     set -e
     [[ "${rc}" -eq 0 ]] || return 0
   else
     echo
-    echo "$(T "Способ добавления:" "Add mode:")"
-    echo "1) $(T "VPS: подключиться по SSH и установить автоматически" "VPS: connect over SSH and install automatically")"
-    echo "2) $(T "VPS: ручное добавление с ожиданием регистрации" "VPS: manual setup with registration wait")"
-    echo "3) $(T "Устройство с bouncer/API: добавить bouncer key" "Bouncer/API device: add bouncer key")"
-    read -rp "$(T "Выбор [1/2/3]: " "Choice [1/2/3]: ")" mode || return 0
+    echo "$(T "Способ добавления VPS:" "VPS add mode:")"
+    echo "1) $(T "Подключиться по SSH и установить автоматически" "Connect over SSH and install automatically")"
+    echo "2) $(T "Ручное добавление с ожиданием регистрации" "Manual setup with registration wait")"
+    read -rp "$(T "Выбор [1/2]: " "Choice [1/2]: ")" mode || return 0
     case "${mode}" in
       1|remote) mode="remote" ;;
-      3|openwrt|router|bouncer|device) mode="openwrt" ;;
       *) mode="manual" ;;
     esac
   fi
@@ -964,11 +956,9 @@ create_named_vps_bouncer_key() {
   case "${mode}" in
     remote) create_named_vps_remote_install ;;
     manual) create_named_vps_bouncer_key_manual ;;
-    openwrt) create_openwrt_bouncer_connection ;;
     *) return 0 ;;
   esac
 }
-
 create_vps_connection_apply_common() {
   echo "Удаление старого bouncer: ${node_name}"
   if ! command -v docker >/dev/null 2>&1 || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -1486,345 +1476,6 @@ restart_crowdsec_runtime() {
   fi
 }
 
-install_or_update_remote_syslog_receiver() {
-  local port="${1:-${DEFAULT_REMOTE_SYSLOG_PORT}}"
-  local proto="${2:-udp}"
-  local mode="${3:-filtered}"
-  local cfg_dir acquis_file rsyslog_conf logrotate_conf any_full="no"
-
-  [[ "${port}" =~ ^[0-9]+$ ]] || fail "$(T "Некорректный порт syslog." "Invalid syslog port.")"
-
-  echo "Установка rsyslog и подготовка каталогов удалённых логов..."
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
-  apt-get install -y rsyslog
-
-  mkdir -p "${REMOTE_SYSLOG_DIR}" "${REMOTE_SYSLOG_DIAG_DIR}"
-  chmod 750 "${REMOTE_SYSLOG_DIR}" "${REMOTE_SYSLOG_DIAG_DIR}"
-
-  if [[ -s "${SYSLOG_DEVICES_FILE}" ]] && awk -F'\t' '($5=="full"){found=1} END{exit found?0:1}' "${SYSLOG_DEVICES_FILE}"; then
-    any_full="yes"
-  fi
-  [[ "${mode}" == "full" ]] && any_full="yes"
-
-  rsyslog_conf="/etc/rsyslog.d/30-crowdsec-remote-devices.conf"
-  cat > "${rsyslog_conf}" <<EOF
-# Managed by crowdsec-central-menu.
-# Receives a COPY of remote syslog from routers/firewalls/bouncer-only devices.
-# By default only security/firewall/auth-like messages are written to CrowdSec intake.
-# Full diagnostic logging is optional and goes to ${REMOTE_SYSLOG_DIAG_DIR}, not to CrowdSec intake.
-module(load="imudp")
-input(type="imudp" port="${port}" ruleset="crowdsec_remote_devices")
-
-module(load="imtcp")
-input(type="imtcp" port="${port}" ruleset="crowdsec_remote_devices")
-
-template(name="CrowdSecRemoteSecurityFile" type="string" string="${REMOTE_SYSLOG_DIR}/%fromhost-ip%.security.log")
-template(name="CrowdSecRemoteDiagnosticFile" type="string" string="${REMOTE_SYSLOG_DIAG_DIR}/%fromhost-ip%.full.log")
-
-ruleset(name="crowdsec_remote_devices") {
-  # Keep only security/auth/firewall-ish events for CrowdSec:
-  # dropbear/sshd/login/auth failures and firewall/kernel/nftables/iptables drops/rejects.
-  if (
-      re_match(\$programname, "dropbear|sshd|firewall|fw3|fw4|kernel|nft|iptables") or
-      re_match(\$msg, "dropbear|sshd|auth|login|Login|failed|Failed|failure|invalid|Invalid|refused|Refused|denied|Denied|DROP|Drop|drop|REJECT|Reject|reject|blocked|Blocked|ban|Ban|nft|iptables|firewall|Firewall|kernel")
-     ) then {
-    action(type="omfile" dynaFile="CrowdSecRemoteSecurityFile" FileCreateMode="0640" DirCreateMode="0750")
-  }
-EOF
-  if [[ "${any_full}" == "yes" ]]; then
-    cat >> "${rsyslog_conf}" <<EOF
-  # Optional full diagnostic copy. This file is NOT read by CrowdSec acquisition.
-  action(type="omfile" dynaFile="CrowdSecRemoteDiagnosticFile" FileCreateMode="0640" DirCreateMode="0750")
-EOF
-  fi
-  cat >> "${rsyslog_conf}" <<'EOF'
-  stop
-}
-EOF
-
-  logrotate_conf="/etc/logrotate.d/crowdsec-remote-devices"
-  cat > "${logrotate_conf}" <<EOF
-${REMOTE_SYSLOG_DIR}/*.log ${REMOTE_SYSLOG_DIAG_DIR}/*.log {
-    daily
-    rotate 14
-    missingok
-    notifempty
-    compress
-    delaycompress
-    create 0640 root adm
-    sharedscripts
-    postrotate
-        systemctl reload rsyslog >/dev/null 2>&1 || true
-    endscript
-}
-EOF
-
-  systemctl enable --now rsyslog
-  systemctl restart rsyslog
-
-  cfg_dir="$(get_crowdsec_config_dir)"
-  mkdir -p "${cfg_dir}/acquis.d"
-  acquis_file="${cfg_dir}/acquis.d/remote-syslog-devices.yaml"
-  cat > "${acquis_file}" <<EOF
-# Managed by crowdsec-central-menu.
-# Filtered security/firewall/auth logs received by host rsyslog from routers/firewalls/bouncer-only devices.
-# Full diagnostic logs are intentionally not read by CrowdSec.
-source: file
-filename: ${REMOTE_SYSLOG_DIR}/*.security.log
-labels:
-  type: syslog
-  service: remote-device
-EOF
-
-  echo "Acquisition создан: ${acquis_file}"
-  restart_crowdsec_runtime || true
-  echo "Filtered syslog intake готов на порту ${port}/udp и ${port}/tcp."
-  if [[ "${any_full}" == "yes" ]]; then
-    echo "Full diagnostic copy включена: ${REMOTE_SYSLOG_DIAG_DIR}/*.full.log"
-  fi
-}
-
-record_remote_syslog_device() {
-  local name="$1" cidr="$2" port="$3" proto="$4" mode="${5:-filtered}"
-  case "${mode}" in filtered|full) ;; *) mode="filtered" ;; esac
-  mkdir -p "${CONFIG_DIR}"
-  chmod 700 "${CONFIG_DIR}"
-  touch "${SYSLOG_DEVICES_FILE}"
-  chmod 600 "${SYSLOG_DEVICES_FILE}"
-  awk -F'\t' -v name="${name}" '($1 != name)' "${SYSLOG_DEVICES_FILE}" >"${SYSLOG_DEVICES_FILE}.tmp" || true
-  mv "${SYSLOG_DEVICES_FILE}.tmp" "${SYSLOG_DEVICES_FILE}"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${cidr}" "${port}" "${proto}" "${mode}" "$(date -Is)" >>"${SYSLOG_DEVICES_FILE}"
-}
-
-show_remote_syslog_devices() {
-  local tmp
-  tmp="$(mktemp)"
-  {
-    echo "$(T "Устройства, которым открыт syslog intake на central:" "Devices allowed to send syslog to central:")"
-    echo
-    if [[ -s "${SYSLOG_DEVICES_FILE}" ]]; then
-      awk -F'\t' 'BEGIN {printf "%-28s %-24s %-8s %-8s %-10s %s\n", "NAME", "CIDR", "PORT", "PROTO", "MODE", "ADDED"} {mode=$5; added=$6; if (mode=="" || mode ~ /^20/) {added=mode; mode="filtered"}; printf "%-28s %-24s %-8s %-8s %-10s %s\n", $1, $2, $3, $4, mode, added}' "${SYSLOG_DEVICES_FILE}"
-    else
-      echo "$(T "Пока нет устройств syslog." "No syslog devices yet.")"
-    fi
-    echo
-    echo "$(T "Важно: bouncer сам не отправляет события. OpenWrt/устройство должно отправлять копию logread/syslog на central отдельным сервисом; не используй system.@system[0].log_ip, если из-за него пропадает локальный журнал. По умолчанию central пишет в CrowdSec только отфильтрованные security/firewall/auth события, а не весь лог." "Important: a bouncer does not send events. OpenWrt/the device should send a logread/syslog copy to central through a separate service; do not use system.@system[0].log_ip if it breaks the local log view. By default central writes only filtered security/firewall/auth events to CrowdSec, not the full log.")"
-  } > "${tmp}"
-  show_file "$(T "Syslog устройства" "Syslog devices")" "${tmp}"
-  rm -f "${tmp}"
-}
-
-
-create_openwrt_bouncer_connection() {
-  safe_source_env
-  local router_name_raw router_ip_raw router_cidr lapi_url_raw rc tmp syslog_enable_raw syslog_port_raw syslog_proto_raw
-  local node_name vps_ip bouncer_key
-
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    set +e
-    router_name_raw="$(whiptail --title " $(T "Bouncer/API device" "Bouncer/API device") " --inputbox "$(T "Имя устройства / bouncer name.\n\nНапример: openwrt-router, home-router, gateway-1, edge-bouncer.\nЭто имя будет видно в CrowdSec Manager в списке bouncers." "Device name / bouncer name.\n\nExample: openwrt-router, home-router, gateway-1, edge-bouncer.\nThis name will be visible in CrowdSec Manager in the bouncers list.")" 13 92 "bouncer-device" 3>&1 1>&2 2>&3)"
-    rc=$?
-    set -e
-    [[ "${rc}" -eq 0 ]] || return 0
-
-    set +e
-    router_ip_raw="$(whiptail --title " $(T "Bouncer/API device" "Bouncer/API device") " --inputbox "$(T "IP или CIDR устройства, которому разрешить доступ к LAPI.\n\nЕсли устройство в одной LAN с central, обычно это его LAN IP как /32, например 192.168.1.1/32.\nЕсли доступ уже разрешён локальной подсетью, всё равно лучше указать конкретный IP." "Device IP or CIDR allowed to access LAPI.\n\nIf the device is in the same LAN as central, this is usually its LAN IP as /32, for example 192.168.1.1/32.\nEven if local subnet access is already allowed, a specific IP is better.")" 15 96 "" 3>&1 1>&2 2>&3)"
-    rc=$?
-    set -e
-    [[ "${rc}" -eq 0 ]] || return 0
-
-    local default_lapi="${LOCAL_LAPI_URL}"
-    if [[ -n "${PUBLIC_LAPI_URL:-}" ]]; then
-      default_lapi="${VPS_LAPI_URL}"
-    fi
-    set +e
-    lapi_url_raw="$(whiptail --title " $(T "Bouncer/API LAPI URL" "Bouncer/API LAPI URL") " --inputbox "$(T "Какой LAPI URL прописать на устройстве с bouncer/API?\n\nДля устройства в одной локальной сети обычно используй локальный URL central:\n${LOCAL_LAPI_URL}\n\nЕсли устройство ходит через Nginx Proxy Manager/TLS, используй:\n${VPS_LAPI_URL}" "Which LAPI URL should be configured on the bouncer/API device?\n\nFor a device in the same LAN, usually use the local central URL:\n${LOCAL_LAPI_URL}\n\nIf the device reaches central through Nginx Proxy Manager/TLS, use:\n${VPS_LAPI_URL}")" 17 96 "${default_lapi}" 3>&1 1>&2 2>&3)"
-    rc=$?
-    set -e
-    [[ "${rc}" -eq 0 ]] || return 0
-
-    syslog_enable_raw="no"
-    syslog_port_raw="${DEFAULT_REMOTE_SYSLOG_PORT}"
-    syslog_proto_raw="both"
-
-    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Создать" "Create")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Central создаст отдельный bouncer key и добавит IP/CIDR устройства в доступ к LAPI.\n\nСобытия от роутера/устройства НЕ включаются автоматически. Если нужны события, включи их отдельно в меню: Bouncer/API устройства -> События/логи от роутера или устройства -> Включить filtered syslog intake.\n\nПродолжить?" "Central will create a dedicated bouncer key and add the device IP/CIDR to LAPI access.\n\nEvents from the router/device are NOT enabled automatically. If events are needed, enable them separately in the menu: Bouncer/API devices -> Router/device events and logs -> Enable filtered syslog intake.\n\nContinue?")" 16 92 || return 0
-  else
-    read -rp "$(T "Имя устройства / bouncer name [bouncer-device]: " "Device / bouncer name [bouncer-device]: ")" router_name_raw || return 0
-    router_name_raw="${router_name_raw:-bouncer-device}"
-    read -rp "$(T "IP/CIDR устройства для доступа к LAPI, например 192.168.1.1/32: " "Device IP/CIDR for LAPI access, e.g. 192.168.1.1/32: ")" router_ip_raw || return 0
-    local default_lapi="${LOCAL_LAPI_URL}"
-    [[ -n "${PUBLIC_LAPI_URL:-}" ]] && default_lapi="${VPS_LAPI_URL}"
-    read -rp "$(T "LAPI URL для устройства [${default_lapi}]: " "LAPI URL for device [${default_lapi}]: ")" lapi_url_raw || return 0
-    lapi_url_raw="${lapi_url_raw:-${default_lapi}}"
-    echo "$(T "События от устройства не включаются при добавлении bouncer. Их можно включить отдельно в меню событий." "Device events are not enabled while adding a bouncer. You can enable them separately in the event intake menu.")"
-    syslog_enable_raw="no"
-    syslog_port_raw="${DEFAULT_REMOTE_SYSLOG_PORT}"
-    syslog_proto_raw="both"
-  fi
-
-  node_name="$(sanitize_node_name "${router_name_raw:-}")"
-  [[ -n "${node_name}" ]] || fail "$(T "Имя bouncer не может быть пустым." "Bouncer name cannot be empty.")"
-
-  router_ip_raw="$(printf '%s' "${router_ip_raw:-}" | tr -cd '0-9A-Fa-f:.\/')"
-  [[ -n "${router_ip_raw}" ]] || fail "$(T "IP/CIDR устройства не может быть пустым." "Device IP/CIDR cannot be empty.")"
-  if [[ "${router_ip_raw}" == */* ]]; then
-    router_cidr="${router_ip_raw}"
-    vps_ip="${router_ip_raw%%/*}"
-  elif [[ "${router_ip_raw}" == *:* ]]; then
-    router_cidr="${router_ip_raw}/128"
-    vps_ip="${router_ip_raw}"
-  else
-    router_cidr="${router_ip_raw}/32"
-    vps_ip="${router_ip_raw}"
-  fi
-
-  lapi_url_raw="${lapi_url_raw%/}"
-  [[ "${lapi_url_raw}" =~ ^https?://[^[:space:]]+$ ]] || fail "$(T "LAPI URL должен начинаться с http:// или https://" "LAPI URL must start with http:// or https://")"
-
-  case "${syslog_enable_raw:-no}" in
-    yes|y|Y|YES|Yes|да|Да) syslog_enable_raw="yes" ;;
-    *) syslog_enable_raw="no" ;;
-  esac
-  syslog_port_raw="$(printf '%s' "${syslog_port_raw:-${DEFAULT_REMOTE_SYSLOG_PORT}}" | tr -cd '0-9')"
-  syslog_port_raw="${syslog_port_raw:-${DEFAULT_REMOTE_SYSLOG_PORT}}"
-  is_valid_port "${syslog_port_raw}" || fail "$(T "Некорректный syslog port." "Invalid syslog port.")"
-  case "${syslog_proto_raw:-both}" in udp|tcp|both) ;; *) syslog_proto_raw="both" ;; esac
-
-  if [[ -z "${ALLOWED_RANGES}" ]]; then
-    ALLOWED_RANGES="${router_cidr}"
-  elif ! echo ",${ALLOWED_RANGES}," | grep -q ",${router_cidr},"; then
-    ALLOWED_RANGES="${ALLOWED_RANGES},${router_cidr}"
-  fi
-
-  bouncer_key="$(openssl rand -hex 32)"
-  machine_password="$(openssl rand -hex 32)"
-
-  create_openwrt_bouncer_apply() {
-    echo "Удаление старого bouncer: ${node_name}"
-    if ! command -v docker >/dev/null 2>&1 || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
-      fail "$(T "Контейнер crowdsec не запущен. Host cscli не используется." "The crowdsec container is not running. Host cscli is not used.")"
-    fi
-    docker exec crowdsec cscli bouncers delete "${node_name}" || true
-    echo "Регистрация bouncer device в Docker LAPI: ${node_name}"
-    docker exec crowdsec cscli bouncers add "${node_name}" --key "${bouncer_key}"
-
-    echo "Сохранение central.env"
-    save_env
-
-    echo "Обновление config.yaml CrowdSec LAPI"
-    configure_docker_crowdsec_lapi
-
-    if [[ "${syslog_enable_raw:-no}" == "yes" ]]; then
-      echo "Настройка syslog intake для устройства ${node_name}"
-      install_or_update_remote_syslog_receiver "${syslog_port_raw}" "${syslog_proto_raw}"
-      record_remote_syslog_device "${node_name}" "${router_cidr}" "${syslog_port_raw}" "${syslog_proto_raw}"
-    fi
-
-    echo "Перезапуск контейнера CrowdSec"
-    if [[ -d "${MANAGER_COMPOSE_DIR}" && -f "${MANAGER_COMPOSE_FILE}" ]]; then
-      (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
-    else
-      systemctl restart crowdsec || true
-    fi
-
-    echo "Обновление правил UFW"
-    configure_ufw_full
-
-    echo "Запись подключения в ${CONNECTIONS_FILE}"
-    mkdir -p "${CONFIG_DIR}"
-    chmod 700 "${CONFIG_DIR}"
-    touch "${CONNECTIONS_FILE}"
-    chmod 600 "${CONNECTIONS_FILE}"
-    awk -F'\t' -v name="${node_name}" '($2 != name)' "${CONNECTIONS_FILE}" >"${CONNECTIONS_FILE}.tmp" || true
-    mv "${CONNECTIONS_FILE}.tmp" "${CONNECTIONS_FILE}"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -Is)" "${node_name}" "${vps_ip}" "${lapi_url_raw}" "BOUNCER_ONLY_DEVICE" "${bouncer_key}" >>"${CONNECTIONS_FILE}"
-  }
-
-  if ! run_with_live_progress "$(T "Регистрация bouncer/API device" "Registering bouncer/API device")" create_openwrt_bouncer_apply; then
-    return 1
-  fi
-
-  tmp="$(mktemp)"
-  {
-    echo "$(T "Данные для подключения устройства с bouncer/API:" "Bouncer/API device connection data:")"
-    echo
-    echo "Bouncer name:"
-    echo "${node_name}"
-    echo
-    echo "Allowed device IP/CIDR:"
-    echo "${router_cidr}"
-    echo
-    echo "API URL / LAPI URL:"
-    echo "${lapi_url_raw}"
-    echo
-    echo "API key / BOUNCER_KEY:"
-    echo "${bouncer_key}"
-    echo
-    if [[ "${syslog_enable_raw:-no}" == "yes" ]]; then
-      echo "$(T "Syslog intake на central:" "Syslog intake on central:")"
-      echo "central_syslog_host=${LAN_IP}"
-      echo "central_syslog_port=${syslog_port_raw}"
-      echo "central_syslog_protocol=${syslog_proto_raw}"
-      echo "central_filtered_log_files=${REMOTE_SYSLOG_DIR}/*.security.log"
-      echo
-      echo "$(T "Важно: именно syslog нужен для появления событий/метрик устройства в CrowdSec Manager. Один bouncer показывает только Connected/Last Pull и не отправляет логи." "Important: syslog is required for the device events/metrics to appear in CrowdSec Manager. A bouncer alone only shows Connected/Last Pull and does not send logs.")"
-      echo
-      echo "OpenWrt syslog UCI example:"
-      echo "uci set system.@system[0].log_ip='${LAN_IP}'"
-      echo "uci set system.@system[0].log_port='${syslog_port_raw}'"
-      echo "uci set system.@system[0].log_proto='udp'"
-      echo "uci commit system"
-      echo "/etc/init.d/log restart"
-      echo
-      echo "$(T "Проверка поступления логов на central:" "Check log flow on central:")"
-      echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/${vps_ip}.security.log"
-      echo "sudo docker exec crowdsec cscli metrics"
-      echo
-    else
-      echo "$(T "Syslog intake не включён. В CrowdSec Manager это устройство будет видно только как bouncer Connected/Last Pull, без событий и метрик логов." "Syslog intake is not enabled. In CrowdSec Manager this device will only appear as a bouncer Connected/Last Pull, without log events and metrics.")"
-      echo
-    fi
-    echo "LuCI:"
-    echo "Services -> CrowdSec Firewall Bouncer"
-    echo "Enabled: on"
-    echo "API URL: ${lapi_url_raw}/"
-    echo "API key: ${bouncer_key}"
-    echo
-    echo "Generic bouncer/API settings:"
-    echo "api_url=${lapi_url_raw}/"
-    echo "api_key=${bouncer_key}"
-    echo
-    echo "OpenWrt UCI examples:"
-    echo
-    echo "UCI variant 1 (/etc/config/crowdsec):"
-    echo "uci set crowdsec.@bouncer[0].enabled='1'"
-    echo "uci set crowdsec.@bouncer[0].api_url='${lapi_url_raw}/'"
-    echo "uci set crowdsec.@bouncer[0].api_key='${bouncer_key}'"
-    echo "uci commit crowdsec"
-    echo "/etc/init.d/crowdsec-firewall-bouncer restart"
-    echo "/etc/init.d/crowdsec-firewall-bouncer status"
-    echo
-    echo "UCI variant 2 (/etc/config/crowdsec-firewall-bouncer):"
-    echo "uci set crowdsec-firewall-bouncer.@bouncer[0].enabled='1'"
-    echo "uci set crowdsec-firewall-bouncer.@bouncer[0].api_url='${lapi_url_raw}/'"
-    echo "uci set crowdsec-firewall-bouncer.@bouncer[0].api_key='${bouncer_key}'"
-    echo "uci commit crowdsec-firewall-bouncer"
-    echo "/etc/init.d/crowdsec-firewall-bouncer restart"
-    echo "/etc/init.d/crowdsec-firewall-bouncer status"
-    echo
-    echo "$(T "Проверка на central:" "Check on central:")"
-    echo "sudo docker exec crowdsec cscli bouncers list"
-    echo
-    echo "$(T "Важно: устройство, на котором установлен только bouncer/API без CrowdSec agent, не является machine и не требует validate. Это только bouncer, который забирает decisions с central LAPI и применяет их на своей стороне." "Important: a device with only bouncer/API and without CrowdSec agent is not a machine and does not need validate. It is only a bouncer that pulls decisions from central LAPI and applies them on its side.")"
-    echo "$(T "Запись сохранена в:" "Record saved to:") ${CONNECTIONS_FILE}"
-  } >"${tmp}"
-
-  show_file "$(T "Bouncer/API device" "Bouncer/API device")" "${tmp}"
-  rm -f "${tmp}"
-}
-
-
 backup_and_remove_apt_crowdsec() {
   local backup_dir="${CONFIG_DIR}/backup-before-docker-crowdsec-$(date +%F-%H%M%S)"
   mkdir -p "${backup_dir}"
@@ -2177,24 +1828,6 @@ configure_ufw_full_apply() {
   done
   IFS="${old_ifs}"
 
-  if [[ -s "${SYSLOG_DEVICES_FILE}" ]]; then
-    echo "Открытие syslog intake для устройств с bouncer/API..."
-    while IFS=$'\t' read -r syslog_name syslog_cidr syslog_port syslog_proto syslog_mode _; do
-      [[ -n "${syslog_cidr:-}" && -n "${syslog_port:-}" ]] || continue
-      case "${syslog_proto:-both}" in
-        udp)
-          ufw allow from "${syslog_cidr}" to any port "${syslog_port}" proto udp comment "crowdsec syslog ${syslog_name}" || true
-          ;;
-        tcp)
-          ufw allow from "${syslog_cidr}" to any port "${syslog_port}" proto tcp comment "crowdsec syslog ${syslog_name}" || true
-          ;;
-        *)
-          ufw allow from "${syslog_cidr}" to any port "${syslog_port}" proto udp comment "crowdsec syslog ${syslog_name}" || true
-          ufw allow from "${syslog_cidr}" to any port "${syslog_port}" proto tcp comment "crowdsec syslog ${syslog_name}" || true
-          ;;
-      esac
-    done < "${SYSLOG_DEVICES_FILE}"
-  fi
 
   echo "Включение UFW..."
   ufw --force enable
@@ -2328,7 +1961,7 @@ show_install_result() {
     echo "В NPM Proxy Host укажи: http://${LAN_IP}:${LAPI_PORT}"
     echo "Наружу не открывай LAPI ${LAPI_PORT}, если VPS ходят через NPM."
   else
-    echo "Проброс на роутере, если LAPI должен быть доступен VPS: WAN TCP ${LAPI_PORT} -> ${LAN_IP}:${LAPI_PORT}"
+    :
   fi
   echo "Не пробрасывать наружу: WAN TCP ${WEB_PORT}"
   echo "============================================================"
@@ -2417,130 +2050,24 @@ show_status() {
 
 show_connection_info() {
   safe_source_env
-
-  # Проверка наличия и непустоты файла базы данных подключений
-  if [[ ! -f "${CONNECTIONS_FILE}" || ! -s "${CONNECTIONS_FILE}" ]]; then
-    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      whiptail --title " Подключения VPS " --msgbox "Пока нет сохранённых подключений.\n\nСоздай подключение через:\nПодключения VPS и LAPI -> Создать подключение VPS/устройства/устройства" 12 78
-    else
-      print_header
-      echo "Пока нет сохранённых подключений."
-      echo
-      echo "Создай подключение через:"
-      echo "  Подключения VPS и LAPI -> Создать подключение VPS/устройства"
-      echo
-      echo "Мастер спросит имя VPS и его внешний IP, сам добавит доступ к LAPI и создаст bouncer key."
-      pause
-    fi
-    return
-  fi
-
-  # Чтение строк из файла TSV в индексированный массив
-  local lines=()
-  while IFS= read -r line; do
-    [[ -n "${line}" ]] && lines+=("${line}")
-  done < "${CONNECTIONS_FILE}"
-
-  local choice_num
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    local menu_args=()
-    for i in "${!lines[@]}"; do
-      # Извлечение полей Name (2) и IP (3) для формирования списка выбора
-      local name ip
-      name=$(echo "${lines[$i]}" | cut -f2)
-      ip=$(echo "${lines[$i]}" | cut -f3)
-      menu_args+=("$((i+1))" "${name} [${ip}]")
-    done
-
-    # Инициализация интерактивного меню выбора ноды
-    choice_num=$(whiptail --title " Список подключений VPS " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --menu "Выберите ноду для просмотра полных данных подключения:" 18 78 8 "${menu_args[@]}" 3>&1 1>&2 2>&3) || true
-    if [[ -z "${choice_num}" ]]; then
-      return
-    fi
-  else
-    print_header
-    echo "Список подключений VPS:"
-    for i in "${!lines[@]}"; do
-      local name ip
-      name=$(echo "${lines[$i]}" | cut -f2)
-      ip=$(echo "${lines[$i]}" | cut -f3)
-      echo "$((i+1)) - ${name} [${ip}]"
-    done
-    echo
-    read -rp "Введи номер VPS для просмотра параметров (или Enter для отмены): " choice_num
-    [[ -n "${choice_num}" ]] || return 0
-    [[ "${choice_num}" =~ ^[0-9]+$ ]] || { warn "Нужно ввести номер."; pause; return; }
-    if (( choice_num < 1 || choice_num > ${#lines[@]} )); then
-      warn "Номер вне диапазона."
-      pause
-      return
-    fi
-  fi
-
-  # Парсинг выбранной записи по TSV-структуре: Created(1), Name(2), IP(3), LAPI(4), Token(5), Key(6)
-  local target_line="${lines[$((choice_num - 1))]}"
-  local created name ip lapi token key
-  created=$(echo "${target_line}" | cut -f1)
-  name=$(echo "${target_line}" | cut -f2)
-  ip=$(echo "${target_line}" | cut -f3)
-  lapi=$(echo "${target_line}" | cut -f4)
-  token=$(echo "${target_line}" | cut -f5)
-  key=$(echo "${target_line}" | cut -f6)
-
-  # Генерация временного конфигурационного дампа для выбранной ноды
   local tmp
   tmp="$(mktemp)"
   {
-    echo "Параметры подключения для ноды: ${name}"
-    echo "=================================================="
-    echo "Дата создания: ${created}"
-    echo "IP-адрес VPS:  ${ip}"
+    echo "$(T "Сохранённые подключения VPS:" "Saved VPS connections:")"
     echo
-    if [[ "${token}" == "BOUNCER_ONLY_OPENWRT" ]]; then
-      echo "Тип подключения: bouncer/API device only"
-      echo "--------------------------------------------------"
-      echo "API URL=${lapi}/"
-      echo "API KEY=${key}"
-      echo "BOUNCER_NAME=${name}"
-      echo "--------------------------------------------------"
-      echo
-      echo "LuCI:"
-      echo "Services -> CrowdSec Firewall Bouncer"
-      echo "Enabled: on"
-      echo "API URL: ${lapi}/"
-      echo "API key: ${key}"
-      echo
-      echo "UCI variant 1:"
-      echo "uci set crowdsec.@bouncer[0].enabled='1'"
-      echo "uci set crowdsec.@bouncer[0].api_url='${lapi}/'"
-      echo "uci set crowdsec.@bouncer[0].api_key='${key}'"
-      echo "uci commit crowdsec"
-      echo "/etc/init.d/crowdsec-firewall-bouncer restart"
-      echo
-      echo "UCI variant 2:"
-      echo "uci set crowdsec-firewall-bouncer.@bouncer[0].enabled='1'"
-      echo "uci set crowdsec-firewall-bouncer.@bouncer[0].api_url='${lapi}/'"
-      echo "uci set crowdsec-firewall-bouncer.@bouncer[0].api_key='${key}'"
-      echo "uci commit crowdsec-firewall-bouncer"
-      echo "/etc/init.d/crowdsec-firewall-bouncer restart"
+    if [[ -s "${CONNECTIONS_FILE}" ]]; then
+      awk -F'	' '$5 != "VPS_NODE" {printf "%-20s %-24s %-18s %-42s %-22s\n", $5, $2, $3, $4, $1}' "${CONNECTIONS_FILE}"
     else
-      echo "Данные для копирования в VPS-скрипт:"
-      echo "--------------------------------------------------"
-      echo "CENTRAL_LAPI_URL=${lapi}"
-      echo "AUTO_REG_TOKEN=${token}"
-      echo "BOUNCER_KEY=${key}"
-      echo "MACHINE_NAME=${name}"
-      echo "--------------------------------------------------"
+      echo "$(T "Пока нет сохранённых подключений." "No saved connections yet.")"
     fi
     echo
-    echo "Веб-морда доступна только из локальной сети: ${LOCAL_WEB_UI}"
+    echo "$(T "Пояснение:" "Note:")"
+    echo "- $(T "Здесь показываются только полноценные VPS nodes/machines." "Only full VPS nodes/machines are shown here.")"
+    echo "- $(T "Для VPS machine нужен validate после ручной регистрации." "A VPS machine needs validate after manual registration.")"
   } >"${tmp}"
-
-  # Вывод сформированных данных через встроенный обработчик просмотра файлов
-  show_file "Настройки VPS: ${name}" "${tmp}"
+  show_file "$(T "Подключения VPS" "VPS connections")" "${tmp}"
   rm -f "${tmp}"
 }
-
 show_tokens_file() {
   if [[ "${CROWDSEC_ASSUME_YES:-0}" != "1" ]]; then
     if ! confirm_dangerous_action "Показ central.env" "Файл central.env содержит токены, пароли и bouncer keys. Не показывай его при записи экрана, демонстрации терминала или постороннем доступе к консоли."; then
@@ -3669,9 +3196,6 @@ run_menu_action() {
     enable_autostart) enable_login_menu ;;
     repair_menu) repair_menu_installation ;;
     node_bouncer) create_named_vps_bouncer_key || true ;;
-    device_manage) manage_bouncer_devices_menu ;;
-    device_events) manage_device_events_menu ;;
-    syslog_devices) show_remote_syslog_devices ;;
     language) change_language ;;
     protection_menu) manage_protection_menu ;;
     protection_baseline) run_with_live_progress "$(T "Базовая защита CrowdSec" "Base CrowdSec protection")" apply_initial_protection_baseline ;;
@@ -3682,7 +3206,6 @@ run_menu_action() {
     *) warn "$(T "Неизвестное действие меню." "Unknown menu action.")"; pause ;;
   esac
 }
-
 menu_loop_whiptail() {
   require_root
   tui_theme
@@ -3697,13 +3220,12 @@ menu_loop_whiptail() {
       --cancel-button "$(T "Назад" "Back")" \
       --ok-button "$(T "Выбрать" "Select")" \
       --notags \
-      --menu "$(T "Выберите раздел:\nСтрелки - навигация, ENTER - выбрать, ESC/Отмена - назад.\n\n${summary}" "Choose a section:\nArrows - navigation, ENTER - select, ESC/Cancel - back.\n\n${summary}")" \
-      24 96 9 \
+      --menu "$(T "Выберите раздел:\n\n${summary}" "Choose a section:\n\n${summary}")" \
+      24 96 7 \
+      "install" "$(T "Установка и первичная настройка" "Install and initial setup")" \
       "status" "$(T "Статус и данные" "Status and data")" \
-      "protection" "$(T "Защита, правила и decisions" "Protection, rules and decisions")" \
       "vps" "$(T "VPS nodes / machines" "VPS nodes / machines")" \
-      "devices" "$(T "Bouncer/API устройства" "Bouncer/API devices")" \
-      "events" "$(T "События от роутера/устройства" "Router/device events")" \
+      "protection" "$(T "Защита, правила и decisions" "Protection, rules and decisions")" \
       "network" "$(T "Сеть, TLS и доступ к LAPI" "Network, TLS and LAPI access")" \
       "service" "$(T "Обслуживание и диагностика" "Maintenance and diagnostics")" \
       "menu" "$(T "Настройки меню" "Menu settings")" \
@@ -3713,34 +3235,34 @@ menu_loop_whiptail() {
 
     while true; do
       case "${category}" in
+        install)
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Установка и первичная настройка" "Install and initial setup") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Последовательные шаги установки и восстановления." "Sequential installation and repair steps.")" 18 96 5 \
+            "install_stack" "$(T "1. Установить/восстановить CrowdSec Manager + Dockerized CrowdSec" "1. Install/repair CrowdSec Manager + Dockerized CrowdSec")" \
+            "protection_baseline" "$(T "2. Применить базовую защиту" "2. Apply base protection")" \
+            "firewall" "$(T "3. Проверить firewall/UFW" "3. Check firewall/UFW")" \
+            "connect" "$(T "4. Показать адреса и данные подключения" "4. Show addresses and connection data")" \
+            3>&1 1>&2 2>&3)" || break
+          ;;
         status)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Статус и данные" "Status and data") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 18 82 5 \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Статус и данные" "Status and data") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 18 88 5 \
             "status" "$(T "Статус сервисов и портов" "Service and port status")" \
-            "connect" "$(T "Показать созданные подключения" "Show saved connections")" \
+            "connect" "$(T "Показать созданные подключения VPS" "Show saved VPS connections")" \
             "envfile" "$(T "Показать central.env" "Show central.env")" \
             "crowdsec_info" "$(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")" \
             3>&1 1>&2 2>&3)" || break
           ;;
-        protection)
-          manage_protection_menu
-          break
-          ;;
         vps)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "VPS nodes / machines" "VPS nodes / machines") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 20 96 6 \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "VPS nodes / machines" "VPS nodes / machines") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Работа только с полноценными VPS nodes/machines." "Only full VPS nodes/machines are managed here.")" 20 96 6 \
             "node_bouncer" "$(T "Создать подключение VPS: SSH или ручное" "Create VPS connection: SSH or manual")" \
             "validate_machine" "$(T "Подтвердить machine VPS" "Validate VPS machine")" \
-            "connect" "$(T "Показать созданные подключения" "Show saved connections")" \
+            "connect" "$(T "Показать созданные подключения VPS" "Show saved VPS connections")" \
             "add_range" "$(T "Добавить IP/CIDR вручную" "Add IP/CIDR manually")" \
             "remove_range" "$(T "Удалить IP/CIDR из LAPI" "Remove IP/CIDR from LAPI")" \
             "replace_ranges" "$(T "Заменить весь список IP/CIDR" "Replace the full IP/CIDR list")" \
             3>&1 1>&2 2>&3)" || break
           ;;
-        devices)
-          manage_bouncer_devices_menu
-          break
-          ;;
-        events)
-          manage_device_events_menu
+        protection)
+          manage_protection_menu
           break
           ;;
         network)
@@ -3752,13 +3274,12 @@ menu_loop_whiptail() {
             "auto_token" "$(T "Перегенерировать auto-registration token" "Regenerate auto-registration token")" \
             "bouncer_key" "$(T "Перегенерировать shared bouncer key" "Regenerate shared bouncer key")" \
             "firewall" "$(T "Показать firewall/UFW" "Show firewall/UFW")" \
-            "test_lapi" "$(T "Проверить доступ Web UI к LAPI" "Test Web UI access to LAPI")" \
+            "test_lapi" "$(T "Проверить доступ Manager к LAPI" "Test Manager access to LAPI")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         service)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Обслуживание и диагностика" "Maintenance and diagnostics") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 25 96 12 \
-            "install_stack" "$(T "Установить/восстановить CrowdSec Manager + Dockerized CrowdSec" "Install/repair CrowdSec Manager + Dockerized CrowdSec")" \
-            "restart" "$(T "Перезапустить CrowdSec, Docker и Web UI" "Restart CrowdSec, Docker and Web UI")" \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Обслуживание и диагностика" "Maintenance and diagnostics") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 24 96 11 \
+            "restart" "$(T "Перезапустить CrowdSec, Docker и Manager" "Restart CrowdSec, Docker and Manager")" \
             "update_webui" "$(T "Обновить CrowdSec Manager" "Update CrowdSec Manager")" \
             "logs" "$(T "Показать логи Manager и CrowdSec" "Show Manager and CrowdSec logs")" \
             "remote_logs" "$(T "Логи удалённой установки VPS" "Remote VPS install logs")" \
@@ -3768,7 +3289,6 @@ menu_loop_whiptail() {
             "update_docker" "$(T "Обновить Docker" "Update Docker")" \
             "update_crowdsec" "$(T "Обновить Dockerized CrowdSec" "Update Dockerized CrowdSec")" \
             "versions" "$(T "Показать версии ПО" "Show software versions")" \
-            "syslog_devices" "$(T "Показать syslog intake" "Show syslog intake")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         menu)
@@ -3796,111 +3316,106 @@ menu_loop_plain() {
     printf "| %-56s |\n" "LAPI: ${VPS_LAPI_URL}"
     echo "+----------------------------------------------------------+"
     echo
-    echo "$(T "[ СТАТУС ]" "[ STATUS ]")"
-    echo "  1) $(T "Показать статус" "Show status")"
-    echo "  2) $(T "Показать созданные подключения" "Show saved connections")"
-    echo "  3) $(T "Показать central.env" "Show central.env")"
-    echo "  4) $(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")"
+    echo "$(T "[ УСТАНОВКА ]" "[ INSTALL ]")"
+    echo "  1) $(T "Установить/восстановить CrowdSec Manager + Dockerized CrowdSec" "Install/repair CrowdSec Manager + Dockerized CrowdSec")"
+    echo "  2) $(T "Применить базовую защиту" "Apply base protection")"
     echo
-    echo "$(T "[ ЗАЩИТА, ПРАВИЛА, DECISIONS ]" "[ PROTECTION, RULES, DECISIONS ]")"
-    echo "  5) $(T "Меню защиты" "Protection menu")"
-    echo "  6) $(T "Базовая бесплатная защита" "Base free protection")"
-    echo "  7) $(T "Collections / Hub / rules" "Collections / Hub / rules")"
-    echo "  8) $(T "Manual decisions / local blacklist" "Manual decisions / local blacklist")"
-    echo "  9) $(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR")"
+    echo "$(T "[ СТАТУС ]" "[ STATUS ]")"
+    echo "  3) $(T "Показать статус" "Show status")"
+    echo "  4) $(T "Показать созданные подключения VPS" "Show saved VPS connections")"
+    echo "  5) $(T "Показать central.env" "Show central.env")"
+    echo "  6) $(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")"
     echo
     echo "$(T "[ VPS / MACHINES ]" "[ VPS / MACHINES ]")"
-    echo " 10) $(T "Создать подключение VPS" "Create VPS connection")"
-    echo " 11) $(T "Подтвердить machine VPS" "Validate VPS machine")"
-    echo " 12) $(T "Добавить IP/CIDR вручную" "Add IP/CIDR manually")"
-    echo " 13) $(T "Удалить IP/CIDR из LAPI" "Remove IP/CIDR from LAPI")"
-    echo " 14) $(T "Заменить список IP/CIDR" "Replace IP/CIDR list")"
+    echo "  7) $(T "Создать подключение VPS" "Create VPS connection")"
+    echo "  8) $(T "Подтвердить machine VPS" "Validate VPS machine")"
+    echo "  9) $(T "Добавить IP/CIDR вручную" "Add IP/CIDR manually")"
+    echo " 10) $(T "Удалить IP/CIDR из LAPI" "Remove IP/CIDR from LAPI")"
+    echo " 11) $(T "Заменить список IP/CIDR" "Replace IP/CIDR list")"
     echo
-    echo "$(T "[ BOUNCER/API УСТРОЙСТВА И СОБЫТИЯ ]" "[ BOUNCER/API DEVICES AND EVENTS ]")"
-    echo " 15) $(T "Управление bouncer/API устройствами" "Manage bouncer/API devices")"
-    echo " 16) $(T "События от роутера/устройства" "Router/device event intake")"
-    echo " 17) $(T "Показать syslog intake" "Show syslog intake")"
+    echo "$(T "[ ЗАЩИТА, ПРАВИЛА, DECISIONS ]" "[ PROTECTION, RULES, DECISIONS ]")"
+    echo " 12) $(T "Меню защиты" "Protection menu")"
+    echo " 13) $(T "Collections / Hub / rules" "Collections / Hub / rules")"
+    echo " 14) $(T "Manual decisions / local blacklist" "Manual decisions / local blacklist")"
+    echo " 15) $(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR")"
     echo
     echo "$(T "[ СЕТЬ, TLS, КЛЮЧИ ]" "[ NETWORK, TLS, KEYS ]")"
-    echo " 18) $(T "Изменить LAN IP или порт Web UI" "Change LAN IP or Web UI port")"
-    echo " 19) $(T "Изменить порт LAPI" "Change LAPI port")"
-    echo " 20) $(T "Изменить внешний IP/DDNS" "Change public IP/DDNS")"
-    echo " 21) $(T "HTTPS LAPI через Nginx Proxy Manager" "HTTPS LAPI through Nginx Proxy Manager")"
-    echo " 22) $(T "Перегенерировать auto-registration token" "Regenerate auto-registration token")"
-    echo " 23) $(T "Перегенерировать shared bouncer key" "Regenerate shared bouncer key")"
-    echo " 24) $(T "Показать firewall/UFW" "Show firewall/UFW")"
-    echo " 25) $(T "Проверить Web UI -> LAPI" "Test Web UI -> LAPI")"
+    echo " 16) $(T "Изменить LAN IP или порт Web UI" "Change LAN IP or Web UI port")"
+    echo " 17) $(T "Изменить порт LAPI" "Change LAPI port")"
+    echo " 18) $(T "Изменить внешний IP/DDNS" "Change public IP/DDNS")"
+    echo " 19) $(T "HTTPS LAPI через Nginx Proxy Manager" "HTTPS LAPI through Nginx Proxy Manager")"
+    echo " 20) $(T "Перегенерировать auto-registration token" "Regenerate auto-registration token")"
+    echo " 21) $(T "Перегенерировать shared bouncer key" "Regenerate shared bouncer key")"
+    echo " 22) $(T "Показать firewall/UFW" "Show firewall/UFW")"
+    echo " 23) $(T "Проверить Manager -> LAPI" "Test Manager -> LAPI")"
     echo
     echo "$(T "[ ОБСЛУЖИВАНИЕ ]" "[ MAINTENANCE ]")"
-    echo " 26) $(T "Перезапустить CrowdSec, Docker и Web UI" "Restart CrowdSec, Docker and Web UI")"
-    echo " 27) $(T "Обновить CrowdSec Manager" "Update CrowdSec Manager")"
-    echo " 28) $(T "Показать логи Manager и CrowdSec" "Show Manager and CrowdSec logs")"
-    echo " 29) $(T "Повторно применить все настройки" "Reapply all settings")"
-    echo " 30) $(T "Обновить весь стек" "Update full stack")"
-    echo " 31) $(T "Обновить пакеты Debian" "Update Debian packages")"
-    echo " 32) $(T "Обновить Docker" "Update Docker")"
-    echo " 33) $(T "Обновить CrowdSec" "Update CrowdSec")"
-    echo " 34) $(T "Показать версии ПО" "Show software versions")"
-    echo " 35) $(T "Починить или переустановить команду меню" "Repair or reinstall menu command")"
-    echo " 36) $(T "Изменить язык интерфейса" "Change interface language")"
-    echo " 37) $(T "Отключить автозапуск меню" "Disable menu autostart")"
-    echo " 38) $(T "Отключить автозапуск меню" "Disable menu autostart")"
-    echo " 39) $(T "Логи удалённой установки VPS" "Remote VPS install logs")"
-    echo " 40) $(T "Включить автозапуск меню" "Enable menu autostart")"
+    echo " 24) $(T "Перезапустить CrowdSec, Docker и Manager" "Restart CrowdSec, Docker and Manager")"
+    echo " 25) $(T "Обновить CrowdSec Manager" "Update CrowdSec Manager")"
+    echo " 26) $(T "Показать логи Manager и CrowdSec" "Show Manager and CrowdSec logs")"
+    echo " 27) $(T "Повторно применить все настройки" "Reapply all settings")"
+    echo " 28) $(T "Обновить весь стек" "Update full stack")"
+    echo " 29) $(T "Обновить пакеты Debian" "Update Debian packages")"
+    echo " 30) $(T "Обновить Docker" "Update Docker")"
+    echo " 31) $(T "Обновить Dockerized CrowdSec" "Update Dockerized CrowdSec")"
+    echo " 32) $(T "Показать версии ПО" "Show software versions")"
+    echo " 33) $(T "Логи удалённой установки VPS" "Remote VPS install logs")"
+    echo
+    echo "$(T "[ МЕНЮ ]" "[ MENU ]")"
+    echo " 34) $(T "Восстановить команду меню" "Repair menu command")"
+    echo " 35) $(T "Изменить язык интерфейса" "Change interface language")"
+    echo " 36) $(T "Отключить автозапуск меню" "Disable menu autostart")"
+    echo " 37) $(T "Включить автозапуск меню" "Enable menu autostart")"
     echo
     echo "  0) $(T "Выход" "Exit")"
     echo
-    if ! read -rp "$(T "Выбери действие [0-40]: " "Choose action [0-40]: ")" choice; then
+    if ! read -rp "$(T "Выбери действие [0-37]: " "Choose action [0-37]: ")" choice; then
       echo
       continue
     fi
     case "${choice}" in
-      1) show_status; pause ;;
-      2) show_connection_info; pause ;;
-      3) show_tokens_file; pause ;;
-      4) show_crowdsec_info; pause ;;
-      5) manage_protection_menu ;;
-      6) run_with_live_progress "$(T "Базовая защита CrowdSec" "Base CrowdSec protection")" apply_initial_protection_baseline ;;
-      7) manage_collections_menu ;;
-      8) manage_decisions_menu ;;
-      9) manage_trusted_ips_menu ;;
-      10) create_named_vps_bouncer_key ;;
-      11) validate_machine_prompt ;;
-      12) add_allowed_range ;;
-      13) remove_allowed_range ;;
-      14) replace_allowed_ranges ;;
-      15) manage_bouncer_devices_menu ;;
-      16) manage_device_events_menu ;;
-      17) show_remote_syslog_devices ;;
-      18) change_lan_ip_or_web_port ;;
-      19) change_lapi_port ;;
-      20) change_public_addr ;;
-      21) configure_public_lapi_url ;;
-      22) regenerate_auto_token ;;
-      23) regenerate_bouncer_key ;;
-      24) show_firewall; pause ;;
-      25) test_webui_lapi; pause ;;
-      26) restart_services ;;
-      27) update_web_ui_only ;;
-      28) show_logs; pause ;;
-      29) reapply_all_settings ;;
-      30) update_installed_stack ;;
-      31) update_system_only ;;
-      32) update_docker_only ;;
-      33) update_crowdsec_only ;;
-      34) show_versions; pause ;;
-      35) install_or_repair_full_stack ;;
-      36) repair_menu_installation ;;
-      37) change_language ;;
-      38) disable_login_menu ;;
-      39) show_remote_install_logs ;;
-      40) enable_login_menu ;;
+      1) install_or_repair_full_stack ;;
+      2) run_with_live_progress "$(T "Базовая защита CrowdSec" "Base CrowdSec protection")" apply_initial_protection_baseline ;;
+      3) show_status; pause ;;
+      4) show_connection_info; pause ;;
+      5) show_tokens_file; pause ;;
+      6) show_crowdsec_info; pause ;;
+      7) create_named_vps_bouncer_key ;;
+      8) validate_machine_prompt ;;
+      9) add_allowed_range ;;
+      10) remove_allowed_range ;;
+      11) replace_allowed_ranges ;;
+      12) manage_protection_menu ;;
+      13) manage_collections_menu ;;
+      14) manage_decisions_menu ;;
+      15) manage_trusted_ips_menu ;;
+      16) change_lan_ip_or_web_port ;;
+      17) change_lapi_port ;;
+      18) change_public_addr ;;
+      19) configure_public_lapi_url ;;
+      20) regenerate_auto_token ;;
+      21) regenerate_bouncer_key ;;
+      22) show_firewall; pause ;;
+      23) test_webui_lapi; pause ;;
+      24) restart_services ;;
+      25) update_web_ui_only ;;
+      26) show_logs; pause ;;
+      27) reapply_all_settings ;;
+      28) update_installed_stack ;;
+      29) update_system_only ;;
+      30) update_docker_only ;;
+      31) update_crowdsec_only ;;
+      32) show_versions; pause ;;
+      33) show_remote_install_logs ;;
+      34) repair_menu_installation ;;
+      35) change_language ;;
+      36) disable_login_menu ;;
+      37) enable_login_menu ;;
       0) exit 0 ;;
       *) echo "$(T "Неизвестный пункт меню." "Unknown menu item.")"; pause ;;
     esac
   done
 }
-
 menu_loop() {
   if [[ -t 0 && -t 1 ]] && ensure_tui_tools; then
     menu_loop_whiptail
@@ -3913,13 +3428,8 @@ menu_loop() {
 
 
 # -----------------------------------------------------------------------------
-# v0.6.7 device management overrides
+# Dockerized CrowdSec helper overrides
 # -----------------------------------------------------------------------------
-# Важно: bouncer-only устройство не является machine и не отправляет события.
-# Оно только забирает decisions из LAPI. События от роутера/устройства - это
-# отдельная настройка удалённого log intake, включается и удаляется отдельно.
-
-DEVICE_CONNECTION_TYPE="BOUNCER_ONLY_DEVICE"
 
 crowdsec_cscli() {
   # The central engine for this script is Dockerized CrowdSec.
@@ -3982,866 +3492,6 @@ record_connection_line() {
   mv "${CONNECTIONS_FILE}.tmp" "${CONNECTIONS_FILE}"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -Is)" "${name}" "${ip}" "${lapi}" "${type}" "${key}" >>"${CONNECTIONS_FILE}"
 }
-
-select_bouncer_device_record() {
-  local __var="$1" title="${2:-Bouncer/API devices}" lines=() line menu_args=() i name ip type choice
-  [[ -s "${CONNECTIONS_FILE}" ]] || return 1
-  while IFS= read -r line || [[ -n "${line}" ]]; do
-    [[ -n "${line}" ]] || continue
-    type="$(printf '%s' "${line}" | cut -f5)"
-    case "${type}" in
-      BOUNCER_ONLY_DEVICE|BOUNCER_ONLY_OPENWRT) lines+=("${line}") ;;
-    esac
-  done < "${CONNECTIONS_FILE}"
-  ((${#lines[@]} > 0)) || return 1
-
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    for i in "${!lines[@]}"; do
-      name="$(printf '%s' "${lines[$i]}" | cut -f2)"
-      ip="$(printf '%s' "${lines[$i]}" | cut -f3)"
-      menu_args+=("$((i+1))" "${name} [${ip}]")
-    done
-    choice="$(whiptail --title " ${title} " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите устройство:" "Choose a device:")" 18 92 10 "${menu_args[@]}" 3>&1 1>&2 2>&3)" || return 1
-  else
-    echo
-    echo "${title}:"
-    for i in "${!lines[@]}"; do
-      name="$(printf '%s' "${lines[$i]}" | cut -f2)"
-      ip="$(printf '%s' "${lines[$i]}" | cut -f3)"
-      echo "$((i+1))) ${name} [${ip}]"
-    done
-    read -rp "$(T "Номер устройства: " "Device number: ")" choice || return 1
-  fi
-  [[ "${choice}" =~ ^[0-9]+$ ]] || return 1
-  ((choice >= 1 && choice <= ${#lines[@]})) || return 1
-  printf -v "${__var}" '%s' "${lines[$((choice-1))]}"
-}
-
-create_openwrt_bouncer_connection() {
-  safe_source_env
-  local name_raw cidr_raw lapi_url_raw rc tmp
-  local node_name router_cidr vps_ip bouncer_key default_lapi
-
-  default_lapi="${LOCAL_LAPI_URL}"
-  [[ -n "${PUBLIC_LAPI_URL:-}" ]] && default_lapi="${VPS_LAPI_URL}"
-
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    set +e
-    name_raw="$(whiptail --title " $(T "Bouncer/API device" "Bouncer/API device") " --inputbox "$(T "Имя устройства / bouncer name.\n\nНапример: openwrt-router, home-router, gateway-1, edge-bouncer.\nЭто имя будет видно в CrowdSec Manager только в списке bouncers." "Device name / bouncer name.\n\nExample: openwrt-router, home-router, gateway-1, edge-bouncer.\nThis name will be visible in CrowdSec Manager only in the bouncers list.")" 14 94 "bouncer-device" 3>&1 1>&2 2>&3)"
-    rc=$?; set -e; [[ "${rc}" -eq 0 ]] || return 0
-    set +e
-    cidr_raw="$(whiptail --title " $(T "Device IP/CIDR" "Device IP/CIDR") " --inputbox "$(T "IP или CIDR устройства, которому разрешить доступ к LAPI.\n\nДля роутера в LAN обычно: 192.168.1.1/32.\nЭто не включает сбор логов. Это только доступ bouncer к LAPI." "Device IP or CIDR allowed to access LAPI.\n\nFor a router in LAN usually: 192.168.1.1/32.\nThis does not enable log collection. This is only LAPI access for the bouncer.")" 15 96 "" 3>&1 1>&2 2>&3)"
-    rc=$?; set -e; [[ "${rc}" -eq 0 ]] || return 0
-    set +e
-    lapi_url_raw="$(whiptail --title " $(T "Bouncer/API LAPI URL" "Bouncer/API LAPI URL") " --inputbox "$(T "Какой LAPI URL прописать на устройстве?\n\nДля LAN обычно:\n${LOCAL_LAPI_URL}\n\nЧерез NPM/TLS:\n${VPS_LAPI_URL}" "Which LAPI URL should be configured on the device?\n\nFor LAN usually:\n${LOCAL_LAPI_URL}\n\nThrough NPM/TLS:\n${VPS_LAPI_URL}")" 17 96 "${default_lapi}" 3>&1 1>&2 2>&3)"
-    rc=$?; set -e; [[ "${rc}" -eq 0 ]] || return 0
-    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Создать" "Create")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Будет создан только bouncer key и доступ к LAPI.\n\nУстройство появится в CrowdSec Manager в разделе Bouncers.\nВ Machines, Alerts и Events оно не появится, пока отдельно не включён сбор событий/логов.\n\nПродолжить?" "Only a bouncer key and LAPI access will be created.\n\nThe device will appear in CrowdSec Manager under Bouncers.\nIt will not appear in Machines, Alerts or Events unless event/log intake is configured separately.\n\nContinue?")" 16 94 || return 0
-  else
-    read -rp "$(T "Имя устройства / bouncer name [bouncer-device]: " "Device / bouncer name [bouncer-device]: ")" name_raw || return 0
-    name_raw="${name_raw:-bouncer-device}"
-    read -rp "$(T "IP/CIDR устройства для доступа к LAPI, например 192.168.1.1/32: " "Device IP/CIDR for LAPI access, e.g. 192.168.1.1/32: ")" cidr_raw || return 0
-    read -rp "$(T "LAPI URL для устройства [${default_lapi}]: " "LAPI URL for device [${default_lapi}]: ")" lapi_url_raw || return 0
-    lapi_url_raw="${lapi_url_raw:-${default_lapi}}"
-  fi
-
-  node_name="$(sanitize_node_name "${name_raw:-}")"
-  [[ -n "${node_name}" ]] || fail "$(T "Имя bouncer не может быть пустым." "Bouncer name cannot be empty.")"
-  router_cidr="$(normalize_cidr_input "${cidr_raw:-}")" || fail "$(T "IP/CIDR устройства не может быть пустым." "Device IP/CIDR cannot be empty.")"
-  vps_ip="${router_cidr%%/*}"
-  lapi_url_raw="${lapi_url_raw%/}"
-  [[ "${lapi_url_raw}" =~ ^https?://[^[:space:]]+$ ]] || fail "$(T "LAPI URL должен начинаться с http:// или https://" "LAPI URL must start with http:// or https://")"
-
-  add_allowed_range_exact "${router_cidr}"
-  bouncer_key="$(openssl rand -hex 32)"
-  machine_password="$(openssl rand -hex 32)"
-
-  create_bouncer_device_apply() {
-    echo "Удаление старого bouncer: ${node_name}"
-    crowdsec_cscli bouncers delete "${node_name}" || true
-    echo "Регистрация bouncer/API device: ${node_name}"
-    crowdsec_cscli bouncers add "${node_name}" --key "${bouncer_key}"
-    echo "Сохранение central.env"
-    save_env
-    echo "Обновление config.yaml CrowdSec LAPI"
-    configure_docker_crowdsec_lapi
-    echo "Перезапуск CrowdSec"
-    restart_crowdsec_runtime || true
-    echo "Обновление UFW"
-    configure_ufw_full
-    echo "Запись подключения"
-    record_connection_line "${node_name}" "${vps_ip}" "${lapi_url_raw}" "${DEVICE_CONNECTION_TYPE}" "${bouncer_key}"
-  }
-
-  run_with_live_progress "$(T "Регистрация bouncer/API device" "Registering bouncer/API device")" create_bouncer_device_apply || return 1
-
-  tmp="$(mktemp)"
-  {
-    echo "$(T "Данные для подключения устройства с bouncer/API:" "Bouncer/API device connection data:")"
-    echo
-    echo "Bouncer name: ${node_name}"
-    echo "Allowed IP/CIDR: ${router_cidr}"
-    echo "API URL: ${lapi_url_raw}/"
-    echo "API key: ${bouncer_key}"
-    echo
-    echo "$(T "Важно:" "Important:")"
-    echo "- $(T "Это bouncer-only устройство. Validate не нужен." "This is a bouncer-only device. No validate is required.")"
-    echo "- $(T "Оно видно в CrowdSec Manager только в разделе Bouncers." "It is visible in CrowdSec Manager only under Bouncers.")"
-    echo "- $(T "События/логи не появятся, пока отдельно не включён intake событий." "Events/logs will not appear unless event intake is configured separately.")"
-    echo
-    echo "LuCI / generic settings:"
-    echo "enabled=1"
-    echo "api_url=${lapi_url_raw}/"
-    echo "api_key=${bouncer_key}"
-    echo
-    echo "OpenWrt UCI variant 1 (/etc/config/crowdsec):"
-    echo "uci set crowdsec.@bouncer[0].enabled='1'"
-    echo "uci set crowdsec.@bouncer[0].api_url='${lapi_url_raw}/'"
-    echo "uci set crowdsec.@bouncer[0].api_key='${bouncer_key}'"
-    echo "uci commit crowdsec"
-    echo "/etc/init.d/crowdsec-firewall-bouncer restart"
-    echo
-    echo "OpenWrt UCI variant 2 (/etc/config/crowdsec-firewall-bouncer):"
-    echo "uci set crowdsec-firewall-bouncer.@bouncer[0].enabled='1'"
-    echo "uci set crowdsec-firewall-bouncer.@bouncer[0].api_url='${lapi_url_raw}/'"
-    echo "uci set crowdsec-firewall-bouncer.@bouncer[0].api_key='${bouncer_key}'"
-    echo "uci commit crowdsec-firewall-bouncer"
-    echo "/etc/init.d/crowdsec-firewall-bouncer restart"
-  } >"${tmp}"
-  show_file "$(T "Bouncer/API device" "Bouncer/API device")" "${tmp}"
-  rm -f "${tmp}"
-}
-
-show_connection_info() {
-  safe_source_env
-  local tmp
-  tmp="$(mktemp)"
-  {
-    echo "$(T "Сохранённые подключения:" "Saved connections:")"
-    echo
-    if [[ -s "${CONNECTIONS_FILE}" ]]; then
-      awk -F'\t' 'BEGIN {printf "%-20s %-24s %-18s %-42s %-22s\n", "TYPE", "NAME", "IP", "LAPI", "CREATED"} {printf "%-20s %-24s %-18s %-42s %-22s\n", $5, $2, $3, $4, $1}' "${CONNECTIONS_FILE}"
-    else
-      echo "$(T "Пока нет сохранённых подключений." "No saved connections yet.")"
-    fi
-    echo
-    echo "$(T "Пояснение:" "Note:")"
-    echo "- VPS machine появляется в Machines и требует validate."
-    echo "- Bouncer/API device появляется только в Bouncers и validate не требует."
-  } >"${tmp}"
-  show_file "$(T "Подключения" "Connections")" "${tmp}"
-  rm -f "${tmp}"
-}
-
-show_bouncer_devices() {
-  safe_source_env
-  local tmp
-  tmp="$(mktemp)"
-  {
-    echo "$(T "Bouncer/API устройства, сохранённые скриптом:" "Bouncer/API devices saved by the script:")"
-    echo
-    if [[ -s "${CONNECTIONS_FILE}" ]]; then
-      awk -F'\t' '$5=="BOUNCER_ONLY_DEVICE" || $5=="BOUNCER_ONLY_OPENWRT" {found=1; printf "%-24s %-20s %-42s %-22s\n", $2, $3, $4, $1} END {if (!found) print "нет сохранённых bouncer-only устройств"}' "${CONNECTIONS_FILE}"
-    else
-      echo "$(T "Пока нет устройств." "No devices yet.")"
-    fi
-    echo
-    echo "$(T "Текущий список bouncers в CrowdSec:" "Current CrowdSec bouncers list:")"
-    echo
-    crowdsec_cscli bouncers list 2>&1 || true
-  } >"${tmp}"
-  show_file "$(T "Bouncer/API устройства" "Bouncer/API devices")" "${tmp}"
-  rm -f "${tmp}"
-}
-
-remove_bouncer_device() {
-  safe_source_env
-  local rec name ip cidr key tmp
-  if ! select_bouncer_device_record rec "$(T "Удалить bouncer/API устройство" "Remove bouncer/API device")"; then
-    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      whiptail --title " $(T "Удаление" "Removal") " --msgbox "$(T "Нет bouncer/API устройств для удаления." "No bouncer/API devices to remove.")" 8 80 || true
-    fi
-    return 0
-  fi
-  name="$(printf '%s' "${rec}" | cut -f2)"
-  ip="$(printf '%s' "${rec}" | cut -f3)"
-  key="$(printf '%s' "${rec}" | cut -f6)"
-  if [[ "${ip}" == *:* ]]; then cidr="${ip}/128"; else cidr="${ip}/32"; fi
-
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    whiptail --title " $(T "Удаление" "Removal") " --yes-button "$(T "Удалить" "Remove")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Удалить bouncer, запись подключения и IP/CIDR из LAPI/UFW?" "Remove bouncer, connection record and IP/CIDR from LAPI/UFW?")\n\n${name} [${ip}]" 12 88 || return 0
-  fi
-
-  remove_bouncer_device_apply() {
-    echo "Удаление bouncer ${name}"
-    crowdsec_cscli bouncers delete "${name}" || true
-    echo "Удаление записи подключения"
-    awk -F'\t' -v name="${name}" '($2 != name)' "${CONNECTIONS_FILE}" >"${CONNECTIONS_FILE}.tmp" || true
-    mv "${CONNECTIONS_FILE}.tmp" "${CONNECTIONS_FILE}"
-    echo "Удаление event intake записи, если была"
-    if [[ -f "${SYSLOG_DEVICES_FILE}" ]]; then
-      awk -F'\t' -v name="${name}" '($1 != name)' "${SYSLOG_DEVICES_FILE}" >"${SYSLOG_DEVICES_FILE}.tmp" || true
-      mv "${SYSLOG_DEVICES_FILE}.tmp" "${SYSLOG_DEVICES_FILE}"
-    fi
-    echo "Удаление ${cidr} из ALLOWED_RANGES"
-    remove_allowed_range_exact "${cidr}"
-    save_env
-    configure_docker_crowdsec_lapi
-    restart_crowdsec_runtime || true
-    configure_ufw_full
-  }
-  run_with_live_progress "$(T "Удаление bouncer/API device" "Removing bouncer/API device")" remove_bouncer_device_apply || return 1
-}
-
-check_bouncer_device_status() {
-  safe_source_env
-  local tmp
-  tmp="$(mktemp)"
-  {
-    echo "$(T "Статус bouncer/API устройств:" "Bouncer/API device status:")"
-    echo
-    crowdsec_cscli bouncers list 2>&1 || true
-    echo
-    echo "$(T "Если Last API pull обновляется, устройство подключено к LAPI. События это не показывает: bouncer не отправляет логи." "If Last API pull updates, the device is connected to LAPI. This does not show events: a bouncer does not send logs.")"
-  } >"${tmp}"
-  show_file "$(T "Статус bouncers" "Bouncer status")" "${tmp}"
-  rm -f "${tmp}"
-}
-
-
-write_openwrt_forwarder_helper_scripts() {
-  local name="$1" router_ip="$2" central_host="$3" port="$4" out_dir install_script uninstall_script worker_path init_path
-  out_dir="${OPENWRT_HELPER_DIR:-${CONFIG_DIR}/openwrt-helper-scripts}"
-  mkdir -p "${out_dir}"
-  chmod 700 "${out_dir}" 2>/dev/null || true
-  install_script="${out_dir}/${name}-install-crowdsec-log-forwarder.sh"
-  uninstall_script="${out_dir}/${name}-remove-crowdsec-log-forwarder.sh"
-  worker_path="/usr/bin/crowdsec-log-forwarder"
-  init_path="/etc/init.d/crowdsec-log-forwarder"
-
-  cat > "${install_script}" <<EOF
-#!/bin/sh
-set -eu
-
-CENTRAL_HOST='${central_host}'
-CENTRAL_PORT='${port}'
-TAG='openwrt-crowdsec'
-PATTERN='dropbear|sshd|auth|login|failed|failure|invalid|refused|denied|DROP|Drop|drop|REJECT|Reject|reject|blocked|Blocked|ban|Ban|nft|iptables|firewall|Firewall|kernel'
-
-uci delete system.@system[0].log_ip 2>/dev/null || true
-uci delete system.@system[0].log_port 2>/dev/null || true
-uci delete system.@system[0].log_proto 2>/dev/null || true
-uci commit system
-/etc/init.d/log restart || true
-
-if ! command -v nc >/dev/null 2>&1; then
-  if command -v opkg >/dev/null 2>&1; then
-    opkg update >/tmp/crowdsec-log-forwarder-opkg.log 2>&1 || true
-    opkg install netcat-openbsd >>/tmp/crowdsec-log-forwarder-opkg.log 2>&1 || opkg install netcat >>/tmp/crowdsec-log-forwarder-opkg.log 2>&1 || true
-  fi
-fi
-if ! command -v nc >/dev/null 2>&1; then
-  echo 'ERROR: nc/netcat is required on OpenWrt. BusyBox nc with TCP mode is enough.' >&2
-  echo 'Install netcat and run this helper again:' >&2
-  echo '  opkg update && opkg install netcat' >&2
-  exit 33
-fi
-
-cat > '${worker_path}' <<'WORKER_EOF'
-#!/bin/sh
-CENTRAL_HOST='${central_host}'
-CENTRAL_PORT='${port}'
-TAG='openwrt-crowdsec'
-PATTERN='dropbear|sshd|auth|login|failed|failure|invalid|refused|denied|DROP|Drop|drop|REJECT|Reject|reject|blocked|Blocked|ban|Ban|nft|iptables|firewall|Firewall|kernel'
-
-command -v logread >/dev/null 2>&1 || exit 127
-command -v nc >/dev/null 2>&1 || exit 127
-
-send_remote_syslog() {
-  line="$1"
-  ts="$(date '+%b %e %H:%M:%S' 2>/dev/null || date)"
-  host="$(uci get system.@system[0].hostname 2>/dev/null || hostname 2>/dev/null || echo openwrt)"
-  packet="$(printf '<134>%s %s %s: %s\n' "$ts" "$host" "$TAG" "$line")"
-  # OpenWrt 25 often has BusyBox logger without remote -n/-P.
-  # BusyBox nc may also have no -u and no -w, and TCP nc can wait forever
-  # because rsyslog keeps the connection open. Therefore every nc send is
-  # killed after a short grace period. This keeps --send-test and the daemon
-  # from hanging the installer or the procd service.
-  if nc -h 2>&1 | grep -q -- '-u'; then
-    ( printf '%s' "$packet" | nc -u "$CENTRAL_HOST" "$CENTRAL_PORT" >/dev/null 2>&1 ) &
-  else
-    ( printf '%s' "$packet" | nc "$CENTRAL_HOST" "$CENTRAL_PORT" >/dev/null 2>&1 ) &
-  fi
-  nc_pid="$!"
-  sleep 1
-  kill "$nc_pid" 2>/dev/null || true
-  wait "$nc_pid" 2>/dev/null || true
-}
-
-if [ "${1:-}" = "--send-test" ]; then
-  send_remote_syslog "crowdsec-forwarder-test dropbear login failed for root from 1.2.3.4"
-  exit 0
-fi
-
-while true; do
-  logread -f 2>/dev/null | grep -Ei "\$PATTERN" | while IFS= read -r line; do
-    send_remote_syslog "$line"
-  done
-  sleep 2
-done
-WORKER_EOF
-chmod +x '${worker_path}'
-
-cat > '${init_path}' <<'INIT_EOF'
-#!/bin/sh /etc/rc.common
-START=99
-STOP=10
-USE_PROCD=1
-
-start_service() {
-  procd_open_instance
-  procd_set_param command /bin/sh /usr/bin/crowdsec-log-forwarder
-  procd_set_param respawn 5 5 0
-  procd_close_instance
-}
-INIT_EOF
-chmod +x '${init_path}'
-
-'${init_path}' stop 2>/dev/null || true
-'${init_path}' enable
-if ! '${init_path}' start; then
-  echo 'ERROR: crowdsec-log-forwarder service failed to start' >&2
-  '${init_path}' status 2>&1 || true
-  logread | tail -80 || true
-  exit 31
-fi
-sleep 2
-if ! ps w 2>/dev/null | grep '[c]rowdsec-log-forwarder' >/dev/null 2>&1; then
-  echo 'ERROR: crowdsec-log-forwarder process is not running after start' >&2
-  '${init_path}' status 2>&1 || true
-  logread | tail -80 || true
-  exit 32
-fi
-# Send one direct test packet so central can verify that rsyslog really receives data.
-/bin/sh '${worker_path}' --send-test 2>/dev/null || true
-echo 'OK: crowdsec-log-forwarder installed and running'
-'${init_path}' status || true
-logread | tail -50
-EOF
-
-  cat > "${uninstall_script}" <<'EOF'
-#!/bin/sh
-set -eu
-/etc/init.d/crowdsec-log-forwarder stop 2>/dev/null || true
-/etc/init.d/crowdsec-log-forwarder disable 2>/dev/null || true
-rm -f /etc/init.d/crowdsec-log-forwarder /usr/bin/crowdsec-log-forwarder
-uci delete system.@system[0].log_ip 2>/dev/null || true
-uci delete system.@system[0].log_port 2>/dev/null || true
-uci delete system.@system[0].log_proto 2>/dev/null || true
-uci commit system
-/etc/init.d/log restart || true
-logread | tail -50
-EOF
-
-  chmod 600 "${install_script}" "${uninstall_script}" 2>/dev/null || true
-  printf '%s\t%s\n' "${install_script}" "${uninstall_script}"
-}
-
-
-apply_openwrt_helper_via_ssh() {
-  local router_ip="$1" helper_script="$2" action_title="$3"
-  local ssh_host ssh_port ssh_user ssh_password rc log_dir apply_log test_out
-  local safe_name key_dir key_file pub_file pub_key service_name collector_script unit_file log_file
-
-  ssh_host="${router_ip}"
-  ssh_port="22"
-  ssh_user="root"
-  ssh_password=""
-
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    set +e
-    ssh_host="$(whiptail --title " OpenWrt SSH " --inputbox "$(T "IP или hostname OpenWrt для SSH." "OpenWrt IP or hostname for SSH.")" 10 82 "${router_ip}" 3>&1 1>&2 2>&3)"
-    rc=$?
-    set -e
-    [[ "${rc}" -eq 0 ]] || return 0
-
-    set +e
-    ssh_port="$(whiptail --title " OpenWrt SSH " --inputbox "$(T "SSH порт OpenWrt" "OpenWrt SSH port")" 10 70 "22" 3>&1 1>&2 2>&3)"
-    rc=$?
-    set -e
-    [[ "${rc}" -eq 0 ]] || return 0
-
-    set +e
-    ssh_user="$(whiptail --title " OpenWrt SSH " --inputbox "$(T "SSH логин OpenWrt. Обычно root." "OpenWrt SSH login. Usually root.")" 10 78 "root" 3>&1 1>&2 2>&3)"
-    rc=$?
-    set -e
-    [[ "${rc}" -eq 0 ]] || return 0
-
-    set +e
-    ssh_password="$(whiptail --title " OpenWrt SSH " --passwordbox "$(T "SSH пароль OpenWrt. Символы в пароле допустимы. Пароль нужен только один раз, чтобы установить SSH-ключ для central-side collector." "OpenWrt SSH password. Special characters are supported. The password is needed only once to install an SSH key for the central-side collector.")" 13 96 "" 3>&1 1>&2 2>&3)"
-    rc=$?
-    set -e
-    [[ "${rc}" -eq 0 ]] || return 0
-  else
-    read -rp "$(T "SSH host OpenWrt [${router_ip}]: " "OpenWrt SSH host [${router_ip}]: ")" ssh_host || return 0
-    ssh_host="${ssh_host:-${router_ip}}"
-    read -rp "$(T "SSH порт OpenWrt [22]: " "OpenWrt SSH port [22]: ")" ssh_port || return 0
-    ssh_port="${ssh_port:-22}"
-    read -rp "$(T "SSH логин OpenWrt [root]: " "OpenWrt SSH login [root]: ")" ssh_user || return 0
-    ssh_user="${ssh_user:-root}"
-    read -rsp "$(T "SSH пароль OpenWrt, пусто для ключа: " "OpenWrt SSH password, empty for key: ")" ssh_password || return 0
-    echo
-  fi
-
-  ssh_host="$(printf '%s' "${ssh_host:-}" | tr -cd 'A-Za-z0-9._:-')"
-  ssh_port="$(printf '%s' "${ssh_port:-22}" | tr -cd '0-9')"
-  ssh_user="$(printf '%s' "${ssh_user:-root}" | tr -cd 'A-Za-z0-9._-')"
-  [[ -n "${ssh_host}" ]] || fail "$(T "SSH host OpenWrt пустой." "OpenWrt SSH host is empty.")"
-  is_valid_port "${ssh_port}" || fail "$(T "Некорректный SSH порт OpenWrt." "Invalid OpenWrt SSH port.")"
-  [[ -n "${ssh_user}" ]] || fail "$(T "SSH логин OpenWrt пустой." "OpenWrt SSH login is empty.")"
-
-  log_dir="${CONFIG_DIR}/openwrt-helper-scripts"
-  mkdir -p "${log_dir}" "${REMOTE_SYSLOG_DIR}"
-  chmod 700 "${log_dir}" 2>/dev/null || true
-  chmod 750 "${REMOTE_SYSLOG_DIR}" 2>/dev/null || true
-
-  safe_name="$(sanitize_node_name "${ssh_host}")"
-  [[ -n "${safe_name}" ]] || safe_name="openwrt-router"
-  key_dir="${log_dir}/keys"
-  mkdir -p "${key_dir}"
-  chmod 700 "${key_dir}" 2>/dev/null || true
-  key_file="${key_dir}/${safe_name}_ed25519"
-  pub_file="${key_file}.pub"
-  service_name="crowdsec-openwrt-logread-${safe_name}"
-  collector_script="/usr/local/sbin/${service_name}.sh"
-  unit_file="/etc/systemd/system/${service_name}.service"
-  log_file="${REMOTE_SYSLOG_DIR}/${safe_name}.security.log"
-  apply_log="${log_dir}/${safe_name}-apply-$(date +%Y%m%d-%H%M%S).log"
-
-  openwrt_ssh_cmd_password_or_key() {
-    local remote_cmd="$1"
-    if [[ -n "${ssh_password}" ]]; then
-      ensure_remote_ssh_tools >/dev/null
-      SSHPASS="${ssh_password}" timeout 25s sshpass -e ssh \
-        -o StrictHostKeyChecking=accept-new \
-        -o UserKnownHostsFile=/root/.ssh/known_hosts \
-        -o ConnectTimeout=15 \
-        -o ServerAliveInterval=5 \
-        -o ServerAliveCountMax=2 \
-        -o BatchMode=no \
-        -o NumberOfPasswordPrompts=1 \
-        -o PreferredAuthentications=password,keyboard-interactive \
-        -o PubkeyAuthentication=no \
-        -p "${ssh_port}" \
-        "${ssh_user}@${ssh_host}" "${remote_cmd}"
-    else
-      command -v ssh >/dev/null 2>&1 || apt-get install -y openssh-client >/dev/null
-      timeout 25s ssh \
-        -o StrictHostKeyChecking=accept-new \
-        -o UserKnownHostsFile=/root/.ssh/known_hosts \
-        -o ConnectTimeout=15 \
-        -o ServerAliveInterval=5 \
-        -o ServerAliveCountMax=2 \
-        -o BatchMode=no \
-        -o NumberOfPasswordPrompts=1 \
-        -p "${ssh_port}" \
-        "${ssh_user}@${ssh_host}" "${remote_cmd}"
-    fi
-  }
-
-  openwrt_ssh_apply_inner() {
-    local remote_authorized_keys_cmd sample_log
-    echo "OpenWrt central-side collector setup log"
-    echo "Time: $(date -Is)"
-    echo "Target: ${ssh_user}@${ssh_host}:${ssh_port}"
-    echo "Mode: central pulls logread over SSH; OpenWrt does not need logger -n, nc -u, or remote syslog."
-    echo "Local central log file: ${log_file}"
-    echo
-
-    echo "==> Testing SSH login"
-    set +e
-    test_out="$(openwrt_ssh_cmd_password_or_key 'printf openwrt-ssh-ok' 2>&1)"
-    rc=$?
-    set -e
-    if [[ "${rc}" -ne 0 ]]; then
-      echo "ERROR: SSH login test failed" >&2
-      echo "${test_out}" >&2
-      return 21
-    fi
-    echo "${test_out}"
-    if [[ "${test_out}" != *"openwrt-ssh-ok"* ]]; then
-      echo "ERROR: unexpected SSH test output" >&2
-      return 22
-    fi
-
-    echo
-    echo "==> Creating SSH key for central-side collector"
-    if [[ ! -s "${key_file}" ]]; then
-      ssh-keygen -t ed25519 -N "" -f "${key_file}" -C "crowdsec-openwrt-${safe_name}" >/dev/null
-    fi
-    chmod 600 "${key_file}" "${pub_file}" 2>/dev/null || true
-    pub_key="$(cat "${pub_file}")"
-
-    echo
-    echo "==> Installing public key into OpenWrt /etc/dropbear/authorized_keys"
-    remote_authorized_keys_cmd="mkdir -p /etc/dropbear; touch /etc/dropbear/authorized_keys; chmod 700 /etc/dropbear; grep -qxF $(shell_quote "${pub_key}") /etc/dropbear/authorized_keys 2>/dev/null || echo $(shell_quote "${pub_key}") >> /etc/dropbear/authorized_keys; chmod 600 /etc/dropbear/authorized_keys"
-    openwrt_ssh_cmd_password_or_key "${remote_authorized_keys_cmd}"
-
-    echo
-    echo "==> Testing SSH key login"
-    timeout 25s ssh \
-      -i "${key_file}" \
-      -o StrictHostKeyChecking=accept-new \
-      -o UserKnownHostsFile=/root/.ssh/known_hosts \
-      -o ConnectTimeout=15 \
-      -o ServerAliveInterval=5 \
-      -o ServerAliveCountMax=2 \
-      -o BatchMode=yes \
-      -p "${ssh_port}" \
-      "${ssh_user}@${ssh_host}" 'printf openwrt-key-ok'
-    echo
-
-    echo
-    echo "==> Writing central collector script"
-    cat > "${collector_script}" <<COLLECTOR_EOF
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-SSH_HOST=$(shell_quote "${ssh_host}")
-SSH_PORT=$(shell_quote "${ssh_port}")
-SSH_USER=$(shell_quote "${ssh_user}")
-SSH_KEY=$(shell_quote "${key_file}")
-DEVICE_NAME=$(shell_quote "${safe_name}")
-LOG_FILE=$(shell_quote "${log_file}")
-PATTERN='dropbear|sshd|auth|login|failed|failure|invalid|refused|denied|DROP|Drop|drop|REJECT|Reject|reject|blocked|Blocked|ban|Ban|nft|iptables|firewall|Firewall|kernel'
-
-mkdir -p "\$(dirname "\${LOG_FILE}")"
-touch "\${LOG_FILE}"
-chmod 0640 "\${LOG_FILE}" 2>/dev/null || true
-
-append_line() {
-  local line="\$1" ts
-  ts="\$(date '+%b %e %H:%M:%S' 2>/dev/null || date)"
-  printf '<134>%s %s openwrt-crowdsec: %s\n' "\${ts}" "\${DEVICE_NAME}" "\${line}" >> "\${LOG_FILE}"
-}
-
-while true; do
-  ssh -i "\${SSH_KEY}" \
-    -o StrictHostKeyChecking=accept-new \
-    -o UserKnownHostsFile=/root/.ssh/known_hosts \
-    -o ConnectTimeout=20 \
-    -o ServerAliveInterval=20 \
-    -o ServerAliveCountMax=3 \
-    -o BatchMode=yes \
-    -p "\${SSH_PORT}" \
-    "\${SSH_USER}@\${SSH_HOST}" 'logread -f' 2>&1 \
-  | while IFS= read -r line; do
-      if printf '%s\n' "\${line}" | grep -Eiq "\${PATTERN}"; then
-        append_line "\${line}"
-      fi
-    done
-  sleep 5
-done
-COLLECTOR_EOF
-    chmod 700 "${collector_script}"
-
-    echo
-    echo "==> Writing systemd service"
-    cat > "${unit_file}" <<UNIT_EOF
-[Unit]
-Description=CrowdSec OpenWrt logread collector for ${safe_name}
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=${collector_script}
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-UNIT_EOF
-
-    echo
-    echo "==> Importing recent OpenWrt log lines once"
-    sample_log="$(mktemp)"
-    set +e
-    timeout 25s ssh \
-      -i "${key_file}" \
-      -o StrictHostKeyChecking=accept-new \
-      -o UserKnownHostsFile=/root/.ssh/known_hosts \
-      -o ConnectTimeout=15 \
-      -o ServerAliveInterval=5 \
-      -o ServerAliveCountMax=2 \
-      -o BatchMode=yes \
-      -p "${ssh_port}" \
-      "${ssh_user}@${ssh_host}" 'logread | tail -300' >"${sample_log}" 2>&1
-    rc=$?
-    set -e
-    if [[ "${rc}" -ne 0 ]]; then
-      echo "WARN: recent log import failed, collector service will still be started."
-      cat "${sample_log}" || true
-    else
-      while IFS= read -r line; do
-        if printf '%s\n' "${line}" | grep -Eiq 'dropbear|sshd|auth|login|failed|failure|invalid|refused|denied|DROP|Drop|drop|REJECT|Reject|reject|blocked|Blocked|ban|Ban|nft|iptables|firewall|Firewall|kernel'; then
-          printf '<134>%s %s openwrt-crowdsec: %s\n' "$(date '+%b %e %H:%M:%S')" "${safe_name}" "${line}" >> "${log_file}"
-        fi
-      done < "${sample_log}"
-    fi
-    rm -f "${sample_log}"
-
-    echo
-    echo "==> Adding synthetic test line locally"
-    printf '<134>%s %s openwrt-crowdsec: crowdsec-forwarder-test dropbear login failed for root from 1.2.3.4\n' "$(date '+%b %e %H:%M:%S')" "${safe_name}" >> "${log_file}"
-    chmod 0640 "${log_file}" 2>/dev/null || true
-
-    echo
-    echo "==> Enabling and starting collector service"
-    systemctl daemon-reload
-    systemctl enable --now "${service_name}.service"
-    sleep 2
-
-    if ! systemctl is-active --quiet "${service_name}.service"; then
-      echo "ERROR: collector service is not active" >&2
-      systemctl status "${service_name}.service" --no-pager -l || true
-      return 31
-    fi
-
-    echo
-    echo "==> Checking central log file"
-    if [[ ! -s "${log_file}" ]]; then
-      echo "ERROR: collector service started, but log file is still empty: ${log_file}" >&2
-      systemctl status "${service_name}.service" --no-pager -l || true
-      journalctl -u "${service_name}.service" -n 80 --no-pager || true
-      return 41
-    fi
-
-    tail -n 20 "${log_file}" || true
-    echo
-    echo "OK: central-side OpenWrt log collector is installed and running"
-    echo "Service: ${service_name}.service"
-    echo "Log file: ${log_file}"
-  }
-
-  openwrt_ssh_apply_logged() {
-    set +e
-    openwrt_ssh_apply_inner 2>&1 | tee -a "${apply_log}"
-    local inner_rc="${PIPESTATUS[0]}"
-    set -e
-    return "${inner_rc}"
-  }
-
-  if run_with_live_progress "${action_title}" openwrt_ssh_apply_logged; then
-    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      whiptail --title " $(T "OpenWrt настроен" "OpenWrt configured") " --msgbox "$(T "Настройка применена и проверена.\n\nТеперь central сам читает OpenWrt logread по SSH-ключу и пишет filtered security log локально. На OpenWrt не используются logger -n, nc -u или system.@system[0].log_ip.\n\nЛог применения:" "Setup was applied and verified.\n\nNow central reads OpenWrt logread over SSH key and writes the filtered security log locally. OpenWrt does not use logger -n, nc -u, or system.@system[0].log_ip.\n\nApply log:")\n${apply_log}\n\n$(T "Файл событий:" "Event file:")\n${log_file}" 16 98 || true
-    fi
-    return 0
-  fi
-
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    whiptail --title " $(T "Ошибка OpenWrt SSH" "OpenWrt SSH error") " --textbox "${apply_log}" 30 120 || true
-  else
-    cat "${apply_log}" >&2 || true
-  fi
-  return 1
-}
-
-configure_device_event_intake() {
-  safe_source_env
-  local rec name ip cidr port proto mode tmp
-  if ! select_bouncer_device_record rec "$(T "Включить события от устройства" "Enable device event intake")"; then return 0; fi
-  name="$(printf '%s' "${rec}" | cut -f2)"
-  ip="$(printf '%s' "${rec}" | cut -f3)"
-  if [[ "${ip}" == *:* ]]; then cidr="${ip}/128"; else cidr="${ip}/32"; fi
-  port="${DEFAULT_REMOTE_SYSLOG_PORT}"
-  proto="both"
-  mode="filtered"
-
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    mode="$(whiptail --title " $(T "Режим логов устройства" "Device log mode") " \
-      --cancel-button "$(T "Отмена" "Cancel")" --ok-button "$(T "Выбрать" "Select")" --notags \
-      --menu "$(T "Выберите режим.\n\nFiltered security events - рекомендуемый режим. Устройство отправляет копию logread/syslog на central отдельным сервисом, но central пишет в CrowdSec только security/firewall/auth строки. Локальный logread на OpenWrt остаётся.\n\nFull diagnostic syslog - весь syslog пишется только в диагностический файл, а CrowdSec всё равно читает только filtered security файл." "Choose mode.\n\nFiltered security events - recommended. The device sends a logread/syslog copy to central through a separate service, but central writes only security/firewall/auth lines to CrowdSec. Local OpenWrt logread remains.\n\nFull diagnostic syslog - full syslog is written only to a diagnostic file, while CrowdSec still reads only the filtered security file.")" \
-      22 100 2 \
-      "filtered" "$(T "Только security/firewall/auth события для CrowdSec" "Only security/firewall/auth events for CrowdSec")" \
-      "full" "$(T "Filtered для CrowdSec + полный диагностический лог отдельно" "Filtered for CrowdSec + separate full diagnostic log")" \
-      3>&1 1>&2 2>&3)" || return 0
-
-    port="$(whiptail --title " $(T "Syslog порт" "Syslog port") " --inputbox "$(T "Порт syslog на central.\n\n5140 выбран специально, чтобы не занимать привилегированный 514." "Syslog port on central.\n\n5140 is used to avoid the privileged 514 port.")" 11 86 "${DEFAULT_REMOTE_SYSLOG_PORT}" 3>&1 1>&2 2>&3)" || return 0
-
-    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Включить" "Enable")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Скрипт настроит central на приём копии syslog от выбранного устройства.\n\nПо умолчанию в CrowdSec попадут только отфильтрованные security/firewall/auth события. Весь лог НЕ будет читаться CrowdSec.\n\nСкрипт настроит central и затем предложит сразу применить настройку на OpenWrt по SSH. Ручное копирование длинных команд больше не требуется." "The script will configure central to receive a syslog copy from the selected device.\n\nBy default only filtered security/firewall/auth events go to CrowdSec. The full log is NOT read by CrowdSec.\n\nThe script configures central and then offers to apply the OpenWrt setup over SSH immediately. Manual copying of long commands is no longer required.")" 17 96 || return 0
-  else
-    echo "$(T "Режим логов:" "Log mode:")"
-    echo "1) filtered - $(T "только security/firewall/auth события для CrowdSec" "only security/firewall/auth events for CrowdSec")"
-    echo "2) full - $(T "filtered для CrowdSec + полный диагностический лог отдельно" "filtered for CrowdSec + separate full diagnostic log")"
-    read -rp "$(T "Выбор [1/2]: " "Choice [1/2]: ")" mode || return 0
-    case "${mode}" in 2|full) mode="full" ;; *) mode="filtered" ;; esac
-    read -rp "$(T "Syslog port на central [${DEFAULT_REMOTE_SYSLOG_PORT}]: " "Syslog port on central [${DEFAULT_REMOTE_SYSLOG_PORT}]: ")" port || return 0
-    port="${port:-${DEFAULT_REMOTE_SYSLOG_PORT}}"
-  fi
-
-  port="$(printf '%s' "${port}" | tr -cd '0-9')"
-  is_valid_port "${port}" || fail "$(T "Некорректный syslog port." "Invalid syslog port.")"
-  case "${mode}" in filtered|full) ;; *) mode="filtered" ;; esac
-
-  configure_device_event_intake_apply() {
-    record_remote_syslog_device "${name}" "${cidr}" "${port}" "${proto}" "${mode}"
-    install_or_update_remote_syslog_receiver "${port}" "${proto}" "${mode}"
-    configure_ufw_full
-  }
-  run_with_live_progress "$(T "Настройка filtered intake событий" "Configuring filtered event intake")" configure_device_event_intake_apply || return 1
-
-  tmp="$(mktemp)"
-  {
-    echo "$(T "Intake событий включён на central." "Event intake enabled on central.")"
-    echo
-    echo "Device: ${name}"
-    echo "Allowed IP/CIDR: ${cidr}"
-    echo "Mode: ${mode}"
-    echo "Central syslog host: ${LAN_IP}"
-    echo "Central syslog port: ${port}"
-    echo
-    echo "$(T "Как это работает:" "How it works:")"
-    echo "$(T "OpenWrt отправляет КОПИЮ syslog на central. Локальный logread на OpenWrt остаётся. Central фильтрует поток и отдаёт CrowdSec только security/firewall/auth события." "OpenWrt sends a syslog COPY to central. Local OpenWrt logread remains. Central filters the stream and gives CrowdSec only security/firewall/auth events.")"
-    echo
-    echo "OpenWrt 25: сначала откати старую схему через system.@system[0].log_ip, если она была включена:"
-    echo "uci delete system.@system[0].log_ip 2>/dev/null || true"
-    echo "uci delete system.@system[0].log_port 2>/dev/null || true"
-    echo "uci delete system.@system[0].log_proto 2>/dev/null || true"
-    echo "uci commit system"
-    echo "/etc/init.d/log restart"
-    echo
-    local helper_paths install_helper uninstall_helper
-    helper_paths="$(write_openwrt_forwarder_helper_scripts "${name}" "${ip}" "${LAN_IP}" "${port}")"
-    install_helper="$(printf '%s' "${helper_paths}" | awk -F'	' 'NR==1{print $1}')"
-    uninstall_helper="$(printf '%s' "${helper_paths}" | awk -F'	' 'NR==1{print $2}')"
-    echo "OpenWrt 25: новая рекомендуемая схема - central-side collector."
-    echo "Скрипт больше НЕ использует на OpenWrt logger -n, nc -u, nc -w, procd-forwarder или system.@system[0].log_ip."
-    echo "Central один раз подключается к OpenWrt по паролю, ставит SSH-ключ и дальше сам читает logread -f по SSH."
-    echo "Отфильтрованные security/firewall/auth строки пишутся прямо на central в ${REMOTE_SYSLOG_DIR}/<device>.security.log."
-    echo
-    echo "Legacy helper scripts оставлены только как файлы удаления/совместимости:"
-    echo "${install_helper}"
-    echo "${uninstall_helper}"
-    echo
-    echo "Проверка на central после применения:"
-    echo "sudo systemctl status crowdsec-openwrt-logread-* --no-pager -l"
-    echo "sudo journalctl -u 'crowdsec-openwrt-logread-*' -n 80 --no-pager"
-    echo "sudo find ${REMOTE_SYSLOG_DIR} -maxdepth 1 -type f -name '*.security.log' -ls"
-    echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/*.security.log"
-    echo
-    echo "Filtered log for CrowdSec:"
-    echo "sudo find ${REMOTE_SYSLOG_DIR} -maxdepth 1 -type f -name '*.security.log' -ls"
-    echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/*.security.log"
-    if [[ "${mode}" == "full" ]]; then
-      echo
-      echo "Full diagnostic log, NOT read by CrowdSec:"
-      echo "sudo tail -f ${REMOTE_SYSLOG_DIAG_DIR}/${ip}.full.log"
-    fi
-    echo
-    echo "CrowdSec check:"
-    echo "sudo docker exec crowdsec cscli metrics"
-  } >"${tmp}"
-  show_file "$(T "События от устройства" "Device events")" "${tmp}"
-
-  local apply_now_rc=0
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    whiptail --title " OpenWrt SSH " --yes-button "$(T "Применить" "Apply")" --no-button "$(T "Не сейчас" "Not now")" --yesno "$(T "Применить настройку log-forwarder на OpenWrt сейчас по SSH?
-
-Это создаст /usr/bin/crowdsec-log-forwarder и /etc/init.d/crowdsec-log-forwarder на роутере, откатит старый system.@system[0].log_ip и перезапустит сервис.
-
-Ручное копирование команд не нужно." "Apply the log-forwarder setup to OpenWrt now over SSH?
-
-This creates /usr/bin/crowdsec-log-forwarder and /etc/init.d/crowdsec-log-forwarder on the router, reverts old system.@system[0].log_ip, and restarts the service.
-
-No manual command copying is needed.")" 16 92 || apply_now_rc=$?
-  else
-    read -rp "$(T "Применить настройку на OpenWrt по SSH сейчас? [y/N]: " "Apply setup to OpenWrt over SSH now? [y/N]: ")" apply_ans || apply_ans=""
-    [[ "${apply_ans:-}" =~ ^[YyДд]$ ]] || apply_now_rc=1
-  fi
-  if [[ "${apply_now_rc}" -eq 0 ]]; then
-    if apply_openwrt_helper_via_ssh "${ip}" "${install_helper}" "$(T "Применение настройки на OpenWrt" "Applying setup to OpenWrt")"; then
-      if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
-        whiptail --title " $(T "Готово" "Done") " --msgbox "$(T "Настройка OpenWrt применена по SSH. Проверь события в меню просмотра логов устройства." "OpenWrt setup was applied over SSH. Check events in the device log viewer.")" 9 82 || true
-      else
-        ok "$(T "Настройка OpenWrt применена по SSH." "OpenWrt setup applied over SSH.")"
-      fi
-    else
-      if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
-        whiptail --title " $(T "Ошибка SSH" "SSH error") " --msgbox "$(T "Автоматическое применение по SSH не удалось. Helper-скрипт сохранён на central, его можно применить позже." "Automatic SSH apply failed. The helper script is saved on central and can be applied later.")
-
-${install_helper}" 12 90 || true
-      else
-        warn "$(T "Автоматическое применение по SSH не удалось. Helper-скрипт сохранён:" "Automatic SSH apply failed. Helper script saved:") ${install_helper}"
-      fi
-    fi
-  fi
-
-  rm -f "${tmp}"
-}
-
-disable_device_event_intake() {
-  safe_source_env
-  local rec name ip cidr
-  if ! select_bouncer_device_record rec "$(T "Отключить события от устройства" "Disable device event intake")"; then return 0; fi
-  name="$(printf '%s' "${rec}" | cut -f2)"
-  ip="$(printf '%s' "${rec}" | cut -f3)"
-  if [[ "${ip}" == *:* ]]; then cidr="${ip}/128"; else cidr="${ip}/32"; fi
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    whiptail --title " $(T "Отключить intake" "Disable intake") " --yes-button "$(T "Отключить" "Disable")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Отключить syslog intake для устройства?\n\nЭто удалит запись из списка intake и пересоберёт UFW. После этого скрипт предложит удалить forwarder на OpenWrt по SSH автоматически." "Disable syslog intake for the device?\n\nThis removes the intake record and rebuilds UFW. After this, the script will offer to remove the OpenWrt forwarder over SSH automatically.")\n\n${name} [${cidr}]" 14 92 || return 0
-  fi
-  disable_device_event_intake_apply() {
-    if [[ -f "${SYSLOG_DEVICES_FILE}" ]]; then
-      awk -F'\t' -v name="${name}" '($1 != name)' "${SYSLOG_DEVICES_FILE}" >"${SYSLOG_DEVICES_FILE}.tmp" || true
-      mv "${SYSLOG_DEVICES_FILE}.tmp" "${SYSLOG_DEVICES_FILE}"
-    fi
-        if [[ ! -s "${SYSLOG_DEVICES_FILE}" ]]; then
-      rm -f /etc/rsyslog.d/30-crowdsec-remote-devices.conf /etc/logrotate.d/crowdsec-remote-devices
-      rm -f "$(get_crowdsec_config_dir)/acquis.d/remote-syslog-devices.yaml" 2>/dev/null || true
-      systemctl restart rsyslog 2>/dev/null || true
-      restart_crowdsec_runtime || true
-    else
-      local first_port first_proto first_mode
-      IFS=$'\t' read -r _ _ first_port first_proto first_mode _ < "${SYSLOG_DEVICES_FILE}" || true
-      install_or_update_remote_syslog_receiver "${first_port:-${DEFAULT_REMOTE_SYSLOG_PORT}}" "${first_proto:-both}" "${first_mode:-filtered}"
-    fi
-    configure_ufw_full
-  }
-  run_with_live_progress "$(T "Отключение intake событий" "Disabling event intake")" disable_device_event_intake_apply || return 1
-}
-
-show_device_event_logs() {
-  safe_source_env
-  local rec name ip tmp
-  if ! select_bouncer_device_record rec "$(T "Просмотр событий устройства" "View device events")"; then return 0; fi
-  name="$(printf '%s' "${rec}" | cut -f2)"
-  ip="$(printf '%s' "${rec}" | cut -f3)"
-  tmp="$(mktemp)"
-  {
-    echo "Device: ${name} [${ip}]"
-    echo
-    echo "Filtered security/firewall/auth log for CrowdSec: ${REMOTE_SYSLOG_DIR}/${ip}.security.log"
-    echo
-    if [[ -f "${REMOTE_SYSLOG_DIR}/${ip}.security.log" ]]; then
-      echo "Last 120 filtered lines:"
-      tail -n 120 "${REMOTE_SYSLOG_DIR}/${ip}.security.log"
-    else
-      echo "$(T "Filtered файл логов пока не найден. Проверь, что устройство отправляет syslog на central, UFW разрешает порт, и в логе есть security/firewall/auth события." "Filtered log file not found yet. Check that the OpenWrt forwarder service is running, the device sends logs to central, UFW allows the port, and the log contains security/firewall/auth events.")"
-    fi
-    echo
-    echo "Full diagnostic log, if enabled: ${REMOTE_SYSLOG_DIAG_DIR}/${ip}.full.log"
-    if [[ -f "${REMOTE_SYSLOG_DIAG_DIR}/${ip}.full.log" ]]; then
-      echo
-      echo "Last 60 diagnostic lines:"
-      tail -n 60 "${REMOTE_SYSLOG_DIAG_DIR}/${ip}.full.log"
-    fi
-    echo
-    echo "CrowdSec metrics:"
-    crowdsec_cscli metrics 2>&1 || true
-  } >"${tmp}"
-  show_file "$(T "События устройства" "Device events")" "${tmp}"
-  rm -f "${tmp}"
-}
-
 
 crowdsec_allowlist_data_file() {
   mkdir -p "${CONFIG_DIR}"
@@ -5011,7 +3661,7 @@ add_trusted_ip() {
   data_file="$(crowdsec_allowlist_data_file)"
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
     value="$(whiptail --title " $(T "CrowdSec allowlist" "CrowdSec allowlist") " --inputbox "$(T "IP или CIDR, который нужно добавить в allowlist CrowdSec.\n\nНапример: 192.168.1.1 или 192.168.1.0/24" "IP or CIDR to add to the CrowdSec allowlist.\n\nExample: 192.168.1.1 or 192.168.1.0/24")" 12 86 "" 3>&1 1>&2 2>&3)" || return 0
-    comment="$(whiptail --title " $(T "Комментарий" "Comment") " --inputbox "$(T "Комментарий, например: router, npm, home-vpn" "Comment, for example: router, npm, home-vpn")" 10 86 "" 3>&1 1>&2 2>&3)" || return 0
+    comment="$(whiptail --title " $(T "Комментарий" "Comment") " --inputbox "$(T "Комментарий, например: vps, npm, home-vpn" "Comment, for example: vps, npm, home-vpn")" 10 86 "" 3>&1 1>&2 2>&3)" || return 0
   else
     read -rp "$(T "IP/CIDR для CrowdSec allowlist: " "IP/CIDR for CrowdSec allowlist: ")" value || return 0
     read -rp "$(T "Комментарий: " "Comment: ")" comment || true
@@ -5079,7 +3729,7 @@ protection_install_collection_group() {
     base)
       set -- crowdsecurity/linux crowdsecurity/sshd
       ;;
-    router)
+    vps)
       set -- crowdsecurity/linux crowdsecurity/sshd crowdsecurity/iptables
       ;;
     web)
@@ -5108,7 +3758,7 @@ apply_initial_protection_baseline() {
   echo "Applying initial free/local CrowdSec protection baseline..."
   protection_install_collection_group base
   echo
-  echo "Free/local mode is ready. Bouncers will enforce local decisions generated by central/VPS/device log analysis."
+  echo "Free/local mode is ready. Bouncers will enforce local decisions generated by central/VPS/node log analysis."
   echo "Premium blocklists are not enabled automatically."
 }
 
@@ -5247,18 +3897,18 @@ manage_collections_menu() {
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
     choice="$(whiptail --title " $(T "Collections и правила" "Collections and rules") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите набор для установки/обновления:" "Choose a set to install/update:")" 20 94 7 \
       "base" "$(T "Базовые правила: linux + sshd" "Base rules: linux + sshd")" \
-      "router" "$(T "Firewall/router правила: base + iptables, если доступно" "Firewall/router rules: base + iptables if available")" \
+      "vps" "$(T "Firewall/vps правила: base + iptables, если доступно" "Firewall/vps rules: base + iptables if available")" \
       "web" "$(T "Web правила: nginx/apache/http-cve, если доступно" "Web rules: nginx/apache/http-cve if available")" \
-      "all" "$(T "Базовые + firewall/router + web" "Base + firewall/router + web")" \
+      "all" "$(T "Базовые + firewall + web" "Base + firewall + web")" \
       "status" "$(T "Показать Hub, collections, scenarios, parsers" "Show Hub, collections, scenarios, parsers")" \
       3>&1 1>&2 2>&3)" || return 0
   else
-    echo "1) base  2) router  3) web  4) all  5) status"
+    echo "1) base  2) vps  3) web  4) all  5) status"
     read -rp "> " choice || return 0
-    case "${choice}" in 1) choice=base;; 2) choice=router;; 3) choice=web;; 4) choice=all;; 5) choice=status;; esac
+    case "${choice}" in 1) choice=base;; 2) choice=vps;; 3) choice=web;; 4) choice=all;; 5) choice=status;; esac
   fi
   case "${choice}" in
-    base|router|web|all) run_with_live_progress "$(T "Установка/обновление collections" "Installing/updating collections")" protection_install_collection_group "${choice}" ;;
+    base|vps|web|all) run_with_live_progress "$(T "Установка/обновление collections" "Installing/updating collections")" protection_install_collection_group "${choice}" ;;
     status) show_hub_and_rules_status ;;
   esac
 }
@@ -5310,7 +3960,7 @@ manage_trusted_ips_menu() {
 manage_protection_menu() {
   local choice
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    choice="$(whiptail --title " $(T "Защита, правила и decisions" "Protection, rules and decisions") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Central должен сам создавать decisions из логов central/VPS/device events и отдавать их bouncers. Платные blocklists не включаются автоматически." "Central should create decisions from central/VPS/device logs and serve them to bouncers. Paid blocklists are not enabled automatically.")" 22 100 8 \
+    choice="$(whiptail --title " $(T "Защита, правила и decisions" "Protection, rules and decisions") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Central должен сам создавать decisions из логов central/VPS/node events и отдавать их bouncers. Платные blocklists не включаются автоматически." "Central should create decisions from central/VPS/node logs and serve them to bouncers. Paid blocklists are not enabled automatically.")" 22 100 8 \
       "baseline" "$(T "Применить базовую бесплатную защиту" "Apply base free protection")" \
       "collections" "$(T "Collections / rules / Hub" "Collections / rules / Hub")" \
       "decisions" "$(T "Manual decisions / local blacklists" "Manual decisions / local blacklists")" \
@@ -5333,50 +3983,6 @@ manage_protection_menu() {
   esac
 }
 
-manage_bouncer_devices_menu() {
-  local choice
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    choice="$(whiptail --title " $(T "Bouncer/API устройства" "Bouncer/API devices") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 18 90 5 \
-      "show" "$(T "Показать устройства и статус bouncers" "Show devices and bouncer status")" \
-      "create" "$(T "Добавить bouncer/API устройство" "Add bouncer/API device")" \
-      "remove" "$(T "Удалить bouncer/API устройство" "Remove bouncer/API device")" \
-      "check" "$(T "Проверить bouncer Last Pull" "Check bouncer Last Pull")" \
-      3>&1 1>&2 2>&3)" || return 0
-  else
-    echo "1) show  2) create  3) remove  4) check"
-    read -rp "> " choice || return 0
-    case "${choice}" in 1) choice=show;; 2) choice=create;; 3) choice=remove;; 4) choice=check;; esac
-  fi
-  case "${choice}" in
-    show) show_bouncer_devices ;;
-    create) create_openwrt_bouncer_connection ;;
-    remove) remove_bouncer_device ;;
-    check) check_bouncer_device_status ;;
-  esac
-}
-
-manage_device_events_menu() {
-  local choice
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    choice="$(whiptail --title " $(T "События от роутера/устройства" "Router/device event intake") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 19 94 5 \
-      "enable" "$(T "Включить filtered syslog intake для устройства" "Enable filtered syslog intake for a device")" \
-      "disable" "$(T "Отключить syslog intake для устройства" "Disable syslog intake for a device")" \
-      "show" "$(T "Показать настроенные syslog intake" "Show configured syslog intake")" \
-      "logs" "$(T "Показать последние события устройства" "Show latest device events")" \
-      3>&1 1>&2 2>&3)" || return 0
-  else
-    echo "1) enable  2) disable  3) show  4) logs"
-    read -rp "> " choice || return 0
-    case "${choice}" in 1) choice=enable;; 2) choice=disable;; 3) choice=show;; 4) choice=logs;; esac
-  fi
-  case "${choice}" in
-    enable) configure_device_event_intake ;;
-    disable) disable_device_event_intake ;;
-    show) show_remote_syslog_devices ;;
-    logs) show_device_event_logs ;;
-  esac
-}
-
 run_menu_action() {
   safe_source_env
   case "${1}" in
@@ -5410,9 +4016,6 @@ run_menu_action() {
     enable_autostart) enable_login_menu ;;
     repair_menu) repair_menu_installation ;;
     node_bouncer) create_named_vps_bouncer_key ;;
-    device_manage) manage_bouncer_devices_menu ;;
-    device_events) manage_device_events_menu ;;
-    syslog_devices) show_remote_syslog_devices ;;
     language) change_language ;;
     protection_menu) manage_protection_menu ;;
     protection_baseline) run_with_live_progress "$(T "Базовая защита CrowdSec" "Base CrowdSec protection")" apply_initial_protection_baseline ;;
@@ -5426,807 +4029,13 @@ run_menu_action() {
 
 
 # -----------------------------------------------------------------------------
-# v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
-# -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.22-openwrt-central-pull-collector-fix"
-
-show_help_text() {
-  local title="$1" text="$2"
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]] && tui_available; then
-    whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" \
-      --title " ${title} " --msgbox "${text}" 18 96 || true
-  else
-    echo
-    echo "=== ${title} ==="
-    printf '%s\n' "${text}"
-    echo
-  fi
-}
-
-action_description() {
-  local key="$1"
-  case "${key}" in
-    status) T "Показывает состояние сервисов, открытые порты, контейнеры Docker, LAPI и основные параметры central. Используй это как первый пункт диагностики." "Shows service state, open ports, Docker containers, LAPI and main central settings. Use this as the first diagnostic step." ;;
-    connect) T "Показывает сохранённые подключения VPS, machines и bouncer/API устройств. Здесь можно повторно посмотреть LAPI URL, machine name и bouncer key." "Shows saved VPS, machine and bouncer/API device connections. Use it to view LAPI URL, machine name and bouncer key again." ;;
-    envfile) T "Показывает файл central.env с текущими настройками central. Там есть порты, URL, ranges и служебные ключи. Не публикуй этот вывод наружу." "Shows central.env with current central settings. It contains ports, URLs, ranges and secret keys. Do not publish this output." ;;
-    crowdsec_info) T "Показывает machines, bouncers, alerts, active decisions и metrics. Это общий экран понимания: кто подключён, кто блокирует и какие решения есть." "Shows machines, bouncers, alerts, active decisions and metrics. This is the overview: who is connected, who enforces and what decisions exist." ;;
-    protection_menu) T "Раздел настройки защиты central: бесплатные Hub collections, локальные rules/scenarios, ручные decisions, trusted IP и опциональное подключение к CrowdSec Console/CAPI." "Protection setup: free Hub collections, local rules/scenarios, manual decisions, CrowdSec allowlist and optional CrowdSec Console/CAPI connection." ;;
-    protection_baseline) T "Ставит базовую бесплатную защиту: обновляет Hub и устанавливает linux + sshd collections. Это минимальная база, чтобы central мог создавать local decisions из своих логов." "Installs the base free protection: updates Hub and installs linux + sshd collections. This is the minimum base for central to create local decisions from its own logs." ;;
-    protection_collections) T "Управление CrowdSec Hub collections. Collections ставят наборы parsers/scenarios для Linux, SSH, web-серверов и firewall/router логов." "Manage CrowdSec Hub collections. Collections install parser/scenario bundles for Linux, SSH, web servers and firewall/router logs." ;;
-    protection_decisions) T "Локальные ручные блокировки. Можно добавить ban для IP/CIDR, импортировать свой blacklist из файла, удалить decision или посмотреть active decisions." "Local manual blocks. Add an IP/CIDR ban, import your own blacklist from a file, delete a decision or show active decisions." ;;
-    protection_trusted) T "CrowdSec allowlist: IP/CIDR из этого списка записываются в parser s02-enrich и применяются самим CrowdSec." "CrowdSec allowlist: IP/CIDR from this list are written to an s02-enrich parser and applied by CrowdSec itself." ;;
-    protection_capi|capi_enroll) T "Подключение к CrowdSec Console/CAPI. Сюда вводится Console enrollment key из app.crowdsec.net. Это опционально: локальная бесплатная защита работает и без него." "CrowdSec Console/CAPI connection. Enter the Console enrollment key from app.crowdsec.net here. This is optional: local free protection works without it." ;;
-    node_bouncer) T "Создаёт подключение VPS. Есть два режима: удалённая установка по SSH или ручная установка с ожиданием регистрации machine и последующим validate." "Creates a VPS connection. Two modes are available: remote SSH installation or manual installation with machine registration wait and validate." ;;
-    validate_machine) T "Подтверждает зарегистрированные VPS machines. Это нужно для VPS/agent, но не нужно для bouncer-only устройств вроде OpenWrt firewall-bouncer." "Validates registered VPS machines. Required for VPS/agent nodes, not required for bouncer-only devices such as OpenWrt firewall-bouncer." ;;
-    add_range) T "Добавляет IP/CIDR, которому разрешено обращаться к central LAPI. Обычно это IP VPS, роутера, NPM или другого доверенного источника." "Adds an IP/CIDR allowed to reach central LAPI. Usually this is a VPS, router, NPM or another trusted source IP." ;;
-    remove_range) T "Удаляет IP/CIDR из allowed ranges LAPI. После удаления этот источник может потерять доступ к central LAPI." "Removes an IP/CIDR from LAPI allowed ranges. After removal that source may lose access to central LAPI." ;;
-    replace_ranges) T "Полностью заменяет список allowed ranges LAPI. Используй осторожно: можно случайно отрезать доступ VPS, роутеру или NPM." "Completely replaces the LAPI allowed ranges list. Use carefully: you can cut off VPS, router or NPM access." ;;
-    device_manage) T "Управление устройствами, где установлен только bouncer/API key. Такие устройства не являются machines, не требуют validate и только забирают decisions из central." "Manage devices that only have a bouncer/API key. These devices are not machines, do not need validate and only pull decisions from central." ;;
-    device_events) T "Отдельная настройка событий от роутера/устройства. Bouncer сам логи не отправляет. Если нужны события, включается filtered syslog intake на central." "Separate router/device event intake setup. A bouncer does not send logs. If events are needed, enable filtered syslog intake on central." ;;
-    syslog_devices) T "Показывает устройства, для которых включён remote syslog intake: порт, режим filtered/full и файлы логов на central." "Shows devices with remote syslog intake enabled: port, filtered/full mode and log files on central." ;;
-    web_addr) T "Меняет LAN IP central и порт Web UI. Это влияет на адрес CrowdSec Manager в браузере." "Changes central LAN IP and Web UI port. This affects the CrowdSec Manager browser URL." ;;
-    lapi_port) T "Меняет порт central LAPI. После изменения нужно обновить настройки VPS, bouncers, NPM и пробросы портов." "Changes the central LAPI port. After changing it, update VPS, bouncers, NPM and port forwards." ;;
-    public_addr) T "Задаёт внешний IP/DDNS для прямого HTTP доступа к LAPI. Используй только если VPS ходят напрямую, без HTTPS reverse proxy." "Sets public IP/DDNS for direct HTTP LAPI access. Use only if VPS connect directly without an HTTPS reverse proxy." ;;
-    public_lapi_url) T "Задаёт публичный HTTPS URL LAPI через Nginx Proxy Manager. Это предпочтительно для удалённых VPS вместо прямого HTTP." "Sets the public HTTPS LAPI URL through Nginx Proxy Manager. This is preferred for remote VPS instead of direct HTTP." ;;
-    auto_token) T "Перегенерирует auto-registration token для регистрации machines. Новые установки VPS со старым token больше не смогут регистрироваться." "Regenerates the auto-registration token for machines. New VPS installs using the old token will no longer register." ;;
-    bouncer_key) T "Перегенерирует shared bouncer key. Индивидуальные bouncer keys устройств не меняет, но shared-key подключения потребуется обновить." "Regenerates the shared bouncer key. Individual device bouncer keys are not changed, but shared-key connections must be updated." ;;
-    firewall) T "Показывает текущие правила UFW/firewall central: SSH, Web UI, LAPI и syslog intake." "Shows current central UFW/firewall rules: SSH, Web UI, LAPI and syslog intake." ;;
-    test_lapi) T "Проверяет доступ CrowdSec Manager/Web UI к LAPI. Используй, если Manager показывает LAPI Offline." "Tests CrowdSec Manager/Web UI access to LAPI. Use it if Manager shows LAPI Offline." ;;
-    restart) T "Перезапускает Dockerized CrowdSec Manager stack: контейнеры crowdsec и crowdsec-manager." "Restarts the Dockerized CrowdSec Manager stack: crowdsec and crowdsec-manager containers." ;;
-    update_webui) T "Обновляет только CrowdSec Manager/Web UI контейнер, не трогая весь сервер." "Updates only the CrowdSec Manager/Web UI container, without touching the whole server." ;;
-    logs) T "Показывает логи CrowdSec и Manager. Это основной пункт для поиска причин ошибок." "Shows CrowdSec and Manager logs. This is the main place to investigate errors." ;;
-    reapply) T "Повторно применяет настройки Dockerized CrowdSec: LAPI config, shared bouncer, UFW и команду меню." "Reapplies Dockerized CrowdSec settings: LAPI config, shared bouncer, UFW and menu command." ;;
-    update_all) T "Обновляет весь стек: системные пакеты, Docker, Dockerized CrowdSec Manager и firewall. Host CrowdSec/cscli не ставится." "Updates the full stack: system packages, Docker, Dockerized CrowdSec Manager and firewall. Host CrowdSec/cscli is not installed." ;;
-    update_system) T "Обновляет пакеты Debian/Ubuntu через apt." "Updates Debian/Ubuntu packages through apt." ;;
-    update_docker) T "Обновляет Docker и docker compose plugin." "Updates Docker and the docker compose plugin." ;;
-    update_crowdsec) T "Обновляет Dockerized CrowdSec engine внутри контейнера crowdsec. Host CrowdSec/cscli не устанавливается и не используется." "Updates the Dockerized CrowdSec engine inside the crowdsec container. Host CrowdSec/cscli is not installed or used." ;;
-    versions) T "Показывает версии ОС, Docker, CrowdSec внутри контейнера и контейнеров. Host cscli не нужен." "Shows OS, Docker, CrowdSec inside the container and container versions. Host cscli is not needed." ;;
-    repair_menu) T "Скачивает свежий central.sh из GitHub, проверяет синтаксис и устанавливает его как /usr/local/sbin/crowdsec-central-menu. Используй для обновления самого скрипта меню." "Downloads the latest central.sh from GitHub, checks syntax, and installs it as /usr/local/sbin/crowdsec-central-menu. Use it to update the menu script itself." ;;
-    language) T "Меняет язык интерфейса и сохраняет выбор в central.env." "Changes interface language and saves the choice to central.env." ;;
-    disable_autostart) T "Отключает автозапуск меню при входе root в shell." "Disables automatic menu start when root logs into shell." ;;
-    enable_autostart) T "Включает автозапуск меню при входе root в shell." "Enables automatic menu start when root logs into shell." ;;
-    *) T "Описание для этого пункта пока не задано. Действие будет выполнено без дополнительных изменений." "No description is defined for this item yet. The action will run without additional changes." ;;
-  esac
-}
-
-show_action_intro() {
-  local key="$1" desc
-  case "${CROWDSEC_SHOW_HELP:-1}" in 0|no|NO|false|FALSE) return 0 ;; esac
-  desc="$(action_description "${key}")"
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]] && tui_available; then
-    whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" \
-      --title " $(T "Описание пункта" "Menu item description") " \
-      --yes-button "$(T "Продолжить" "Continue")" --no-button "$(T "Назад" "Back")" \
-      --yesno "${desc}" 14 92
-    return $?
-  fi
-  echo
-  echo "--- $(T "Описание" "Description") ---"
-  printf '%s\n' "${desc}"
-  echo
-  if has_tty; then
-    read -rp "$(T "Enter - продолжить, Ctrl+C - отмена: " "Enter - continue, Ctrl+C - cancel: ")" _ </dev/tty || return 1
-  fi
-  return 0
-}
-
-console_enroll_with_key() {
-  local enroll_key enable_all rc
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    enroll_key="$(whiptail --title " $(T "CrowdSec Console" "CrowdSec Console") " --passwordbox "$(T "Вставь Console enrollment key из app.crowdsec.net.\n\nЭто НЕ bouncer key и НЕ auto-registration token. После enroll обычно нужно подтвердить engine в веб-консоли CrowdSec." "Paste the Console enrollment key from app.crowdsec.net.\n\nThis is NOT a bouncer key and NOT an auto-registration token. After enroll you usually need to validate the engine in the CrowdSec web console.")" 14 92 "" 3>&1 1>&2 2>&3)" || return 0
-    set +e
-    whiptail --title " $(T "Console options" "Console options") " --yes-button "$(T "Да" "Yes")" --no-button "$(T "Нет" "No")" --yesno "$(T "После enroll включить отправку всех Console options через: cscli console enable --all?\n\nЭто опционально. Если не уверен, выбери Нет." "After enroll, enable all Console options with: cscli console enable --all?\n\nThis is optional. If unsure, choose No.")" 13 88
-    rc=$?
-    set -e
-    [[ "${rc}" -eq 0 ]] && enable_all="yes" || enable_all="no"
-  else
-    read -rsp "$(T "Console enrollment key: " "Console enrollment key: ")" enroll_key || return 0
-    echo
-    read -rp "$(T "Включить cscli console enable --all? [y/N]: " "Enable cscli console enable --all? [y/N]: ")" enable_all || true
-    [[ "${enable_all:-N}" =~ ^[Yy]$ ]] && enable_all="yes" || enable_all="no"
-  fi
-  enroll_key="$(printf '%s' "${enroll_key:-}" | tr -cd 'A-Za-z0-9._:-')"
-  [[ -n "${enroll_key}" ]] || fail "$(T "Enrollment key пустой." "Enrollment key is empty.")"
-  console_enroll_apply() {
-    echo "Running: cscli console enroll <hidden>"
-    crowdsec_cscli console enroll "${enroll_key}"
-    if [[ "${enable_all}" == "yes" ]]; then
-      echo "Running: cscli console enable --all"
-      crowdsec_cscli console enable --all || true
-    fi
-    echo
-    echo "Console status:"
-    crowdsec_cscli console status || true
-    echo
-    echo "CAPI status:"
-    crowdsec_cscli capi status || true
-  }
-  run_with_live_progress "$(T "CrowdSec Console enroll" "CrowdSec Console enroll")" console_enroll_apply || return 1
-  show_help_text "$(T "CrowdSec Console" "CrowdSec Console")" "$(T "Enroll выполнен. Если статус показывает, что engine ожидает подтверждения, открой app.crowdsec.net и подтверди этот Security Engine.\n\nЛокальная защита и bouncer-only устройства работают и без Console/CAPI. Console нужна для внешней панели, community/premium-функций и централизованного управления." "Enroll completed. If status says the engine is waiting for validation, open app.crowdsec.net and validate this Security Engine.\n\nLocal protection and bouncer-only devices work without Console/CAPI. Console is used for the external dashboard, community/premium features and centralized management.")"
-}
-
-capi_register_free() {
-  capi_register_apply() {
-    echo "Running: cscli capi register"
-    crowdsec_cscli capi register || true
-    echo
-    echo "CAPI status:"
-    crowdsec_cscli capi status || true
-  }
-  run_with_live_progress "$(T "CrowdSec CAPI register" "CrowdSec CAPI register")" capi_register_apply || true
-}
-
-configure_cti_api_key() {
-  local key config_dir config_file
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    key="$(whiptail --title " $(T "CrowdSec CTI API key" "CrowdSec CTI API key") " --passwordbox "$(T "Вставь CTI API key из CrowdSec Console, если он у тебя есть.\n\nЭто отдельный ключ для CTI API. Для обычного подключения engine к Console чаще нужен enrollment key, а не CTI key." "Paste the CTI API key from CrowdSec Console, if you have one.\n\nThis is a separate key for the CTI API. To connect the engine to Console, you usually need an enrollment key, not a CTI key.")" 14 92 "" 3>&1 1>&2 2>&3)" || return 0
-  else
-    read -rsp "$(T "CTI API key: " "CTI API key: ")" key || return 0
-    echo
-  fi
-  key="$(printf '%s' "${key:-}" | tr -cd 'A-Za-z0-9._:-')"
-  [[ -n "${key}" ]] || return 0
-  config_dir="$(get_crowdsec_config_dir)"
-  config_file="${config_dir}/config.yaml"
-  [[ -f "${config_file}" ]] || fail "$(T "Не найден config.yaml CrowdSec." "CrowdSec config.yaml not found.")"
-  cp -a "${config_file}" "${config_file}.backup-cti-$(date +%F-%H%M%S)"
-  CTI_KEY="${key}" python3 - "${config_file}" <<'INNERPY'
-import os, sys, yaml
-path=sys.argv[1]
-with open(path, 'r', errors='replace') as f:
-    cfg=yaml.safe_load(f) or {}
-cti=cfg.setdefault('cti', {})
-cti['key']=os.environ['CTI_KEY']
-cti['enabled']=True
-cti.setdefault('cache_timeout', '60m')
-cti.setdefault('cache_size', 50)
-with open(path, 'w') as f:
-    yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
-INNERPY
-  restart_crowdsec_runtime || true
-  ok "$(T "CTI API key сохранён в config.yaml." "CTI API key saved in config.yaml.")"
-}
-
-manage_capi_console_menu() {
-  local choice
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    choice="$(whiptail --title " $(T "CrowdSec Console / CAPI" "CrowdSec Console / CAPI") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Здесь вводится ключ CrowdSec Console.\n\nОбычно нужен Console enrollment key: его берут в app.crowdsec.net при добавлении Security Engine.\nCAPI register отдельный и обычно не требует ввода ключа. CTI API key нужен только для CTI API." "Enter CrowdSec Console keys here.\n\nUsually you need the Console enrollment key from app.crowdsec.net when adding a Security Engine.\nCAPI register is separate and usually does not ask for a key. CTI API key is only for CTI API.")" 23 100 6 \
-      "enroll" "$(T "Ввести Console enrollment key" "Enter Console enrollment key")" "$(T "Подключает этот central engine к CrowdSec Console через cscli console enroll <key>." "Connects this central engine to CrowdSec Console using cscli console enroll <key>.")" \
-      "capi" "$(T "CAPI register/status" "CAPI register/status")" "$(T "Выполняет cscli capi register и показывает статус. Не включает платные blocklists." "Runs cscli capi register and shows status. Does not enable paid blocklists.")" \
-      "cti" "$(T "Ввести CTI API key" "Enter CTI API key")" "$(T "Сохраняет CTI API key в config.yaml. Это отдельный ключ, не enrollment key." "Saves CTI API key to config.yaml. This is a separate key, not an enrollment key.")" \
-      "status" "$(T "Показать CAPI/Console статус" "Show CAPI/Console status")" "$(T "Показывает cscli console status и cscli capi status." "Shows cscli console status and cscli capi status.")" \
-      3>&1 1>&2 2>&3)" || return 0
-  else
-    echo "1) enroll - Console enrollment key"
-    echo "2) capi - CAPI register/status"
-    echo "3) cti - CTI API key"
-    echo "4) status"
-    read -rp "> " choice || return 0
-    case "${choice}" in 1) choice=enroll;; 2) choice=capi;; 3) choice=cti;; 4) choice=status;; esac
-  fi
-  case "${choice}" in
-    enroll) show_action_intro capi_enroll || return 0; console_enroll_with_key ;;
-    capi) capi_register_free ;;
-    cti) configure_cti_api_key ;;
-    status) capi_console_status ;;
-  esac
-}
-
-manage_protection_menu() {
-  local choice
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    choice="$(whiptail --title " $(T "Защита, правила и decisions" "Protection, rules and decisions") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Этот раздел отвечает за то, ОТКУДА central берёт decisions для всех bouncers.\n\nБесплатный режим: Hub collections + анализ своих логов + ручные local decisions.\nConsole/CAPI опциональны и не включают платные blocklists автоматически." "This section controls WHERE central gets decisions for all bouncers.\n\nFree mode: Hub collections + local log analysis + manual local decisions.\nConsole/CAPI are optional and do not enable paid blocklists automatically.")" 25 104 7 \
-      "baseline" "$(T "Базовая бесплатная защита" "Base free protection")" "$(T "Ставит linux + sshd collections. Минимальная база для local decisions." "Installs linux + sshd collections. Minimum base for local decisions.")" \
-      "collections" "$(T "Collections / rules / Hub" "Collections / rules / Hub")" "$(T "Установка и просмотр collections, scenarios, parsers из CrowdSec Hub." "Install and view collections, scenarios, parsers from CrowdSec Hub.")" \
-      "decisions" "$(T "Manual decisions / local blacklist" "Manual decisions / local blacklist")" "$(T "Ручные bans, удаление decisions и импорт своего списка IP/CIDR." "Manual bans, delete decisions and import your own IP/CIDR list.")" \
-      "trusted" "$(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR")" "$(T "Реальная allowlist-настройка CrowdSec для IP/CIDR, которые не должны обрабатываться как атакующие." "Real CrowdSec allowlist configuration for IP/CIDR that must not be treated as attackers.")" \
-      "capi" "$(T "CrowdSec Console / CAPI / API key" "CrowdSec Console / CAPI / API key")" "$(T "Здесь вводится Console enrollment key или CTI API key и проверяется CAPI status." "Enter Console enrollment key or CTI API key here and check CAPI status.")" \
-      "info" "$(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")" "$(T "Общий статус подключений, alerts, decisions и metrics." "Overall status of connections, alerts, decisions and metrics.")" \
-      3>&1 1>&2 2>&3)" || return 0
-  else
-    echo "1) baseline - базовая защита"
-    echo "2) collections - правила Hub"
-    echo "3) decisions - ручные bans/local blacklist"
-    echo "4) trusted - CrowdSec allowlist"
-    echo "5) capi - Console/CAPI/API key"
-    echo "6) info - общий статус"
-    read -rp "> " choice || return 0
-    case "${choice}" in 1) choice=baseline;; 2) choice=collections;; 3) choice=decisions;; 4) choice=trusted;; 5) choice=capi;; 6) choice=info;; esac
-  fi
-  case "${choice}" in
-    baseline) show_action_intro protection_baseline || return 0; run_with_live_progress "$(T "Базовая защита CrowdSec" "Base CrowdSec protection")" apply_initial_protection_baseline ;;
-    collections) show_action_intro protection_collections || return 0; manage_collections_menu ;;
-    decisions) show_action_intro protection_decisions || return 0; manage_decisions_menu ;;
-    trusted) show_action_intro protection_trusted || return 0; manage_trusted_ips_menu ;;
-    capi) show_action_intro protection_capi || return 0; manage_capi_console_menu ;;
-    info) show_action_intro crowdsec_info || return 0; show_crowdsec_info ;;
-  esac
-}
-
-run_menu_action() {
-  safe_source_env
-  show_action_intro "${1}" || return 0
-  case "${1}" in
-    status) show_status; pause ;;
-    connect) show_connection_info; pause ;;
-    envfile) show_tokens_file; pause ;;
-    add_range) add_allowed_range ;;
-    remove_range) remove_allowed_range ;;
-    replace_ranges) replace_allowed_ranges ;;
-    web_addr) change_lan_ip_or_web_port ;;
-    lapi_port) change_lapi_port ;;
-    public_addr) change_public_addr ;;
-    public_lapi_url) configure_public_lapi_url ;;
-    validate_machine) validate_machine_prompt ;;
-    auto_token) regenerate_auto_token ;;
-    bouncer_key) regenerate_bouncer_key ;;
-    firewall) show_firewall; pause ;;
-    test_lapi) test_webui_lapi; pause ;;
-    install_stack) install_or_repair_full_stack ;;
-    restart) restart_services ;;
-    update_webui) update_web_ui_only ;;
-    logs) show_logs; pause ;;
-    crowdsec_info) show_crowdsec_info; pause ;;
-    reapply) reapply_all_settings ;;
-    update_all) update_installed_stack ;;
-    update_system) update_system_only ;;
-    update_docker) update_docker_only ;;
-    update_crowdsec) update_crowdsec_only ;;
-    versions) show_versions; pause ;;
-    disable_autostart) disable_login_menu ;;
-    enable_autostart) enable_login_menu ;;
-    repair_menu) repair_menu_installation ;;
-    node_bouncer) create_named_vps_bouncer_key ;;
-    device_manage) manage_bouncer_devices_menu ;;
-    device_events) manage_device_events_menu ;;
-    syslog_devices) show_remote_syslog_devices ;;
-    language) change_language ;;
-    protection_menu) manage_protection_menu ;;
-    protection_baseline) run_with_live_progress "$(T "Базовая защита CrowdSec" "Base CrowdSec protection")" apply_initial_protection_baseline ;;
-    protection_collections) manage_collections_menu ;;
-    protection_decisions) manage_decisions_menu ;;
-    protection_trusted) manage_trusted_ips_menu ;;
-    protection_capi) manage_capi_console_menu ;;
-    capi_enroll) manage_capi_console_menu ;;
-    *) warn "$(T "Неизвестное действие меню." "Unknown menu action.")"; pause ;;
-  esac
-}
-
-menu_loop_whiptail() {
-  require_root
-  tui_theme
-  export CROWDSEC_TUI_MODE="whiptail"
-  safe_clear
-  while true; do
-    local category choice summary
-    summary="$(tui_summary)"
-    category="$(whiptail \
-      --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" \
-      --title "$(T " CrowdSec Central " " CrowdSec Central ")" \
-      --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help \
-      --menu "$(T "Выберите раздел. Внизу окна показывается подсказка по выбранному пункту.\n\n${summary}" "Choose a section. A hint for the selected item is shown at the bottom.\n\n${summary}")" 26 104 9 \
-      "status" "$(T "Статус и данные" "Status and data")" "$(T "Проверка состояния, подключений, токенов и общей информации." "Check state, connections, tokens and overview info.")" \
-      "protection" "$(T "Защита, правила, Console/CAPI" "Protection, rules, Console/CAPI")" "$(T "Откуда central берёт decisions: rules, collections, local blacklist, Console/CAPI key." "Where central gets decisions: rules, collections, local blacklist, Console/CAPI key.")" \
-      "vps" "$(T "VPS nodes / machines" "VPS nodes / machines")" "$(T "Полноценные CrowdSec agents на VPS: установка, регистрация и validate." "Full CrowdSec agents on VPS: installation, registration and validate.")" \
-      "devices" "$(T "Bouncer/API устройства" "Bouncer/API devices")" "$(T "OpenWrt/роутеры/firewall-bouncer: только получение decisions и блокировки." "OpenWrt/routers/firewall-bouncer: only pull decisions and block.")" \
-      "events" "$(T "События от роутера/устройства" "Router/device events")" "$(T "Отдельный filtered syslog intake, если нужно анализировать события устройства." "Separate filtered syslog intake if device events must be analyzed.")" \
-      "network" "$(T "Сеть, TLS и доступ к LAPI" "Network, TLS and LAPI access")" "$(T "Порты, HTTPS через NPM, allowed ranges, tokens и firewall." "Ports, HTTPS via NPM, allowed ranges, tokens and firewall.")" \
-      "service" "$(T "Обслуживание и диагностика" "Maintenance and diagnostics")" "$(T "Рестарт, обновления, логи, версии и повторное применение настроек." "Restart, updates, logs, versions and reapply settings.")" \
-      "menu" "$(T "Настройки меню" "Menu settings")" "$(T "Язык, автозапуск и переустановка команды меню." "Language, autostart and menu command repair.")" \
-      "exit" "$(T "Выход" "Exit")" "$(T "Закрыть меню." "Close menu.")" \
-      3>&1 1>&2 2>&3)" || continue
-    [[ "${category}" == "exit" ]] && exit 0
-    while true; do
-      case "${category}" in
-        status)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" --title " $(T "Статус и данные" "Status and data") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Выберите действие. Подсказка по пункту показывается внизу." "Choose an action. A hint for the item is shown at the bottom.")" 20 96 5 \
-            "status" "$(T "Статус сервисов и портов" "Service and port status")" "$(action_description status)" \
-            "connect" "$(T "Показать созданные подключения" "Show saved connections")" "$(action_description connect)" \
-            "envfile" "$(T "Показать central.env" "Show central.env")" "$(action_description envfile)" \
-            "crowdsec_info" "$(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")" "$(action_description crowdsec_info)" \
-            3>&1 1>&2 2>&3)" || break ;;
-        protection) manage_protection_menu; break ;;
-        vps)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" --title " $(T "VPS nodes / machines" "VPS nodes / machines") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "VPS nodes - это полноценные CrowdSec agents, которые регистрируются как machines." "VPS nodes are full CrowdSec agents that register as machines.")" 23 104 6 \
-            "node_bouncer" "$(T "Создать подключение VPS" "Create VPS connection")" "$(action_description node_bouncer)" \
-            "validate_machine" "$(T "Подтвердить machine VPS" "Validate VPS machine")" "$(action_description validate_machine)" \
-            "connect" "$(T "Показать созданные подключения" "Show saved connections")" "$(action_description connect)" \
-            "add_range" "$(T "Добавить IP/CIDR вручную" "Add IP/CIDR manually")" "$(action_description add_range)" \
-            "remove_range" "$(T "Удалить IP/CIDR из LAPI" "Remove IP/CIDR from LAPI")" "$(action_description remove_range)" \
-            "replace_ranges" "$(T "Заменить весь список IP/CIDR" "Replace full IP/CIDR list")" "$(action_description replace_ranges)" \
-            3>&1 1>&2 2>&3)" || break ;;
-        devices) manage_bouncer_devices_menu; break ;;
-        events) manage_device_events_menu; break ;;
-        network)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" --title " $(T "Сеть, TLS и доступ к LAPI" "Network, TLS and LAPI access") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Настройки доступа к central LAPI и Web UI. Ошибка тут может отрезать VPS/bouncers от central." "Central LAPI and Web UI access settings. A mistake here can cut VPS/bouncers off from central.")" 25 104 8 \
-            "web_addr" "$(T "Изменить LAN IP или порт Web UI" "Change LAN IP or Web UI port")" "$(action_description web_addr)" \
-            "lapi_port" "$(T "Изменить порт LAPI" "Change LAPI port")" "$(action_description lapi_port)" \
-            "public_addr" "$(T "Внешний IP/DDNS для прямого HTTP" "Public IP/DDNS for direct HTTP")" "$(action_description public_addr)" \
-            "public_lapi_url" "$(T "HTTPS LAPI через Nginx Proxy Manager" "HTTPS LAPI through Nginx Proxy Manager")" "$(action_description public_lapi_url)" \
-            "auto_token" "$(T "Перегенерировать auto-registration token" "Regenerate auto-registration token")" "$(action_description auto_token)" \
-            "bouncer_key" "$(T "Перегенерировать shared bouncer key" "Regenerate shared bouncer key")" "$(action_description bouncer_key)" \
-            "firewall" "$(T "Показать firewall/UFW" "Show firewall/UFW")" "$(action_description firewall)" \
-            "test_lapi" "$(T "Проверить Web UI -> LAPI" "Test Web UI -> LAPI")" "$(action_description test_lapi)" \
-            3>&1 1>&2 2>&3)" || break ;;
-        service)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" --title " $(T "Обслуживание и диагностика" "Maintenance and diagnostics") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Обслуживание, обновления и диагностика ошибок." "Maintenance, updates and error diagnostics.")" 26 104 10 \
-            "restart" "$(T "Перезапустить сервисы" "Restart services")" "$(action_description restart)" \
-            "update_webui" "$(T "Обновить CrowdSec Manager" "Update CrowdSec Manager")" "$(action_description update_webui)" \
-            "logs" "$(T "Показать логи" "Show logs")" "$(action_description logs)" \
-            "reapply" "$(T "Повторно применить настройки" "Reapply settings")" "$(action_description reapply)" \
-            "update_all" "$(T "Обновить весь Dockerized stack" "Update full Dockerized stack")" "$(action_description update_all)" \
-            "update_system" "$(T "Обновить Debian packages" "Update Debian packages")" "$(action_description update_system)" \
-            "update_docker" "$(T "Обновить Docker" "Update Docker")" "$(action_description update_docker)" \
-            "update_crowdsec" "$(T "Обновить Dockerized CrowdSec" "Update Dockerized CrowdSec")" "$(action_description update_crowdsec)" \
-            "versions" "$(T "Показать версии" "Show versions")" "$(action_description versions)" \
-            "syslog_devices" "$(T "Показать syslog intake" "Show syslog intake")" "$(action_description syslog_devices)" \
-            3>&1 1>&2 2>&3)" || break ;;
-        menu)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION}")" --title " $(T "Настройки меню" "Menu settings") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Настройки самого TUI-меню." "Settings of the TUI menu itself.")" 20 96 5 \
-            "disable_autostart" "$(T "Отключить автозапуск меню" "Disable menu autostart")" "$(action_description disable_autostart)" \
-            "enable_autostart" "$(T "Включить автозапуск меню" "Enable menu autostart")" "$(action_description enable_autostart)" \
-            "repair_menu" "$(T "Обновить скрипт меню из GitHub" "Update menu script from GitHub")" "$(action_description repair_menu)" \
-            "language" "$(T "Изменить язык интерфейса" "Change interface language")" "$(action_description language)" \
-            3>&1 1>&2 2>&3)" || break ;;
-      esac
-      run_menu_action "${choice}"
-    done
-  done
-}
-
-
-# --- v0.7.1 submenu return fix ---
-# These final definitions intentionally override earlier one-shot submenu functions.
-# Every nested menu now stays inside its own loop until the user presses Back/Cancel.
-# Actions return to the menu they were started from instead of jumping to the main menu.
-
-manage_collections_menu() {
-  local choice
-  while true; do
-    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      choice="$(whiptail --title " $(T "Collections и правила" "Collections and rules") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Выберите действие. После выполнения вы вернётесь сюда." "Choose an action. After it finishes you will return here.")" 22 100 7 \
-        "base" "$(T "Базовые правила: linux + sshd" "Base rules: linux + sshd")" "$(T "Минимальный бесплатный набор правил для central." "Minimum free ruleset for central.")" \
-        "router" "$(T "Firewall/router правила" "Firewall/router rules")" "$(T "Добавляет правила для firewall/router логов, если они доступны в Hub." "Adds rules for firewall/router logs if available in the Hub.")" \
-        "web" "$(T "Web правила" "Web rules")" "$(T "Добавляет nginx/apache/http-cve collections, если они доступны." "Adds nginx/apache/http-cve collections if available.")" \
-        "all" "$(T "Базовые + firewall/router + web" "Base + firewall/router + web")" "$(T "Ставит сразу все стандартные наборы этого скрипта." "Installs all standard sets managed by this script.")" \
-        "status" "$(T "Показать Hub, collections, scenarios, parsers" "Show Hub, collections, scenarios, parsers")" "$(T "Показывает, что установлено и включено сейчас." "Shows what is installed and enabled now.")" \
-        3>&1 1>&2 2>&3)" || return 0
-    else
-      echo "1) base  2) router  3) web  4) all  5) status  0) back"
-      read -rp "> " choice || return 0
-      case "${choice}" in 0|q|back) return 0;; 1) choice=base;; 2) choice=router;; 3) choice=web;; 4) choice=all;; 5) choice=status;; esac
-    fi
-    case "${choice}" in
-      base|router|web|all) run_with_live_progress "$(T "Установка/обновление collections" "Installing/updating collections")" protection_install_collection_group "${choice}" || true ;;
-      status) show_hub_and_rules_status ;;
-    esac
-  done
-}
-
-manage_decisions_menu() {
-  local choice
-  while true; do
-    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      choice="$(whiptail --title " $(T "Decisions и локальные blacklist" "Decisions and local blacklist") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Ручные decisions применяются к central LAPI и будут выдаваться bouncers. После действия вы вернётесь сюда." "Manual decisions are applied to central LAPI and will be pulled by bouncers. After an action you will return here.")" 22 100 6 \
-        "list" "$(T "Показать active decisions" "Show active decisions")" "$(T "Показывает текущие bans/decisions." "Shows current bans/decisions.")" \
-        "add" "$(T "Добавить manual ban decision" "Add manual ban decision")" "$(T "Ручной ban IP/CIDR. CrowdSec allowlist IP/CIDR скрипт не даст забанить." "Manual ban for IP/CIDR. CrowdSec allowlist IP/CIDR are protected.")" \
-        "delete" "$(T "Удалить decision по IP/CIDR" "Delete decision by IP/CIDR")" "$(T "Удаляет активный decision для указанного IP/CIDR." "Deletes active decision for a given IP/CIDR.")" \
-        "import" "$(T "Импортировать локальный blacklist из файла" "Import local blacklist from file")" "$(T "Добавляет decisions из файла со списком IP/CIDR." "Adds decisions from a file with IP/CIDR list.")" \
-        3>&1 1>&2 2>&3)" || return 0
-    else
-      echo "1) list  2) add  3) delete  4) import  0) back"
-      read -rp "> " choice || return 0
-      case "${choice}" in 0|q|back) return 0;; 1) choice=list;; 2) choice=add;; 3) choice=delete;; 4) choice=import;; esac
-    fi
-    case "${choice}" in
-      list) show_active_decisions ;;
-      add) add_manual_decision ;;
-      delete) delete_manual_decision ;;
-      import) import_decisions_from_file ;;
-    esac
-  done
-}
-
-manage_trusted_ips_menu() {
-  local choice
-  while true; do
-    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      choice="$(whiptail --title " $(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Это реальная настройка CrowdSec allowlist. Адреса из списка записываются в parser s02-enrich и применяются самим CrowdSec. После ввода или отмены вы вернётесь сюда." "This is a real CrowdSec allowlist configuration. Values are written to an s02-enrich parser and applied by CrowdSec itself. After input or cancel you will return here.")" 22 100 5 \
-        "show" "$(T "Показать список" "Show list")" "$(T "Показывает текущий CrowdSec allowlist и созданный parser." "Shows current CrowdSec allowlist and the generated parser.")" \
-        "add" "$(T "Добавить IP/CIDR" "Add IP/CIDR")" "$(T "Добавляет адрес или подсеть в CrowdSec allowlist." "Adds address or subnet to the CrowdSec allowlist and applies it.")" \
-        "remove" "$(T "Удалить IP/CIDR" "Remove IP/CIDR")" "$(T "Удаляет запись из CrowdSec allowlist." "Removes entry from the CrowdSec allowlist and applies it.")" \
-        "clean" "$(T "Удалить active decisions для CrowdSec allowlist" "Remove active decisions for allowlist")" "$(T "Удаляет active decisions для адресов, которые сейчас находятся в CrowdSec allowlist." "Removes active decisions for addresses currently in the CrowdSec allowlist.")" \
-        3>&1 1>&2 2>&3)" || return 0
-    else
-      echo "1) show  2) add  3) remove  4) clean  0) back"
-      read -rp "> " choice || return 0
-      case "${choice}" in 0|q|back) return 0;; 1) choice=show;; 2) choice=add;; 3) choice=remove;; 4) choice=clean;; esac
-    fi
-    case "${choice}" in
-      show) show_trusted_ip_list ;;
-      add) add_trusted_ip ;;
-      remove) remove_trusted_ip ;;
-      clean) run_with_live_progress "$(T "Удаление active decisions для CrowdSec allowlist" "Removing active decisions for allowlist")" remove_decisions_for_trusted_ips || true ;;
-    esac
-  done
-}
-
-manage_capi_console_menu() {
-  local choice
-  while true; do
-    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      choice="$(whiptail --title " $(T "CrowdSec Console / CAPI" "CrowdSec Console / CAPI") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Здесь вводится ключ CrowdSec Console.\n\nОбычно нужен Console enrollment key из app.crowdsec.net при добавлении Security Engine. CAPI register отдельный. CTI API key нужен только для CTI API.\n\nПосле действия вы вернётесь сюда." "Enter CrowdSec Console keys here.\n\nUsually you need the Console enrollment key from app.crowdsec.net when adding a Security Engine. CAPI register is separate. CTI API key is only for CTI API.\n\nAfter an action you will return here.")" 25 104 6 \
-        "enroll" "$(T "Ввести Console enrollment key" "Enter Console enrollment key")" "$(T "Подключает этот central engine к CrowdSec Console через cscli console enroll <key>." "Connects this central engine to CrowdSec Console using cscli console enroll <key>.")" \
-        "capi" "$(T "CAPI register/status" "CAPI register/status")" "$(T "Выполняет cscli capi register и показывает статус. Не включает платные blocklists." "Runs cscli capi register and shows status. Does not enable paid blocklists.")" \
-        "cti" "$(T "Ввести CTI API key" "Enter CTI API key")" "$(T "Сохраняет CTI API key в config.yaml. Это отдельный ключ, не enrollment key." "Saves CTI API key to config.yaml. This is a separate key, not an enrollment key.")" \
-        "status" "$(T "Показать CAPI/Console статус" "Show CAPI/Console status")" "$(T "Показывает cscli console status и cscli capi status." "Shows cscli console status and cscli capi status.")" \
-        3>&1 1>&2 2>&3)" || return 0
-    else
-      echo "1) enroll - Console enrollment key"
-      echo "2) capi - CAPI register/status"
-      echo "3) cti - CTI API key"
-      echo "4) status"
-      echo "0) back"
-      read -rp "> " choice || return 0
-      case "${choice}" in 0|q|back) return 0;; 1) choice=enroll;; 2) choice=capi;; 3) choice=cti;; 4) choice=status;; esac
-    fi
-    case "${choice}" in
-      enroll) show_action_intro capi_enroll || continue; console_enroll_with_key ;;
-      capi) capi_register_free ;;
-      cti) configure_cti_api_key ;;
-      status) capi_console_status ;;
-    esac
-  done
-}
-
-manage_protection_menu() {
-  local choice
-  while true; do
-    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      choice="$(whiptail --title " $(T "Защита, правила и decisions" "Protection, rules and decisions") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Этот раздел отвечает за то, ОТКУДА central берёт decisions для всех bouncers.\n\nБесплатный режим: Hub collections + анализ своих логов + ручные local decisions.\nConsole/CAPI опциональны и не включают платные blocklists автоматически.\n\nПосле любого подпункта вы вернётесь сюда." "This section controls WHERE central gets decisions for all bouncers.\n\nFree mode: Hub collections + local log analysis + manual local decisions.\nConsole/CAPI are optional and do not enable paid blocklists automatically.\n\nAfter any subitem you will return here.")" 27 106 7 \
-        "baseline" "$(T "Базовая бесплатная защита" "Base free protection")" "$(T "Ставит linux + sshd collections. Минимальная база для local decisions." "Installs linux + sshd collections. Minimum base for local decisions.")" \
-        "collections" "$(T "Collections / rules / Hub" "Collections / rules / Hub")" "$(T "Установка и просмотр collections, scenarios, parsers из CrowdSec Hub." "Install and view collections, scenarios, parsers from CrowdSec Hub.")" \
-        "decisions" "$(T "Manual decisions / local blacklist" "Manual decisions / local blacklist")" "$(T "Ручные bans, удаление decisions и импорт своего списка IP/CIDR." "Manual bans, delete decisions and import your own IP/CIDR list.")" \
-        "trusted" "$(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR")" "$(T "Реальная allowlist-настройка CrowdSec для IP/CIDR, которые не должны обрабатываться как атакующие." "Real CrowdSec allowlist configuration for IP/CIDR that must not be treated as attackers.")" \
-        "capi" "$(T "CrowdSec Console / CAPI / API key" "CrowdSec Console / CAPI / API key")" "$(T "Здесь вводится Console enrollment key или CTI API key и проверяется CAPI status." "Enter Console enrollment key or CTI API key here and check CAPI status.")" \
-        "info" "$(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")" "$(T "Общий статус подключений, alerts, decisions и metrics." "Overall status of connections, alerts, decisions and metrics.")" \
-        3>&1 1>&2 2>&3)" || return 0
-    else
-      echo "1) baseline - базовая защита"
-      echo "2) collections - правила Hub"
-      echo "3) decisions - ручные bans/local blacklist"
-      echo "4) trusted - CrowdSec allowlist"
-      echo "5) capi - Console/CAPI/API key"
-      echo "6) info - общий статус"
-      echo "0) back"
-      read -rp "> " choice || return 0
-      case "${choice}" in 0|q|back) return 0;; 1) choice=baseline;; 2) choice=collections;; 3) choice=decisions;; 4) choice=trusted;; 5) choice=capi;; 6) choice=info;; esac
-    fi
-    case "${choice}" in
-      baseline) show_action_intro protection_baseline || continue; run_with_live_progress "$(T "Базовая защита CrowdSec" "Base CrowdSec protection")" apply_initial_protection_baseline || true ;;
-      collections) show_action_intro protection_collections || continue; manage_collections_menu ;;
-      decisions) show_action_intro protection_decisions || continue; manage_decisions_menu ;;
-      trusted) show_action_intro protection_trusted || continue; manage_trusted_ips_menu ;;
-      capi) show_action_intro protection_capi || continue; manage_capi_console_menu ;;
-      info) show_action_intro crowdsec_info || continue; show_crowdsec_info ;;
-    esac
-  done
-}
-
-manage_bouncer_devices_menu() {
-  local choice
-  while true; do
-    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      choice="$(whiptail --title " $(T "Bouncer/API устройства" "Bouncer/API devices") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Это устройства без CrowdSec agent: OpenWrt/router/firewall-bouncer. Они только забирают decisions и блокируют. Если нужны события/логи от роутера, отдельный пункт находится прямо здесь." "These are devices without a CrowdSec agent: OpenWrt/router/firewall-bouncer. They only pull decisions and block. If router/device events are needed, the separate event item is right here.")" 24 106 6 \
-        "show" "$(T "Показать устройства и статус bouncers" "Show devices and bouncer status")" "$(T "Показывает сохранённые устройства и Last Pull bouncers." "Shows saved devices and bouncer Last Pull.")" \
-        "create" "$(T "Добавить bouncer/API устройство" "Add bouncer/API device")" "$(T "Создаёт bouncer key и allowed range для устройства." "Creates bouncer key and allowed range for a device.")" \
-        "events" "$(T "События/логи от роутера или устройства" "Router/device events and logs")" "$(T "Включение filtered syslog intake, просмотр логов и отключение приёма событий." "Enable filtered syslog intake, view logs, and disable event intake.")" \
-        "remove" "$(T "Удалить bouncer/API устройство" "Remove bouncer/API device")" "$(T "Удаляет bouncer, запись устройства и связанные разрешения." "Deletes bouncer, device record and related access rules.")" \
-        "check" "$(T "Проверить bouncer Last Pull" "Check bouncer Last Pull")" "$(T "Проверяет, подключается ли устройство к central LAPI." "Checks whether the device pulls from central LAPI.")" \
-        3>&1 1>&2 2>&3)" || return 0
-    else
-      echo "1) show"
-      echo "2) create"
-      echo "3) events/logs"
-      echo "4) remove"
-      echo "5) check"
-      echo "0) back"
-      read -rp "> " choice || return 0
-      case "${choice}" in 0|q|back) return 0;; 1) choice=show;; 2) choice=create;; 3) choice=events;; 4) choice=remove;; 5) choice=check;; esac
-    fi
-    case "${choice}" in
-      show) show_bouncer_devices ;;
-      create) create_openwrt_bouncer_connection ;;
-      events) manage_device_events_menu ;;
-      remove) remove_bouncer_device ;;
-      check) check_bouncer_device_status ;;
-    esac
-  done
-}
-
-manage_device_events_menu() {
-  local choice
-  while true; do
-    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      choice="$(whiptail --title " $(T "События от роутера/устройства" "Router/device event intake") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Этот раздел не нужен для обычного bouncer-only режима. Он нужен только если central должен анализировать filtered security/firewall/auth события устройства. После действия вы вернётесь сюда." "This section is not needed for normal bouncer-only mode. It is only needed if central must analyze filtered security/firewall/auth device events. After an action you will return here.")" 23 104 5 \
-        "enable" "$(T "Включить filtered syslog intake" "Enable filtered syslog intake")" "$(T "Central будет принимать копию syslog и фильтровать только security/firewall/auth события." "Central will receive a syslog copy and filter only security/firewall/auth events.")" \
-        "disable" "$(T "Отключить syslog intake" "Disable syslog intake")" "$(T "Удаляет intake на central и показывает команды для отключения log_ip на OpenWrt." "Removes intake on central and shows commands to disable log_ip on OpenWrt.")" \
-        "show" "$(T "Показать настроенные syslog intake" "Show configured syslog intake")" "$(T "Показывает устройства, для которых включён приём событий." "Shows devices that have event intake enabled.")" \
-        "logs" "$(T "Показать последние события устройства" "Show latest device events")" "$(T "Открывает последние строки filtered security log." "Opens latest lines of filtered security log.")" \
-        3>&1 1>&2 2>&3)" || return 0
-    else
-      echo "1) enable  2) disable  3) show  4) logs  0) back"
-      read -rp "> " choice || return 0
-      case "${choice}" in 0|q|back) return 0;; 1) choice=enable;; 2) choice=disable;; 3) choice=show;; 4) choice=logs;; esac
-    fi
-    case "${choice}" in
-      enable) configure_device_event_intake ;;
-      disable) disable_device_event_intake ;;
-      show) show_remote_syslog_devices ;;
-      logs) show_device_event_logs ;;
-    esac
-  done
-}
-# --- end v0.7.1 submenu return fix ---
-
-
-
-# -----------------------------------------------------------------------------
-# v0.7.5 CrowdSec Manager / Console enrollment fix
-# -----------------------------------------------------------------------------
-# Важно:
-# - CrowdSec Manager управляет тем CrowdSec engine, который запущен в контейнере crowdsec.
-# - Поэтому Console enrollment, CAPI status/register и console options должны выполняться
-#   через docker exec crowdsec cscli, если контейнер crowdsec существует и запущен.
-# - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
-#   enroll через состояние того же engine.
-
-SCRIPT_VERSION="v0.7.22-openwrt-central-pull-collector-fix"
-
-crowdsec_engine_context() {
-  if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
-    printf '%s' "docker: crowdsec"
-  else
-    printf '%s' "docker: crowdsec (not running)"
-  fi
-}
-
-crowdsec_cscli() {
-  # The central engine for this script is Dockerized CrowdSec.
-  # Do not fall back to host cscli: that would manage a different CrowdSec instance.
-  safe_source_env
-  if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
-    docker exec crowdsec cscli "$@"
-  else
-    echo "$(T "ОШИБКА: контейнер crowdsec не запущен. Host cscli намеренно не используется, чтобы не управлять другим CrowdSec instance." "ERROR: the crowdsec container is not running. Host cscli is intentionally not used to avoid managing another CrowdSec instance.")" >&2
-    return 1
-  fi
-}
-
-parse_console_enroll_key() {
-  local raw="${1:-}"
-  raw="${raw//$'\r'/}"
-  raw="${raw//$'\n'/ }"
-  raw="${raw#sudo }"
-  if [[ "${raw}" == *"console enroll"* ]]; then
-    raw="${raw##*console enroll }"
-  elif [[ "${raw}" == *" enroll "* ]]; then
-    raw="${raw##* enroll }"
-  fi
-  raw="${raw%% *}"
-  printf '%s' "${raw}" | tr -cd 'A-Za-z0-9._:-'
-}
-
-action_description() {
-  local key="$1"
-  case "${key}" in
-    protection_capi|capi_enroll)
-      T "Подключение текущего CrowdSec engine к облачной CrowdSec Console. Если используется CrowdSec Manager в Docker, команды выполняются внутри контейнера crowdsec, чтобы Manager видел результат. Это не bouncer key, не auto-registration token и не Service API key." "Connects the current CrowdSec engine to the cloud CrowdSec Console. If CrowdSec Manager runs in Docker, commands are executed inside the crowdsec container so Manager sees the result. This is not a bouncer key, not an auto-registration token and not a Service API key."
-      ;;
-    *)
-      # fallback to the previous text where possible
-      case "${key}" in
-        status) T "Показывает состояние сервисов, открытые порты, контейнеры Docker, LAPI и основные параметры central. Используй это как первый пункт диагностики." "Shows service state, open ports, Docker containers, LAPI and main central settings. Use this as the first diagnostic step." ;;
-        connect) T "Показывает сохранённые подключения VPS, machines и bouncer/API устройств. Здесь можно повторно посмотреть LAPI URL, machine name и bouncer key." "Shows saved VPS, machine and bouncer/API device connections. Use it to view LAPI URL, machine name and bouncer key again." ;;
-        envfile) T "Показывает файл central.env с текущими настройками central. Там есть порты, URL, ranges и служебные ключи. Не публикуй этот вывод наружу." "Shows central.env with current central settings. It contains ports, URLs, ranges and secret keys. Do not publish this output." ;;
-        crowdsec_info) T "Показывает machines, bouncers, alerts, active decisions и metrics. Это общий экран понимания: кто подключён, кто блокирует и какие решения есть." "Shows machines, bouncers, alerts, active decisions and metrics. This is the overview: who is connected, who enforces and what decisions exist." ;;
-        protection_menu) T "Раздел настройки защиты central: бесплатные Hub collections, локальные rules/scenarios, ручные decisions, CrowdSec allowlist и опциональное подключение к CrowdSec Console/CAPI." "Protection setup: free Hub collections, local rules/scenarios, manual decisions, CrowdSec allowlist and optional CrowdSec Console/CAPI connection." ;;
-        protection_baseline) T "Ставит базовую бесплатную защиту: обновляет Hub и устанавливает linux + sshd collections. Это минимальная база, чтобы central мог создавать local decisions из своих логов." "Installs the base free protection: updates Hub and installs linux + sshd collections. This is the minimum base for central to create local decisions from its own logs." ;;
-        protection_collections) T "Управление CrowdSec Hub collections. Collections ставят наборы parsers/scenarios для Linux, SSH, web-серверов и firewall/router логов." "Manage CrowdSec Hub collections. Collections install parser/scenario bundles for Linux, SSH, web servers and firewall/router logs." ;;
-        protection_decisions) T "Локальные ручные блокировки через CrowdSec decisions. Можно добавить ban для IP/CIDR, импортировать свой blacklist из файла, удалить decision или посмотреть active decisions." "Local manual blocks through CrowdSec decisions. Add an IP/CIDR ban, import your own blacklist from a file, delete a decision or show active decisions." ;;
-        protection_trusted) T "CrowdSec allowlist: IP/CIDR из этого списка записываются в parser s02-enrich и применяются самим CrowdSec." "CrowdSec allowlist: IP/CIDR from this list are written to an s02-enrich parser and applied by CrowdSec itself." ;;
-        node_bouncer) T "Создаёт подключение VPS. Есть два режима: удалённая установка по SSH или ручная установка с ожиданием регистрации machine и последующим validate." "Creates a VPS connection. Two modes are available: remote SSH installation or manual installation with machine registration wait and validate." ;;
-        validate_machine) T "Подтверждает зарегистрированные VPS machines. Это нужно для VPS/agent, но не нужно для bouncer-only устройств вроде OpenWrt firewall-bouncer." "Validates registered VPS machines. Required for VPS/agent nodes, not required for bouncer-only devices such as OpenWrt firewall-bouncer." ;;
-        add_range) T "Добавляет IP/CIDR, которому разрешено обращаться к central LAPI. Обычно это IP VPS, роутера, NPM или другого доверенного источника." "Adds an IP/CIDR allowed to reach central LAPI. Usually this is a VPS, router, NPM or another trusted source IP." ;;
-        remove_range) T "Удаляет IP/CIDR из allowed ranges LAPI. После удаления этот источник может потерять доступ к central LAPI." "Removes an IP/CIDR from LAPI allowed ranges. After removal that source may lose access to central LAPI." ;;
-        replace_ranges) T "Полностью заменяет список allowed ranges LAPI. Используй осторожно: можно случайно отрезать доступ VPS, роутеру или NPM." "Completely replaces the LAPI allowed ranges list. Use carefully: you can cut off VPS, router or NPM access." ;;
-        device_manage) T "Управление устройствами, где установлен только bouncer/API key. Такие устройства не являются machines, не требуют validate и только забирают decisions из central." "Manage devices that only have a bouncer/API key. These devices are not machines, do not need validate and only pull decisions from central." ;;
-        device_events) T "Отдельная настройка событий от роутера/устройства. Bouncer сам логи не отправляет. Если нужны события, включается filtered syslog intake на central." "Separate router/device event intake setup. A bouncer does not send logs. If events are needed, enable filtered syslog intake on central." ;;
-        syslog_devices) T "Показывает устройства, для которых включён remote syslog intake: порт, режим filtered/full и файлы логов на central." "Shows devices with remote syslog intake enabled: port, filtered/full mode and log files on central." ;;
-        web_addr) T "Меняет LAN IP central и порт Web UI. Это влияет на адрес CrowdSec Manager в браузере." "Changes central LAN IP and Web UI port. This affects the CrowdSec Manager browser URL." ;;
-        lapi_port) T "Меняет порт central LAPI. После изменения нужно обновить настройки VPS, bouncers, NPM и пробросы портов." "Changes the central LAPI port. After changing it, update VPS, bouncers, NPM and port forwards." ;;
-        public_addr) T "Задаёт внешний IP/DDNS для прямого HTTP доступа к LAPI. Используй только если VPS ходят напрямую, без HTTPS reverse proxy." "Sets public IP/DDNS for direct HTTP LAPI access. Use only if VPS connect directly without an HTTPS reverse proxy." ;;
-        public_lapi_url) T "Задаёт публичный HTTPS URL LAPI через Nginx Proxy Manager. Это предпочтительно для удалённых VPS вместо прямого HTTP." "Sets the public HTTPS LAPI URL through Nginx Proxy Manager. This is preferred for remote VPS instead of direct HTTP." ;;
-        auto_token) T "Перегенерирует auto-registration token для регистрации machines. Новые установки VPS со старым token больше не смогут регистрироваться." "Regenerates the auto-registration token for machines. New VPS installs using the old token will no longer register." ;;
-        bouncer_key) T "Перегенерирует shared bouncer key. Индивидуальные bouncer keys устройств не меняет, но shared-key подключения потребуется обновить." "Regenerates the shared bouncer key. Individual device bouncer keys are not changed, but shared-key connections must be updated." ;;
-        firewall) T "Показывает текущие правила UFW/firewall central: SSH, Web UI, LAPI и syslog intake." "Shows current central UFW/firewall rules: SSH, Web UI, LAPI and syslog intake." ;;
-        test_lapi) T "Проверяет доступ CrowdSec Manager/Web UI к LAPI. Используй, если Manager показывает LAPI Offline." "Tests CrowdSec Manager/Web UI access to LAPI. Use it if Manager shows LAPI Offline." ;;
-        restart) T "Перезапускает Dockerized CrowdSec Manager stack: контейнеры crowdsec и crowdsec-manager." "Restarts the Dockerized CrowdSec Manager stack: crowdsec and crowdsec-manager containers." ;;
-        update_webui) T "Обновляет только CrowdSec Manager/Web UI контейнер, не трогая весь сервер." "Updates only the CrowdSec Manager/Web UI container, without touching the whole server." ;;
-        logs) T "Показывает логи CrowdSec и Manager. Это основной пункт для поиска причин ошибок." "Shows CrowdSec and Manager logs. This is the main place to investigate errors." ;;
-        reapply) T "Повторно применяет настройки Dockerized CrowdSec: LAPI config, shared bouncer, UFW и команду меню." "Reapplies Dockerized CrowdSec settings: LAPI config, shared bouncer, UFW and menu command." ;;
-        update_all) T "Обновляет весь стек: системные пакеты, Docker, Dockerized CrowdSec Manager и firewall. Host CrowdSec/cscli не ставится." "Updates the full stack: system packages, Docker, Dockerized CrowdSec Manager and firewall. Host CrowdSec/cscli is not installed." ;;
-        update_system) T "Обновляет пакеты Debian/Ubuntu через apt." "Updates Debian/Ubuntu packages through apt." ;;
-        update_docker) T "Обновляет Docker и docker compose plugin." "Updates Docker and the docker compose plugin." ;;
-        update_crowdsec) T "Обновляет Dockerized CrowdSec engine внутри контейнера crowdsec. Host CrowdSec/cscli не устанавливается и не используется." "Updates the Dockerized CrowdSec engine inside the crowdsec container. Host CrowdSec/cscli is not installed or used." ;;
-        versions) T "Показывает версии ОС, Docker, CrowdSec внутри контейнера и контейнеров. Host cscli не нужен." "Shows OS, Docker, CrowdSec inside the container and container versions. Host cscli is not needed." ;;
-        repair_menu) T "Скачивает свежий central.sh из GitHub, проверяет синтаксис и устанавливает его как /usr/local/sbin/crowdsec-central-menu. Используй для обновления самого скрипта меню." "Downloads the latest central.sh from GitHub, checks syntax, and installs it as /usr/local/sbin/crowdsec-central-menu. Use it to update the menu script itself." ;;
-        language) T "Меняет язык интерфейса и сохраняет выбор в central.env." "Changes interface language and saves the choice to central.env." ;;
-        disable_autostart) T "Отключает автозапуск меню при входе root в shell." "Disables automatic menu start when root logs into shell." ;;
-        enable_autostart) T "Включает автозапуск меню при входе root в shell." "Enables automatic menu start when root logs into shell." ;;
-        *) T "Описание для этого пункта пока не задано. Действие будет выполнено без дополнительных изменений." "No description is defined for this item yet. The action will run without additional changes." ;;
-      esac
-      ;;
-  esac
-}
-
-capi_console_status() {
-  local tmp
-  tmp="$(mktemp)"
-  {
-    echo "$(T "CAPI/Console статус. Это опционально: бесплатный local-mode работает без платных списков." "CAPI/Console status. This is optional: free local-mode works without paid lists.")"
-    echo
-    echo "$(T "Команды выполняются в engine:" "Commands run in engine:") $(crowdsec_engine_context)"
-    echo
-    echo "=== cscli capi status ==="
-    crowdsec_cscli capi status 2>&1 || true
-    echo
-    echo "=== cscli console status ==="
-    crowdsec_cscli console status 2>&1 || true
-    echo
-    echo "=== cscli console list/options ==="
-    crowdsec_cscli console list 2>&1 || true
-    echo
-    echo "$(T "Если CrowdSec Manager запущен в Docker, статус должен проверяться именно внутри контейнера crowdsec. Этот экран делает это автоматически." "If CrowdSec Manager runs in Docker, status must be checked inside the crowdsec container. This screen does that automatically.")"
-  } >"${tmp}"
-  show_file "$(T "CrowdSec Console / CAPI" "CrowdSec Console / CAPI")" "${tmp}"
-  rm -f "${tmp}"
-}
-
-console_enroll_with_key() {
-  local enroll_input enroll_key enable_all rc
-  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    enroll_input="$(whiptail --title " $(T "CrowdSec Console enrollment" "CrowdSec Console enrollment") " --passwordbox "$(T "Вставь Console enrollment key или всю команду из app.crowdsec.net.\n\nМожно вставить:\ncscli console enroll XXXXX\nили только XXXXX\n\nКоманда будет выполнена в том CrowdSec engine, которым управляет CrowdSec Manager." "Paste the Console enrollment key or the whole command from app.crowdsec.net.\n\nYou may paste:\ncscli console enroll XXXXX\nor only XXXXX\n\nThe command will run in the CrowdSec engine managed by CrowdSec Manager.")" 18 96 "" 3>&1 1>&2 2>&3)" || return 0
-    set +e
-    whiptail --title " $(T "Console options" "Console options") " \
-      --yes-button "$(T "Да" "Yes")" --no-button "$(T "Нет" "No")" \
-      --yesno "$(T "После enroll включить отправку всех Console options через: cscli console enable --all?\n\nЭто включает передачу alerts/decisions/metrics/status в облачную CrowdSec Console. Это опционально. Если не уверен, выбери Нет." "After enroll, enable all Console options with: cscli console enable --all?\n\nThis enables sending alerts/decisions/metrics/status to the cloud CrowdSec Console. This is optional. If unsure, choose No.")" 16 96
-    rc=$?
-    set -e
-    [[ "${rc}" -eq 0 ]] && enable_all="yes" || enable_all="no"
-  else
-    read -rsp "$(T "Console enrollment key or command: " "Console enrollment key or command: ")" enroll_input || return 0
-    echo
-    read -rp "$(T "Включить cscli console enable --all? [y/N]: " "Enable cscli console enable --all? [y/N]: ")" enable_all || true
-    [[ "${enable_all:-N}" =~ ^[Yy]$ ]] && enable_all="yes" || enable_all="no"
-  fi
-
-  enroll_key="$(parse_console_enroll_key "${enroll_input}")"
-  if [[ -z "${enroll_key}" ]]; then
-    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      whiptail --title " $(T "Пустой ключ" "Empty key") " --msgbox "$(T "Enrollment key пустой. Возврат в предыдущее меню." "Enrollment key is empty. Returning to the previous menu.")" 9 80 || true
-    else
-      warn "$(T "Enrollment key пустой." "Enrollment key is empty.")"
-    fi
-    return 0
-  fi
-
-  console_enroll_apply() {
-    echo "Engine context: $(crowdsec_engine_context)"
-    echo "Running: cscli console enroll <hidden>"
-    crowdsec_cscli console enroll "${enroll_key}"
-    if [[ "${enable_all}" == "yes" ]]; then
-      echo "Running: cscli console enable --all"
-      crowdsec_cscli console enable --all || true
-    else
-      echo "Console options were not enabled by user choice."
-    fi
-    echo
-    echo "Console status:"
-    crowdsec_cscli console status || true
-    echo
-    echo "CAPI status:"
-    crowdsec_cscli capi status || true
-  }
-
-  run_with_live_progress "$(T "CrowdSec Console enrollment" "CrowdSec Console enrollment")" console_enroll_apply || return 0
-  show_help_text "$(T "CrowdSec Console" "CrowdSec Console")" "$(T "Enroll выполнен в текущем CrowdSec engine.\n\nЕсли статус показывает ожидание подтверждения, открой app.crowdsec.net -> Engines и подтверди Security Engine.\n\nКлюч не сохраняется и не отображается в CrowdSec Manager. Manager должен видеть результат enroll через состояние engine." "Enroll has been executed in the current CrowdSec engine.\n\nIf status shows pending validation, open app.crowdsec.net -> Engines and validate the Security Engine.\n\nThe key is not saved and is not displayed in CrowdSec Manager. Manager should see the enroll result through the engine state.")"
-}
-
-capi_register_free() {
-  capi_register_apply() {
-    echo "Engine context: $(crowdsec_engine_context)"
-    echo "Running: cscli capi register"
-    crowdsec_cscli capi register || true
-    echo
-    echo "CAPI status:"
-    crowdsec_cscli capi status || true
-  }
-  run_with_live_progress "$(T "CrowdSec CAPI register" "CrowdSec CAPI register")" capi_register_apply || true
-}
-
-manage_capi_console_menu() {
-  local choice
-  while true; do
-    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      choice="$(whiptail --title " $(T "CrowdSec Console / CAPI" "CrowdSec Console / CAPI") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Здесь подключается текущий CrowdSec engine к облачной CrowdSec Console.\n\nКоманды выполняются внутри контейнера crowdsec. Host cscli намеренно не используется.\n\nПосле действия вы вернётесь сюда." "Connect the current CrowdSec engine to the cloud CrowdSec Console here.\n\nCommands run inside the crowdsec container. Host cscli is intentionally not used.\n\nAfter an action you will return here.")" 27 106 6 \
-        "enroll" "$(T "Console enrollment key" "Console enrollment key")" "$(T "Вводит enrollment key или всю команду cscli console enroll из app.crowdsec.net." "Enter the enrollment key or the whole cscli console enroll command from app.crowdsec.net.")" \
-        "capi" "$(T "CAPI register/status" "CAPI register/status")" "$(T "Выполняет cscli capi register в текущем engine и показывает статус." "Runs cscli capi register in the current engine and shows status.")" \
-        "cti" "$(T "CTI API key" "CTI API key")" "$(T "Сохраняет CTI API key в config.yaml. Это отдельный ключ, не enrollment key." "Saves CTI API key to config.yaml. This is a separate key, not an enrollment key.")" \
-        "status" "$(T "Показать CAPI/Console статус" "Show CAPI/Console status")" "$(T "Показывает статус Console/CAPI в том же engine, которым управляет Manager." "Shows Console/CAPI status in the same engine managed by Manager.")" \
-        3>&1 1>&2 2>&3)" || return 0
-    else
-      echo "1) enroll - Console enrollment key"
-      echo "2) capi - CAPI register/status"
-      echo "3) cti - CTI API key"
-      echo "4) status"
-      echo "0) back"
-      read -rp "> " choice || return 0
-      case "${choice}" in 0|q|back) return 0;; 1) choice=enroll;; 2) choice=capi;; 3) choice=cti;; 4) choice=status;; esac
-    fi
-    case "${choice}" in
-      enroll) show_action_intro capi_enroll || continue; console_enroll_with_key ;;
-      capi) capi_register_free ;;
-      cti) configure_cti_api_key ;;
-      status) capi_console_status ;;
-    esac
-  done
-}
-
-manage_protection_menu() {
-  local choice
-  while true; do
-    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      choice="$(whiptail --title " $(T "Защита, правила и decisions" "Protection, rules and decisions") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Этот раздел отвечает за то, ОТКУДА central берёт decisions для всех bouncers.\n\nБесплатный режим: Hub collections + анализ своих логов + ручные local decisions.\nCrowdSec Console/CAPI опциональны и не включают платные blocklists автоматически.\n\nПосле любого подпункта вы вернётесь сюда." "This section controls WHERE central gets decisions for all bouncers.\n\nFree mode: Hub collections + local log analysis + manual local decisions.\nCrowdSec Console/CAPI are optional and do not enable paid blocklists automatically.\n\nAfter any subitem you will return here.")" 27 106 7 \
-        "baseline" "$(T "Базовая бесплатная защита" "Base free protection")" "$(T "Ставит linux + sshd collections. Минимальная база для local decisions." "Installs linux + sshd collections. Minimum base for local decisions.")" \
-        "collections" "$(T "Collections / rules / Hub" "Collections / rules / Hub")" "$(T "Установка и просмотр collections, scenarios, parsers из CrowdSec Hub." "Install and view collections, scenarios, parsers from CrowdSec Hub.")" \
-        "decisions" "$(T "Manual decisions / local blacklist" "Manual decisions / local blacklist")" "$(T "Ручные bans, удаление decisions и импорт своего списка IP/CIDR." "Manual bans, delete decisions and import your own IP/CIDR list.")" \
-        "trusted" "$(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR")" "$(T "Реальная allowlist-настройка CrowdSec для IP/CIDR, которые не должны обрабатываться как атакующие." "Real CrowdSec allowlist configuration for IP/CIDR that must not be treated as attackers.")" \
-        "capi" "$(T "CrowdSec Console / CAPI" "CrowdSec Console / CAPI")" "$(T "Console enrollment, CAPI status/register и CTI API key. Для Docker выполняется внутри контейнера crowdsec." "Console enrollment, CAPI status/register and CTI API key. In Docker it runs inside the crowdsec container.")" \
-        "info" "$(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")" "$(T "Общий статус подключений, alerts, decisions и metrics." "Overall status of connections, alerts, decisions and metrics.")" \
-        3>&1 1>&2 2>&3)" || return 0
-    else
-      echo "1) baseline - базовая защита"
-      echo "2) collections - правила Hub"
-      echo "3) decisions - ручные bans/local blacklist"
-      echo "4) trusted - CrowdSec allowlist"
-      echo "5) capi - CrowdSec Console/CAPI"
-      echo "6) info - общий статус"
-      echo "0) back"
-      read -rp "> " choice || return 0
-      case "${choice}" in 0|q|back) return 0;; 1) choice=baseline;; 2) choice=collections;; 3) choice=decisions;; 4) choice=trusted;; 5) choice=capi;; 6) choice=info;; esac
-    fi
-    case "${choice}" in
-      baseline) show_action_intro protection_baseline || continue; run_with_live_progress "$(T "Базовая защита CrowdSec" "Base CrowdSec protection")" apply_initial_protection_baseline || true ;;
-      collections) show_action_intro protection_collections || continue; manage_collections_menu ;;
-      decisions) show_action_intro protection_decisions || continue; manage_decisions_menu ;;
-      trusted) show_action_intro protection_trusted || continue; manage_trusted_ips_menu ;;
-      capi) show_action_intro protection_capi || continue; manage_capi_console_menu ;;
-      info) show_action_intro crowdsec_info || continue; show_crowdsec_info ;;
-    esac
-  done
-}
-
-
-
-# -----------------------------------------------------------------------------
 # v0.7.6 CrowdSec Manager Docker audit/fix
 # -----------------------------------------------------------------------------
 # Final overrides below make this script consistently manage the CrowdSec engine
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.22-openwrt-central-pull-collector-fix"
+SCRIPT_VERSION="v0.7.23-clean-vps-menu"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
@@ -6337,7 +4146,6 @@ services:
       - "${MANAGER_COMPOSE_DIR}/crowdsec-db:/var/lib/crowdsec/data"
       - "${MANAGER_COMPOSE_DIR}/crowdsec-config:/etc/crowdsec"
       - /var/log:/var/log:ro
-      - ${REMOTE_SYSLOG_DIR}:${REMOTE_SYSLOG_DIR}:ro
     networks:
       - crowdsec_net
 
