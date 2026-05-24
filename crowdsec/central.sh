@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.18-openwrt-ssh-verify-auto-fix"
+SCRIPT_VERSION="v0.7.19-openwrt-nc-forwarder-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4233,6 +4233,21 @@ uci delete system.@system[0].log_proto 2>/dev/null || true
 uci commit system
 /etc/init.d/log restart || true
 
+if ! command -v nc >/dev/null 2>&1; then
+  if command -v opkg >/dev/null 2>&1; then
+    opkg update >/tmp/crowdsec-log-forwarder-opkg.log 2>&1 || true
+    opkg install netcat-openbsd >>/tmp/crowdsec-log-forwarder-opkg.log 2>&1 || opkg install netcat >>/tmp/crowdsec-log-forwarder-opkg.log 2>&1 || true
+  fi
+fi
+if ! command -v nc >/dev/null 2>&1; then
+  echo 'ERROR: nc/netcat is required on OpenWrt because BusyBox logger has no remote -n/-P options.' >&2
+  echo 'Install one of these packages and run this helper again:' >&2
+  echo '  opkg update && opkg install netcat-openbsd' >&2
+  echo 'or:' >&2
+  echo '  opkg update && opkg install netcat' >&2
+  exit 33
+fi
+
 cat > '${worker_path}' <<'WORKER_EOF'
 #!/bin/sh
 CENTRAL_HOST='${central_host}'
@@ -4241,11 +4256,20 @@ TAG='openwrt-crowdsec'
 PATTERN='dropbear|sshd|auth|login|failed|failure|invalid|refused|denied|DROP|Drop|drop|REJECT|Reject|reject|blocked|Blocked|ban|Ban|nft|iptables|firewall|Firewall|kernel'
 
 command -v logread >/dev/null 2>&1 || exit 127
-command -v logger >/dev/null 2>&1 || exit 127
+command -v nc >/dev/null 2>&1 || exit 127
+
+send_remote_syslog() {
+  line="$1"
+  ts="$(date '+%b %e %H:%M:%S' 2>/dev/null || date)"
+  host="$(uci get system.@system[0].hostname 2>/dev/null || hostname 2>/dev/null || echo openwrt)"
+  # BusyBox logger in OpenWrt 25 has no -n/-P remote options, so send RFC3164-like UDP syslog via nc.
+  # PRI 134 = local0.info.
+  printf '<134>%s %s %s: %s\n' "$ts" "$host" "$TAG" "$line" | nc -u -w 1 "$CENTRAL_HOST" "$CENTRAL_PORT" >/dev/null 2>&1 || true
+}
 
 while true; do
   logread -f 2>/dev/null | grep -Ei "\$PATTERN" | while IFS= read -r line; do
-    logger -n "\$CENTRAL_HOST" -P "\$CENTRAL_PORT" -t "\$TAG" "\$line" 2>/dev/null || true
+    send_remote_syslog "$line"
   done
   sleep 2
 done
@@ -4547,12 +4571,16 @@ configure_device_event_intake() {
     echo "/etc/init.d/crowdsec-log-forwarder status"
     echo "ps w | grep crowdsec-log-forwarder | grep -v grep"
     echo "logread | tail -50"
+    echo "Тестовая отправка с OpenWrt вручную, если нужна диагностика:"
+    echo "printf '<134>%s Homee openwrt-crowdsec: dropbear login failed for root from 1.2.3.4\\n' \"\$(date '+%b %e %H:%M:%S')\" | nc -u -w 1 ${LAN_IP} ${port}"
     echo
     echo "Проверка на central:"
-    echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/${ip}.security.log"
+    echo "sudo find ${REMOTE_SYSLOG_DIR} -maxdepth 1 -type f -name '*.security.log' -ls"
+    echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/*.security.log"
     echo
     echo "Filtered log for CrowdSec:"
-    echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/${ip}.security.log"
+    echo "sudo find ${REMOTE_SYSLOG_DIR} -maxdepth 1 -type f -name '*.security.log' -ls"
+    echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/*.security.log"
     if [[ "${mode}" == "full" ]]; then
       echo
       echo "Full diagnostic log, NOT read by CrowdSec:"
@@ -5249,7 +5277,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.18-openwrt-ssh-verify-auto-fix"
+SCRIPT_VERSION="v0.7.19-openwrt-nc-forwarder-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5802,7 +5830,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.18-openwrt-ssh-verify-auto-fix"
+SCRIPT_VERSION="v0.7.19-openwrt-nc-forwarder-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -6047,7 +6075,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.18-openwrt-ssh-verify-auto-fix"
+SCRIPT_VERSION="v0.7.19-openwrt-nc-forwarder-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
