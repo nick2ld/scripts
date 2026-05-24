@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.21-openwrt-nc-timeout-hang-fix"
+SCRIPT_VERSION="v0.7.22-openwrt-central-pull-collector-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4350,6 +4350,7 @@ EOF
 apply_openwrt_helper_via_ssh() {
   local router_ip="$1" helper_script="$2" action_title="$3"
   local ssh_host ssh_port ssh_user ssh_password rc log_dir apply_log test_out
+  local safe_name key_dir key_file pub_file pub_key service_name collector_script unit_file log_file
 
   ssh_host="${router_ip}"
   ssh_port="22"
@@ -4376,7 +4377,7 @@ apply_openwrt_helper_via_ssh() {
     [[ "${rc}" -eq 0 ]] || return 0
 
     set +e
-    ssh_password="$(whiptail --title " OpenWrt SSH " --passwordbox "$(T "SSH пароль OpenWrt. Символы в пароле допустимы. Если настроен вход по ключу, оставь пустым." "OpenWrt SSH password. Special characters are supported. If key login is configured, leave empty.")" 12 92 "" 3>&1 1>&2 2>&3)"
+    ssh_password="$(whiptail --title " OpenWrt SSH " --passwordbox "$(T "SSH пароль OpenWrt. Символы в пароле допустимы. Пароль нужен только один раз, чтобы установить SSH-ключ для central-side collector." "OpenWrt SSH password. Special characters are supported. The password is needed only once to install an SSH key for the central-side collector.")" 13 96 "" 3>&1 1>&2 2>&3)"
     rc=$?
     set -e
     [[ "${rc}" -eq 0 ]] || return 0
@@ -4397,21 +4398,35 @@ apply_openwrt_helper_via_ssh() {
   [[ -n "${ssh_host}" ]] || fail "$(T "SSH host OpenWrt пустой." "OpenWrt SSH host is empty.")"
   is_valid_port "${ssh_port}" || fail "$(T "Некорректный SSH порт OpenWrt." "Invalid OpenWrt SSH port.")"
   [[ -n "${ssh_user}" ]] || fail "$(T "SSH логин OpenWrt пустой." "OpenWrt SSH login is empty.")"
-  [[ -f "${helper_script}" ]] || fail "$(T "Helper-скрипт не найден:" "Helper script not found:") ${helper_script}"
 
   log_dir="${CONFIG_DIR}/openwrt-helper-scripts"
-  mkdir -p "${log_dir}"
+  mkdir -p "${log_dir}" "${REMOTE_SYSLOG_DIR}"
   chmod 700 "${log_dir}" 2>/dev/null || true
-  apply_log="${log_dir}/$(printf '%s' "${ssh_host}" | tr -cd 'A-Za-z0-9._-')-apply-$(date +%Y%m%d-%H%M%S).log"
+  chmod 750 "${REMOTE_SYSLOG_DIR}" 2>/dev/null || true
 
-  openwrt_ssh_cmd() {
+  safe_name="$(sanitize_node_name "${ssh_host}")"
+  [[ -n "${safe_name}" ]] || safe_name="openwrt-router"
+  key_dir="${log_dir}/keys"
+  mkdir -p "${key_dir}"
+  chmod 700 "${key_dir}" 2>/dev/null || true
+  key_file="${key_dir}/${safe_name}_ed25519"
+  pub_file="${key_file}.pub"
+  service_name="crowdsec-openwrt-logread-${safe_name}"
+  collector_script="/usr/local/sbin/${service_name}.sh"
+  unit_file="/etc/systemd/system/${service_name}.service"
+  log_file="${REMOTE_SYSLOG_DIR}/${safe_name}.security.log"
+  apply_log="${log_dir}/${safe_name}-apply-$(date +%Y%m%d-%H%M%S).log"
+
+  openwrt_ssh_cmd_password_or_key() {
     local remote_cmd="$1"
     if [[ -n "${ssh_password}" ]]; then
       ensure_remote_ssh_tools >/dev/null
-      SSHPASS="${ssh_password}" sshpass -e ssh \
+      SSHPASS="${ssh_password}" timeout 25s sshpass -e ssh \
         -o StrictHostKeyChecking=accept-new \
         -o UserKnownHostsFile=/root/.ssh/known_hosts \
-        -o ConnectTimeout=20 \
+        -o ConnectTimeout=15 \
+        -o ServerAliveInterval=5 \
+        -o ServerAliveCountMax=2 \
         -o BatchMode=no \
         -o NumberOfPasswordPrompts=1 \
         -o PreferredAuthentications=password,keyboard-interactive \
@@ -4420,10 +4435,12 @@ apply_openwrt_helper_via_ssh() {
         "${ssh_user}@${ssh_host}" "${remote_cmd}"
     else
       command -v ssh >/dev/null 2>&1 || apt-get install -y openssh-client >/dev/null
-      ssh \
+      timeout 25s ssh \
         -o StrictHostKeyChecking=accept-new \
         -o UserKnownHostsFile=/root/.ssh/known_hosts \
-        -o ConnectTimeout=20 \
+        -o ConnectTimeout=15 \
+        -o ServerAliveInterval=5 \
+        -o ServerAliveCountMax=2 \
         -o BatchMode=no \
         -o NumberOfPasswordPrompts=1 \
         -p "${ssh_port}" \
@@ -4432,14 +4449,17 @@ apply_openwrt_helper_via_ssh() {
   }
 
   openwrt_ssh_apply_inner() {
-    echo "OpenWrt SSH apply log"
+    local remote_authorized_keys_cmd sample_log
+    echo "OpenWrt central-side collector setup log"
     echo "Time: $(date -Is)"
     echo "Target: ${ssh_user}@${ssh_host}:${ssh_port}"
-    echo "Helper: ${helper_script}"
+    echo "Mode: central pulls logread over SSH; OpenWrt does not need logger -n, nc -u, or remote syslog."
+    echo "Local central log file: ${log_file}"
     echo
+
     echo "==> Testing SSH login"
     set +e
-    test_out="$(openwrt_ssh_cmd 'printf openwrt-ssh-ok' 2>&1)"
+    test_out="$(openwrt_ssh_cmd_password_or_key 'printf openwrt-ssh-ok' 2>&1)"
     rc=$?
     set -e
     if [[ "${rc}" -ne 0 ]]; then
@@ -4452,51 +4472,155 @@ apply_openwrt_helper_via_ssh() {
       echo "ERROR: unexpected SSH test output" >&2
       return 22
     fi
+
     echo
-    echo "==> Uploading and running helper script"
-    if [[ -n "${ssh_password}" ]]; then
-      SSHPASS="${ssh_password}" sshpass -e ssh \
-        -o StrictHostKeyChecking=accept-new \
-        -o UserKnownHostsFile=/root/.ssh/known_hosts \
-        -o ConnectTimeout=20 \
-        -o BatchMode=no \
-        -o NumberOfPasswordPrompts=1 \
-        -o PreferredAuthentications=password,keyboard-interactive \
-        -o PubkeyAuthentication=no \
-        -p "${ssh_port}" \
-        "${ssh_user}@${ssh_host}" 'sh -s' < "${helper_script}"
-    else
-      ssh \
-        -o StrictHostKeyChecking=accept-new \
-        -o UserKnownHostsFile=/root/.ssh/known_hosts \
-        -o ConnectTimeout=20 \
-        -o BatchMode=no \
-        -o NumberOfPasswordPrompts=1 \
-        -p "${ssh_port}" \
-        "${ssh_user}@${ssh_host}" 'sh -s' < "${helper_script}"
+    echo "==> Creating SSH key for central-side collector"
+    if [[ ! -s "${key_file}" ]]; then
+      ssh-keygen -t ed25519 -N "" -f "${key_file}" -C "crowdsec-openwrt-${safe_name}" >/dev/null
     fi
+    chmod 600 "${key_file}" "${pub_file}" 2>/dev/null || true
+    pub_key="$(cat "${pub_file}")"
+
     echo
-    echo "==> Verifying installed files and process"
-    openwrt_ssh_cmd 'test -x /usr/bin/crowdsec-log-forwarder && test -x /etc/init.d/crowdsec-log-forwarder && /etc/init.d/crowdsec-log-forwarder enabled >/dev/null 2>&1 && ps w | grep "[c]rowdsec-log-forwarder" >/dev/null'
+    echo "==> Installing public key into OpenWrt /etc/dropbear/authorized_keys"
+    remote_authorized_keys_cmd="mkdir -p /etc/dropbear; touch /etc/dropbear/authorized_keys; chmod 700 /etc/dropbear; grep -qxF $(shell_quote "${pub_key}") /etc/dropbear/authorized_keys 2>/dev/null || echo $(shell_quote "${pub_key}") >> /etc/dropbear/authorized_keys; chmod 600 /etc/dropbear/authorized_keys"
+    openwrt_ssh_cmd_password_or_key "${remote_authorized_keys_cmd}"
+
     echo
-    echo "==> Sending test syslog packet from OpenWrt"
-    openwrt_ssh_cmd '/bin/sh /usr/bin/crowdsec-log-forwarder --send-test || true'
-    echo "==> Checking central received at least one filtered syslog line"
-    local i found_file
-    found_file=""
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-      found_file="$(find "${REMOTE_SYSLOG_DIR}" -maxdepth 1 -type f -name '*.security.log' -mmin -2 -print 2>/dev/null | head -n 1 || true)"
-      if [[ -n "${found_file}" ]]; then
-        echo "OK: central received syslog: ${found_file}"
-        tail -n 5 "${found_file}" || true
-        return 0
+    echo "==> Testing SSH key login"
+    timeout 25s ssh \
+      -i "${key_file}" \
+      -o StrictHostKeyChecking=accept-new \
+      -o UserKnownHostsFile=/root/.ssh/known_hosts \
+      -o ConnectTimeout=15 \
+      -o ServerAliveInterval=5 \
+      -o ServerAliveCountMax=2 \
+      -o BatchMode=yes \
+      -p "${ssh_port}" \
+      "${ssh_user}@${ssh_host}" 'printf openwrt-key-ok'
+    echo
+
+    echo
+    echo "==> Writing central collector script"
+    cat > "${collector_script}" <<COLLECTOR_EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SSH_HOST=$(shell_quote "${ssh_host}")
+SSH_PORT=$(shell_quote "${ssh_port}")
+SSH_USER=$(shell_quote "${ssh_user}")
+SSH_KEY=$(shell_quote "${key_file}")
+DEVICE_NAME=$(shell_quote "${safe_name}")
+LOG_FILE=$(shell_quote "${log_file}")
+PATTERN='dropbear|sshd|auth|login|failed|failure|invalid|refused|denied|DROP|Drop|drop|REJECT|Reject|reject|blocked|Blocked|ban|Ban|nft|iptables|firewall|Firewall|kernel'
+
+mkdir -p "\$(dirname "\${LOG_FILE}")"
+touch "\${LOG_FILE}"
+chmod 0640 "\${LOG_FILE}" 2>/dev/null || true
+
+append_line() {
+  local line="\$1" ts
+  ts="\$(date '+%b %e %H:%M:%S' 2>/dev/null || date)"
+  printf '<134>%s %s openwrt-crowdsec: %s\n' "\${ts}" "\${DEVICE_NAME}" "\${line}" >> "\${LOG_FILE}"
+}
+
+while true; do
+  ssh -i "\${SSH_KEY}" \
+    -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile=/root/.ssh/known_hosts \
+    -o ConnectTimeout=20 \
+    -o ServerAliveInterval=20 \
+    -o ServerAliveCountMax=3 \
+    -o BatchMode=yes \
+    -p "\${SSH_PORT}" \
+    "\${SSH_USER}@\${SSH_HOST}" 'logread -f' 2>&1 \
+  | while IFS= read -r line; do
+      if printf '%s\n' "\${line}" | grep -Eiq "\${PATTERN}"; then
+        append_line "\${line}"
       fi
-      sleep 1
     done
-    echo "ERROR: OpenWrt helper was installed, but central did not receive syslog in ${REMOTE_SYSLOG_DIR}" >&2
-    echo "Check TCP 5140 listener: ss -ltnp | grep :5140" >&2
-    echo "Check rsyslog config: /etc/rsyslog.d/30-crowdsec-remote-devices.conf" >&2
-    return 41
+  sleep 5
+done
+COLLECTOR_EOF
+    chmod 700 "${collector_script}"
+
+    echo
+    echo "==> Writing systemd service"
+    cat > "${unit_file}" <<UNIT_EOF
+[Unit]
+Description=CrowdSec OpenWrt logread collector for ${safe_name}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${collector_script}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+
+    echo
+    echo "==> Importing recent OpenWrt log lines once"
+    sample_log="$(mktemp)"
+    set +e
+    timeout 25s ssh \
+      -i "${key_file}" \
+      -o StrictHostKeyChecking=accept-new \
+      -o UserKnownHostsFile=/root/.ssh/known_hosts \
+      -o ConnectTimeout=15 \
+      -o ServerAliveInterval=5 \
+      -o ServerAliveCountMax=2 \
+      -o BatchMode=yes \
+      -p "${ssh_port}" \
+      "${ssh_user}@${ssh_host}" 'logread | tail -300' >"${sample_log}" 2>&1
+    rc=$?
+    set -e
+    if [[ "${rc}" -ne 0 ]]; then
+      echo "WARN: recent log import failed, collector service will still be started."
+      cat "${sample_log}" || true
+    else
+      while IFS= read -r line; do
+        if printf '%s\n' "${line}" | grep -Eiq 'dropbear|sshd|auth|login|failed|failure|invalid|refused|denied|DROP|Drop|drop|REJECT|Reject|reject|blocked|Blocked|ban|Ban|nft|iptables|firewall|Firewall|kernel'; then
+          printf '<134>%s %s openwrt-crowdsec: %s\n' "$(date '+%b %e %H:%M:%S')" "${safe_name}" "${line}" >> "${log_file}"
+        fi
+      done < "${sample_log}"
+    fi
+    rm -f "${sample_log}"
+
+    echo
+    echo "==> Adding synthetic test line locally"
+    printf '<134>%s %s openwrt-crowdsec: crowdsec-forwarder-test dropbear login failed for root from 1.2.3.4\n' "$(date '+%b %e %H:%M:%S')" "${safe_name}" >> "${log_file}"
+    chmod 0640 "${log_file}" 2>/dev/null || true
+
+    echo
+    echo "==> Enabling and starting collector service"
+    systemctl daemon-reload
+    systemctl enable --now "${service_name}.service"
+    sleep 2
+
+    if ! systemctl is-active --quiet "${service_name}.service"; then
+      echo "ERROR: collector service is not active" >&2
+      systemctl status "${service_name}.service" --no-pager -l || true
+      return 31
+    fi
+
+    echo
+    echo "==> Checking central log file"
+    if [[ ! -s "${log_file}" ]]; then
+      echo "ERROR: collector service started, but log file is still empty: ${log_file}" >&2
+      systemctl status "${service_name}.service" --no-pager -l || true
+      journalctl -u "${service_name}.service" -n 80 --no-pager || true
+      return 41
+    fi
+
+    tail -n 20 "${log_file}" || true
+    echo
+    echo "OK: central-side OpenWrt log collector is installed and running"
+    echo "Service: ${service_name}.service"
+    echo "Log file: ${log_file}"
   }
 
   openwrt_ssh_apply_logged() {
@@ -4509,7 +4633,7 @@ apply_openwrt_helper_via_ssh() {
 
   if run_with_live_progress "${action_title}" openwrt_ssh_apply_logged; then
     if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-      whiptail --title " $(T "OpenWrt настроен" "OpenWrt configured") " --msgbox "$(T "Настройка применена на OpenWrt и проверена.\n\nЛог:" "Setup was applied to OpenWrt and verified.\n\nLog:")\n${apply_log}" 11 88 || true
+      whiptail --title " $(T "OpenWrt настроен" "OpenWrt configured") " --msgbox "$(T "Настройка применена и проверена.\n\nТеперь central сам читает OpenWrt logread по SSH-ключу и пишет filtered security log локально. На OpenWrt не используются logger -n, nc -u или system.@system[0].log_ip.\n\nЛог применения:" "Setup was applied and verified.\n\nNow central reads OpenWrt logread over SSH key and writes the filtered security log locally. OpenWrt does not use logger -n, nc -u, or system.@system[0].log_ip.\n\nApply log:")\n${apply_log}\n\n$(T "Файл событий:" "Event file:")\n${log_file}" 16 98 || true
     fi
     return 0
   fi
@@ -4590,27 +4714,18 @@ configure_device_event_intake() {
     helper_paths="$(write_openwrt_forwarder_helper_scripts "${name}" "${ip}" "${LAN_IP}" "${port}")"
     install_helper="$(printf '%s' "${helper_paths}" | awk -F'	' 'NR==1{print $1}')"
     uninstall_helper="$(printf '%s' "${helper_paths}" | awk -F'	' 'NR==1{print $2}')"
-    echo "OpenWrt 25 рекомендуемая схема: отдельный worker + procd init."
-    echo "Скрипт больше не вставляет длинную команду в procd_set_param command, потому что OpenWrt/LuCI/терминал ломают переносы, и получается: Command failed: Not found."
+    echo "OpenWrt 25: новая рекомендуемая схема - central-side collector."
+    echo "Скрипт больше НЕ использует на OpenWrt logger -n, nc -u, nc -w, procd-forwarder или system.@system[0].log_ip."
+    echo "Central один раз подключается к OpenWrt по паролю, ставит SSH-ключ и дальше сам читает logread -f по SSH."
+    echo "Отфильтрованные security/firewall/auth строки пишутся прямо на central в ${REMOTE_SYSLOG_DIR}/<device>.security.log."
     echo
-    echo "OpenWrt helper install script был создан на central:"
+    echo "Legacy helper scripts оставлены только как файлы удаления/совместимости:"
     echo "${install_helper}"
-    echo
-    echo "Скрипт может применить его на OpenWrt автоматически по SSH. Ручное копирование не требуется."
-    echo "Fallback-команда, если автоматический SSH недоступен:"
-    echo "ssh root@${ip} 'sh -s' < ${install_helper}"
-    echo
-    echo "Готовый скрипт удаления схемы на central:"
     echo "${uninstall_helper}"
     echo
-    echo "Проверка на OpenWrt после установки:"
-    echo "/etc/init.d/crowdsec-log-forwarder status"
-    echo "ps w | grep crowdsec-log-forwarder | grep -v grep"
-    echo "logread | tail -50"
-    echo "Тестовая отправка с OpenWrt вручную, если нужна диагностика:"
-    echo "printf '<134>%s Homee openwrt-crowdsec: dropbear login failed for root from 1.2.3.4\\n' \"\$(date '+%b %e %H:%M:%S')\" | nc -u -w 1 ${LAN_IP} ${port}"
-    echo
-    echo "Проверка на central:"
+    echo "Проверка на central после применения:"
+    echo "sudo systemctl status crowdsec-openwrt-logread-* --no-pager -l"
+    echo "sudo journalctl -u 'crowdsec-openwrt-logread-*' -n 80 --no-pager"
     echo "sudo find ${REMOTE_SYSLOG_DIR} -maxdepth 1 -type f -name '*.security.log' -ls"
     echo "sudo tail -f ${REMOTE_SYSLOG_DIR}/*.security.log"
     echo
@@ -5313,7 +5428,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.21-openwrt-nc-timeout-hang-fix"
+SCRIPT_VERSION="v0.7.22-openwrt-central-pull-collector-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5866,7 +5981,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.21-openwrt-nc-timeout-hang-fix"
+SCRIPT_VERSION="v0.7.22-openwrt-central-pull-collector-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -6111,7 +6226,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.21-openwrt-nc-timeout-hang-fix"
+SCRIPT_VERSION="v0.7.22-openwrt-central-pull-collector-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
