@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.9-remote-vps-clean-install-log-version-fix"
+SCRIPT_VERSION="v0.7.10-remote-runner-heredoc-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -999,6 +999,9 @@ ensure_remote_ssh_tools() {
 
 build_remote_vps_installer_script() {
   local out="$1"
+  # This heredoc is intentionally not quoted because selected central-side
+  # values are embedded into the remote runner. Every variable that must be
+  # evaluated on the remote VPS is escaped as \${...} or \$...
   cat > "${out}" <<REMOTE
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -1028,29 +1031,29 @@ chmod 600 /root/crowdsec-vps-node/node.env
 
 EXPECTED_VPS_SCRIPT_VERSION=$(shell_quote "${REQUIRED_VPS_SCRIPT_VERSION}")
 VPS_SCRIPT_URL=$(shell_quote "${VPS_SCRIPT_RAW_URL}")
-CACHE_BUSTER="$(date +%s)-$$"
+CACHE_BUSTER="\$(date +%s)-\$\$"
 rm -f /root/crowdsec-vps-node/vps.sh /root/crowdsec-vps-node/vps.sh.tmp
 
 download_vps_script() {
-  local url="$1"
+  local url="\$1"
   if command -v curl >/dev/null 2>&1; then
     curl -fL --retry 3 --connect-timeout 20 \
       -H "Cache-Control: no-cache" \
       -H "Pragma: no-cache" \
       -H "Expires: 0" \
-      "${url}" -o /root/crowdsec-vps-node/vps.sh.tmp
-    return $?
+      "\${url}" -o /root/crowdsec-vps-node/vps.sh.tmp
+    return \$?
   fi
   if command -v wget >/dev/null 2>&1; then
-    wget --no-cache --tries=3 --timeout=20 -O /root/crowdsec-vps-node/vps.sh.tmp "${url}"
-    return $?
+    wget --no-cache --tries=3 --timeout=20 -O /root/crowdsec-vps-node/vps.sh.tmp "\${url}"
+    return \$?
   fi
   return 127
 }
 
-if ! download_vps_script "${VPS_SCRIPT_URL}?cache_bust=${CACHE_BUSTER}"; then
+if ! download_vps_script "\${VPS_SCRIPT_URL}?cache_bust=\${CACHE_BUSTER}"; then
   echo "WARN: download with cache buster failed, retrying plain URL." >&2
-  download_vps_script "${VPS_SCRIPT_URL}"
+  download_vps_script "\${VPS_SCRIPT_URL}"
 fi
 
 if [[ ! -s /root/crowdsec-vps-node/vps.sh.tmp ]]; then
@@ -1066,13 +1069,13 @@ if ! grep -q -- '--unattended' /root/crowdsec-vps-node/vps.sh && ! grep -q 'CROW
   exit 90
 fi
 
-DOWNLOADED_VPS_SCRIPT_VERSION="$(grep -E '^SCRIPT_VERSION=' /root/crowdsec-vps-node/vps.sh | head -n1 | cut -d= -f2- | tr -d '"\047[:space:]')"
-echo "Downloaded vps.sh version: ${DOWNLOADED_VPS_SCRIPT_VERSION:-unknown}"
-echo "Required vps.sh version: ${EXPECTED_VPS_SCRIPT_VERSION}"
-if [[ "${DOWNLOADED_VPS_SCRIPT_VERSION:-}" != "${EXPECTED_VPS_SCRIPT_VERSION}" ]]; then
+DOWNLOADED_VPS_SCRIPT_VERSION="\$(grep -E '^SCRIPT_VERSION=' /root/crowdsec-vps-node/vps.sh | head -n1 | cut -d= -f2- | tr -d '"\047[:space:]')"
+echo "Downloaded vps.sh version: \${DOWNLOADED_VPS_SCRIPT_VERSION:-unknown}"
+echo "Required vps.sh version: \${EXPECTED_VPS_SCRIPT_VERSION}"
+if [[ "\${DOWNLOADED_VPS_SCRIPT_VERSION:-}" != "\${EXPECTED_VPS_SCRIPT_VERSION}" ]]; then
   echo "ERROR: downloaded vps.sh version mismatch. This usually means an old cached script was downloaded." >&2
-  echo "Expected: ${EXPECTED_VPS_SCRIPT_VERSION}" >&2
-  echo "Got: ${DOWNLOADED_VPS_SCRIPT_VERSION:-unknown}" >&2
+  echo "Expected: \${EXPECTED_VPS_SCRIPT_VERSION}" >&2
+  echo "Got: \${DOWNLOADED_VPS_SCRIPT_VERSION:-unknown}" >&2
   exit 91
 fi
 
@@ -1080,7 +1083,6 @@ TERM=xterm CROWDSEC_VPS_UNATTENDED=1 bash /root/crowdsec-vps-node/vps.sh --unatt
 REMOTE
   chmod 600 "${out}"
 }
-
 remote_ssh_base() {
   SSHPASS="${ssh_password}" sshpass -e ssh \
     -o StrictHostKeyChecking=accept-new \
@@ -4859,7 +4861,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.9-remote-vps-clean-install-log-version-fix"
+SCRIPT_VERSION="v0.7.10-remote-runner-heredoc-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5405,7 +5407,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.9-remote-vps-clean-install-log-version-fix"
+SCRIPT_VERSION="v0.7.10-remote-runner-heredoc-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -5650,7 +5652,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.9-remote-vps-clean-install-log-version-fix"
+SCRIPT_VERSION="v0.7.10-remote-runner-heredoc-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
