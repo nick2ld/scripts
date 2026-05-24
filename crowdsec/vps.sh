@@ -142,7 +142,7 @@ change_language() {
 CONFIG_DIR="/root/crowdsec-vps-node"
 ENV_FILE="${CONFIG_DIR}/node.env"
 FAIL2BAN_BACKUP_DIR="${CONFIG_DIR}/fail2ban-backup"
-SCRIPT_VERSION="v0.4.8-register-diagnostics-log-clean-fix"
+SCRIPT_VERSION="v0.4.9-direct-machine-credentials-fix"
 SCRIPT_RELEASE_DATE="2026-05-22"
 LOCK_FILE="/var/lock/crowdsec-vps-node.lock"
 LOCK_FD=200
@@ -435,7 +435,7 @@ load_env_if_exists() {
       value="${line#*=}"
       key="$(printf '%s' "${key}" | tr -cd 'A-Za-z0-9_')"
       case "${key}" in
-        CENTRAL_LAPI_URL|AUTO_REG_TOKEN|SHARED_BOUNCER_KEY|MACHINE_NAME|INSTALL_FIREWALL_BOUNCER|REMOVE_FAIL2BAN|COLLECTION_SELECTION_MODE|SELECTED_COLLECTIONS|HUB_ITEM_SELECTION_MODE|SELECTED_HUB_ITEMS|FIREWALL_BOUNCER_PACKAGE|FIREWALL_BOUNCER_MODE|UI_LANG) ;;
+        CENTRAL_LAPI_URL|AUTO_REG_TOKEN|SHARED_BOUNCER_KEY|MACHINE_NAME|DIRECT_MACHINE_CREDENTIALS|LAPI_MACHINE_LOGIN|LAPI_MACHINE_PASSWORD|INSTALL_FIREWALL_BOUNCER|REMOVE_FAIL2BAN|COLLECTION_SELECTION_MODE|SELECTED_COLLECTIONS|HUB_ITEM_SELECTION_MODE|SELECTED_HUB_ITEMS|FIREWALL_BOUNCER_PACKAGE|FIREWALL_BOUNCER_MODE|UI_LANG) ;;
         *) continue ;;
       esac
       parsed="${value}"
@@ -455,6 +455,9 @@ load_env_if_exists() {
   CENTRAL_LAPI_URL="${CENTRAL_LAPI_URL:-}"
   normalize_lapi_url
   AUTO_REG_TOKEN="${AUTO_REG_TOKEN:-}"
+  DIRECT_MACHINE_CREDENTIALS="${DIRECT_MACHINE_CREDENTIALS:-no}"
+  LAPI_MACHINE_LOGIN="${LAPI_MACHINE_LOGIN:-${MACHINE_NAME:-}}"
+  LAPI_MACHINE_PASSWORD="${LAPI_MACHINE_PASSWORD:-}"
   SHARED_BOUNCER_KEY="${SHARED_BOUNCER_KEY:-}"
   MACHINE_NAME="${MACHINE_NAME:-$(hostname -f 2>/dev/null || hostname)}"
   local original_machine_name="${MACHINE_NAME}"
@@ -462,6 +465,9 @@ load_env_if_exists() {
   if [[ -n "${original_machine_name}" && "${original_machine_name}" != "${MACHINE_NAME}" ]]; then
     warn "$(T "Machine name был нормализован для CrowdSec:" "Machine name was normalized for CrowdSec:") ${original_machine_name} -> ${MACHINE_NAME}"
   fi
+  [[ -n "${LAPI_MACHINE_LOGIN:-}" ]] || LAPI_MACHINE_LOGIN="${MACHINE_NAME}"
+  LAPI_MACHINE_LOGIN="$(sanitize_machine_name "${LAPI_MACHINE_LOGIN}")"
+  case "${DIRECT_MACHINE_CREDENTIALS:-no}" in yes|true|1) DIRECT_MACHINE_CREDENTIALS="yes" ;; *) DIRECT_MACHINE_CREDENTIALS="no" ;; esac
   INSTALL_FIREWALL_BOUNCER="${INSTALL_FIREWALL_BOUNCER:-yes}"
   REMOVE_FAIL2BAN="${REMOVE_FAIL2BAN:-yes}"
   COLLECTION_SELECTION_MODE="${COLLECTION_SELECTION_MODE:-manual}"
@@ -485,6 +491,9 @@ CENTRAL_LAPI_URL=$(quote_env "${CENTRAL_LAPI_URL}")
 AUTO_REG_TOKEN=$(quote_env "${AUTO_REG_TOKEN}")
 SHARED_BOUNCER_KEY=$(quote_env "${SHARED_BOUNCER_KEY}")
 MACHINE_NAME=$(quote_env "${MACHINE_NAME}")
+DIRECT_MACHINE_CREDENTIALS=$(quote_env "${DIRECT_MACHINE_CREDENTIALS:-no}")
+LAPI_MACHINE_LOGIN=$(quote_env "${LAPI_MACHINE_LOGIN:-${MACHINE_NAME}}")
+LAPI_MACHINE_PASSWORD=$(quote_env "${LAPI_MACHINE_PASSWORD:-}")
 INSTALL_FIREWALL_BOUNCER=$(quote_env "${INSTALL_FIREWALL_BOUNCER}")
 REMOVE_FAIL2BAN=$(quote_env "${REMOVE_FAIL2BAN}")
 COLLECTION_SELECTION_MODE=$(quote_env "${COLLECTION_SELECTION_MODE}")
@@ -539,8 +548,10 @@ ask_settings() {
     if [[ "${CENTRAL_LAPI_URL}" =~ ^http:// ]]; then
       tui_yesno " Предупреждение " "Central LAPI указан через HTTP, токены и ключи передаются без TLS. Продолжить?" || exit 1
     fi
-    [[ -n "${AUTO_REG_TOKEN}" ]] || fail "$(T "AUTO_REG_TOKEN не может быть пустым." "AUTO_REG_TOKEN cannot be empty.")"
-    [[ "${AUTO_REG_TOKEN}" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "$(T "AUTO_REG_TOKEN содержит недопустимые символы." "AUTO_REG_TOKEN contains invalid characters.")"
+    if [[ "${DIRECT_MACHINE_CREDENTIALS:-no}" != "yes" ]]; then
+      [[ -n "${AUTO_REG_TOKEN}" ]] || fail "$(T "AUTO_REG_TOKEN не может быть пустым." "AUTO_REG_TOKEN cannot be empty.")"
+      [[ "${AUTO_REG_TOKEN}" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "$(T "AUTO_REG_TOKEN содержит недопустимые символы." "AUTO_REG_TOKEN contains invalid characters.")"
+    fi
     if [[ -n "${SHARED_BOUNCER_KEY}" ]] && [[ ! "${SHARED_BOUNCER_KEY}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
       fail "$(T "SHARED_BOUNCER_KEY содержит недопустимые символы." "SHARED_BOUNCER_KEY contains invalid characters.")"
     fi
@@ -994,6 +1005,37 @@ preflight_lapi_access() {
   ok "Central LAPI доступен."
 }
 
+write_direct_lapi_credentials() {
+  load_env_if_exists
+  normalize_lapi_url
+  MACHINE_NAME="$(sanitize_machine_name "${MACHINE_NAME}")"
+  [[ -n "${LAPI_MACHINE_LOGIN:-}" ]] || LAPI_MACHINE_LOGIN="${MACHINE_NAME}"
+  LAPI_MACHINE_LOGIN="$(sanitize_machine_name "${LAPI_MACHINE_LOGIN}")"
+  [[ -n "${CENTRAL_LAPI_URL:-}" ]] || fail "CENTRAL_LAPI_URL is empty."
+  [[ -n "${LAPI_MACHINE_PASSWORD:-}" ]] || fail "LAPI_MACHINE_PASSWORD is empty in direct machine credentials mode."
+
+  log "Использую machine credentials, заранее созданные на central: ${LAPI_MACHINE_LOGIN}"
+  mkdir -p /etc/crowdsec
+  chmod 750 /etc/crowdsec 2>/dev/null || true
+  if [[ -f /etc/crowdsec/local_api_credentials.yaml ]]; then
+    cp -a /etc/crowdsec/local_api_credentials.yaml "/etc/crowdsec/local_api_credentials.yaml.backup.direct.$(date +%F-%H%M%S)" || true
+  fi
+  cat > /etc/crowdsec/local_api_credentials.yaml <<EOF
+url: ${CENTRAL_LAPI_URL}
+login: ${LAPI_MACHINE_LOGIN}
+password: ${LAPI_MACHINE_PASSWORD}
+EOF
+  chmod 600 /etc/crowdsec/local_api_credentials.yaml
+
+  if NO_COLOR=1 CLICOLOR=0 TERM=dumb cscli lapi status >/tmp/crowdsec-lapi-status.log 2>&1; then
+    ok "Machine credentials работают, central LAPI доступен."
+  else
+    warn "cscli lapi status пока не прошёл. Показываю диагностику, но продолжаю настройку."
+    sed -E 's/(password: ).*/\1***hidden***/; s/(login: ).*/\1***hidden***/' /etc/crowdsec/local_api_credentials.yaml || true
+    cat /tmp/crowdsec-lapi-status.log || true
+  fi
+}
+
 register_to_central_lapi() {
   load_env_if_exists
   normalize_lapi_url
@@ -1003,6 +1045,11 @@ register_to_central_lapi() {
   log "Регистрирую VPS на центральном LAPI как machine: ${MACHINE_NAME}"
   mkdir -p /etc/crowdsec
   preflight_lapi_access
+
+  if [[ "${DIRECT_MACHINE_CREDENTIALS:-no}" == "yes" || -n "${LAPI_MACHINE_PASSWORD:-}" ]]; then
+    write_direct_lapi_credentials
+    return 0
+  fi
 
   if [[ -f /etc/crowdsec/local_api_credentials.yaml ]] \
     && grep -q "url: ${CENTRAL_LAPI_URL}" /etc/crowdsec/local_api_credentials.yaml \
@@ -1511,7 +1558,9 @@ run_unattended_install() {
   MACHINE_NAME="$(sanitize_machine_name "${MACHINE_NAME:-}")"
   save_env
   [[ -n "${CENTRAL_LAPI_URL:-}" ]] || fail "$(T "CENTRAL_LAPI_URL не задан в ${ENV_FILE}." "CENTRAL_LAPI_URL is not set in ${ENV_FILE}.")"
-  [[ -n "${AUTO_REG_TOKEN:-}" ]] || fail "$(T "AUTO_REG_TOKEN не задан в ${ENV_FILE}." "AUTO_REG_TOKEN is not set in ${ENV_FILE}.")"
+  if [[ "${DIRECT_MACHINE_CREDENTIALS:-no}" != "yes" && -z "${LAPI_MACHINE_PASSWORD:-}" ]]; then
+    [[ -n "${AUTO_REG_TOKEN:-}" ]] || fail "$(T "AUTO_REG_TOKEN не задан в ${ENV_FILE}." "AUTO_REG_TOKEN is not set in ${ENV_FILE}.")"
+  fi
   [[ -n "${SHARED_BOUNCER_KEY:-}" ]] || fail "$(T "SHARED_BOUNCER_KEY не задан в ${ENV_FILE}." "SHARED_BOUNCER_KEY is not set in ${ENV_FILE}.")"
   [[ -n "${MACHINE_NAME:-}" ]] || fail "$(T "MACHINE_NAME не задан в ${ENV_FILE}." "MACHINE_NAME is not set in ${ENV_FILE}.")"
   full_install yes

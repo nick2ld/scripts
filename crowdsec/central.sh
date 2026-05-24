@@ -149,11 +149,11 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.12-remote-log-clean-vps-048-fix"
+SCRIPT_VERSION="v0.7.13-direct-machine-credentials-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
-REQUIRED_VPS_SCRIPT_VERSION="v0.4.8-register-diagnostics-log-clean-fix"
+REQUIRED_VPS_SCRIPT_VERSION="v0.4.9-direct-machine-credentials-fix"
 SYSLOG_DEVICES_FILE="${CONFIG_DIR}/bouncer-syslog-devices.tsv"
 REMOTE_SYSLOG_DIR="/var/log/crowdsec-remote"
 REMOTE_SYSLOG_DIAG_DIR="/var/log/crowdsec-remote-diagnostic"
@@ -972,6 +972,11 @@ create_vps_connection_apply_common() {
   if ! command -v docker >/dev/null 2>&1 || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
     fail "$(T "Контейнер crowdsec не запущен. Host cscli не используется." "The crowdsec container is not running. Host cscli is not used.")"
   fi
+  echo "Удаление старой machine: ${node_name}"
+  docker exec crowdsec cscli machines delete "${node_name}" || true
+  echo "Создание machine credentials в Docker LAPI: ${node_name}"
+  docker exec crowdsec cscli machines add "${node_name}" --password "${machine_password}" --force >/dev/null
+
   docker exec crowdsec cscli bouncers delete "${node_name}" || true
   echo "Регистрация нового bouncer в Docker LAPI: ${node_name}"
   docker exec crowdsec cscli bouncers add "${node_name}" --key "${bouncer_key}"
@@ -1035,6 +1040,9 @@ CENTRAL_LAPI_URL=$(shell_quote "${VPS_LAPI_URL}")
 AUTO_REG_TOKEN=$(shell_quote "${AUTO_REG_TOKEN}")
 SHARED_BOUNCER_KEY=$(shell_quote "${bouncer_key}")
 MACHINE_NAME=$(shell_quote "${node_name}")
+DIRECT_MACHINE_CREDENTIALS=yes
+LAPI_MACHINE_LOGIN=$(shell_quote "${node_name}")
+LAPI_MACHINE_PASSWORD=$(shell_quote "${machine_password}")
 INSTALL_FIREWALL_BOUNCER=yes
 REMOVE_FAIL2BAN=yes
 COLLECTION_SELECTION_MODE=$(shell_quote "${remote_collection_mode:-auto}")
@@ -1137,7 +1145,7 @@ create_named_vps_remote_install() {
   safe_source_env
   local rc tmp summary
   local node_name_raw vps_ip_raw ssh_host_raw ssh_port_raw ssh_user_raw ssh_password_raw remote_collection_mode_raw
-  local vps_cidr runner
+  local vps_cidr runner machine_password
 
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
     set +e
@@ -1242,6 +1250,7 @@ create_named_vps_remote_install() {
   fi
 
   bouncer_key="$(openssl rand -hex 32)"
+  machine_password="$(openssl rand -hex 32)"
 
   if ! run_with_live_progress "$(T "Подготовка подключения VPS" "Preparing VPS connection")" create_vps_connection_apply_common; then
     return 1
@@ -1308,11 +1317,8 @@ create_named_vps_remote_install() {
   fi
   rm -f "${runner}"
 
-  if run_with_live_progress "$(T "Ожидание и validate ${node_name}" "Waiting and validating ${node_name}")" wait_for_machine_and_validate "${node_name}" 300; then
-    run_with_live_progress "$(T "Перезапуск CrowdSec на VPS после validate" "Restarting CrowdSec on VPS after validate")" remote_restart_vps_services_after_validate || true
-  else
-    warn "$(T "Machine не была подтверждена автоматически. После ручного validate перезапусти CrowdSec на VPS." "Machine was not validated automatically. After manual validate, restart CrowdSec on the VPS.")"
-  fi
+  echo "$(T "Machine credentials были заранее созданы на central, поэтому auto-registration/validate не требуется." "Machine credentials were created on central in advance, so auto-registration/validate is not required.")"
+  run_with_live_progress "$(T "Проверка и перезапуск CrowdSec на VPS" "Checking and restarting CrowdSec on VPS")" remote_restart_vps_services_after_validate || true
 
   tmp="$(mktemp)"
   {
@@ -1376,6 +1382,7 @@ create_named_vps_bouncer_key_manual() {
   fi
 
   bouncer_key="$(openssl rand -hex 32)"
+  machine_password="$(openssl rand -hex 32)"
 
   create_named_vps_bouncer_key_apply() {
     echo "Удаление старого bouncer: ${node_name}"
@@ -1689,6 +1696,7 @@ create_openwrt_bouncer_connection() {
   fi
 
   bouncer_key="$(openssl rand -hex 32)"
+  machine_password="$(openssl rand -hex 32)"
 
   create_openwrt_bouncer_apply() {
     echo "Удаление старого bouncer: ${node_name}"
@@ -4043,6 +4051,7 @@ create_openwrt_bouncer_connection() {
 
   add_allowed_range_exact "${router_cidr}"
   bouncer_key="$(openssl rand -hex 32)"
+  machine_password="$(openssl rand -hex 32)"
 
   create_bouncer_device_apply() {
     echo "Удаление старого bouncer: ${node_name}"
@@ -4883,7 +4892,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.12-remote-log-clean-vps-048-fix"
+SCRIPT_VERSION="v0.7.13-direct-machine-credentials-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5429,7 +5438,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.12-remote-log-clean-vps-048-fix"
+SCRIPT_VERSION="v0.7.13-direct-machine-credentials-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -5674,7 +5683,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.12-remote-log-clean-vps-048-fix"
+SCRIPT_VERSION="v0.7.13-direct-machine-credentials-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
