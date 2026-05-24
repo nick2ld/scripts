@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.16-openwrt-forwarder-worker-fix"
+SCRIPT_VERSION="v0.7.17-openwrt-ssh-auto-apply-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4292,6 +4292,82 @@ EOF
   printf '%s\t%s\n' "${install_script}" "${uninstall_script}"
 }
 
+
+apply_openwrt_helper_via_ssh() {
+  local router_ip="$1" helper_script="$2" action_title="$3"
+  local ssh_host ssh_port ssh_user ssh_password rc
+
+  ssh_host="${router_ip}"
+  ssh_port="22"
+  ssh_user="root"
+  ssh_password=""
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    set +e
+    ssh_host="$(whiptail --title " OpenWrt SSH " --inputbox "$(T "IP или hostname OpenWrt для SSH." "OpenWrt IP or hostname for SSH.")" 10 82 "${router_ip}" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+
+    set +e
+    ssh_port="$(whiptail --title " OpenWrt SSH " --inputbox "$(T "SSH порт OpenWrt" "OpenWrt SSH port")" 10 70 "22" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+
+    set +e
+    ssh_user="$(whiptail --title " OpenWrt SSH " --inputbox "$(T "SSH логин OpenWrt. Обычно root." "OpenWrt SSH login. Usually root.")" 10 78 "root" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+
+    set +e
+    ssh_password="$(whiptail --title " OpenWrt SSH " --passwordbox "$(T "SSH пароль OpenWrt. Если настроен вход по ключу, оставь пустым." "OpenWrt SSH password. If key login is configured, leave empty.")" 11 84 "" 3>&1 1>&2 2>&3)"
+    rc=$?
+    set -e
+    [[ "${rc}" -eq 0 ]] || return 0
+  else
+    read -rp "$(T "SSH host OpenWrt [${router_ip}]: " "OpenWrt SSH host [${router_ip}]: ")" ssh_host || return 0
+    ssh_host="${ssh_host:-${router_ip}}"
+    read -rp "$(T "SSH порт OpenWrt [22]: " "OpenWrt SSH port [22]: ")" ssh_port || return 0
+    ssh_port="${ssh_port:-22}"
+    read -rp "$(T "SSH логин OpenWrt [root]: " "OpenWrt SSH login [root]: ")" ssh_user || return 0
+    ssh_user="${ssh_user:-root}"
+    read -rsp "$(T "SSH пароль OpenWrt, пусто для ключа: " "OpenWrt SSH password, empty for key: ")" ssh_password || return 0
+    echo
+  fi
+
+  ssh_host="$(printf '%s' "${ssh_host:-}" | tr -cd 'A-Za-z0-9._:-')"
+  ssh_port="$(printf '%s' "${ssh_port:-22}" | tr -cd '0-9')"
+  ssh_user="$(printf '%s' "${ssh_user:-root}" | tr -cd 'A-Za-z0-9._-')"
+  [[ -n "${ssh_host}" ]] || fail "$(T "SSH host OpenWrt пустой." "OpenWrt SSH host is empty.")"
+  is_valid_port "${ssh_port}" || fail "$(T "Некорректный SSH порт OpenWrt." "Invalid OpenWrt SSH port.")"
+  [[ -n "${ssh_user}" ]] || fail "$(T "SSH логин OpenWrt пустой." "OpenWrt SSH login is empty.")"
+  [[ -f "${helper_script}" ]] || fail "$(T "Helper-скрипт не найден:" "Helper script not found:") ${helper_script}"
+
+  openwrt_ssh_apply_inner() {
+    if [[ -n "${ssh_password}" ]]; then
+      ensure_remote_ssh_tools >/dev/null
+      SSHPASS="${ssh_password}" sshpass -e ssh \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile=/root/.ssh/known_hosts \
+        -o ConnectTimeout=20 \
+        -p "${ssh_port}" \
+        "${ssh_user}@${ssh_host}" 'sh -s' < "${helper_script}"
+    else
+      command -v ssh >/dev/null 2>&1 || apt-get install -y openssh-client >/dev/null
+      ssh \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile=/root/.ssh/known_hosts \
+        -o ConnectTimeout=20 \
+        -p "${ssh_port}" \
+        "${ssh_user}@${ssh_host}" 'sh -s' < "${helper_script}"
+    fi
+  }
+
+  run_with_live_progress "${action_title}" openwrt_ssh_apply_inner
+}
+
 configure_device_event_intake() {
   safe_source_env
   local rec name ip cidr port proto mode tmp
@@ -4314,7 +4390,7 @@ configure_device_event_intake() {
 
     port="$(whiptail --title " $(T "Syslog порт" "Syslog port") " --inputbox "$(T "Порт syslog на central.\n\n5140 выбран специально, чтобы не занимать привилегированный 514." "Syslog port on central.\n\n5140 is used to avoid the privileged 514 port.")" 11 86 "${DEFAULT_REMOTE_SYSLOG_PORT}" 3>&1 1>&2 2>&3)" || return 0
 
-    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Включить" "Enable")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Скрипт настроит central на приём копии syslog от выбранного устройства.\n\nПо умолчанию в CrowdSec попадут только отфильтрованные security/firewall/auth события. Весь лог НЕ будет читаться CrowdSec.\n\nСкрипт НЕ меняет роутер автоматически, а только покажет команды для отдельного OpenWrt-сервиса logread-forwarder." "The script will configure central to receive a syslog copy from the selected device.\n\nBy default only filtered security/firewall/auth events go to CrowdSec. The full log is NOT read by CrowdSec.\n\nThe script does NOT change the router automatically, it only shows commands for a separate OpenWrt logread-forwarder service.")" 17 96 || return 0
+    whiptail --title " $(T "Подтверждение" "Confirmation") " --yes-button "$(T "Включить" "Enable")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Скрипт настроит central на приём копии syslog от выбранного устройства.\n\nПо умолчанию в CrowdSec попадут только отфильтрованные security/firewall/auth события. Весь лог НЕ будет читаться CrowdSec.\n\nСкрипт настроит central и затем предложит сразу применить настройку на OpenWrt по SSH. Ручное копирование длинных команд больше не требуется." "The script will configure central to receive a syslog copy from the selected device.\n\nBy default only filtered security/firewall/auth events go to CrowdSec. The full log is NOT read by CrowdSec.\n\nThe script configures central and then offers to apply the OpenWrt setup over SSH immediately. Manual copying of long commands is no longer required.")" 17 96 || return 0
   else
     echo "$(T "Режим логов:" "Log mode:")"
     echo "1) filtered - $(T "только security/firewall/auth события для CrowdSec" "only security/firewall/auth events for CrowdSec")"
@@ -4363,11 +4439,12 @@ configure_device_event_intake() {
     echo "OpenWrt 25 рекомендуемая схема: отдельный worker + procd init."
     echo "Скрипт больше не вставляет длинную команду в procd_set_param command, потому что OpenWrt/LuCI/терминал ломают переносы, и получается: Command failed: Not found."
     echo
-    echo "Самый удобный способ - выполнить с central одной короткой командой:"
-    echo "ssh root@${ip} 'sh -s' < ${install_helper}"
-    echo
-    echo "Если SSH с central на роутер недоступен, готовый install-скрипт лежит на central здесь:"
+    echo "OpenWrt helper install script был создан на central:"
     echo "${install_helper}"
+    echo
+    echo "Скрипт может применить его на OpenWrt автоматически по SSH. Ручное копирование не требуется."
+    echo "Fallback-команда, если автоматический SSH недоступен:"
+    echo "ssh root@${ip} 'sh -s' < ${install_helper}"
     echo
     echo "Готовый скрипт удаления схемы на central:"
     echo "${uninstall_helper}"
@@ -4392,6 +4469,40 @@ configure_device_event_intake() {
     echo "sudo docker exec crowdsec cscli metrics"
   } >"${tmp}"
   show_file "$(T "События от устройства" "Device events")" "${tmp}"
+
+  local apply_now_rc=0
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    whiptail --title " OpenWrt SSH " --yes-button "$(T "Применить" "Apply")" --no-button "$(T "Не сейчас" "Not now")" --yesno "$(T "Применить настройку log-forwarder на OpenWrt сейчас по SSH?
+
+Это создаст /usr/bin/crowdsec-log-forwarder и /etc/init.d/crowdsec-log-forwarder на роутере, откатит старый system.@system[0].log_ip и перезапустит сервис.
+
+Ручное копирование команд не нужно." "Apply the log-forwarder setup to OpenWrt now over SSH?
+
+This creates /usr/bin/crowdsec-log-forwarder and /etc/init.d/crowdsec-log-forwarder on the router, reverts old system.@system[0].log_ip, and restarts the service.
+
+No manual command copying is needed.")" 16 92 || apply_now_rc=$?
+  else
+    read -rp "$(T "Применить настройку на OpenWrt по SSH сейчас? [y/N]: " "Apply setup to OpenWrt over SSH now? [y/N]: ")" apply_ans || apply_ans=""
+    [[ "${apply_ans:-}" =~ ^[YyДд]$ ]] || apply_now_rc=1
+  fi
+  if [[ "${apply_now_rc}" -eq 0 ]]; then
+    if apply_openwrt_helper_via_ssh "${ip}" "${install_helper}" "$(T "Применение настройки на OpenWrt" "Applying setup to OpenWrt")"; then
+      if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+        whiptail --title " $(T "Готово" "Done") " --msgbox "$(T "Настройка OpenWrt применена по SSH. Проверь события в меню просмотра логов устройства." "OpenWrt setup was applied over SSH. Check events in the device log viewer.")" 9 82 || true
+      else
+        ok "$(T "Настройка OpenWrt применена по SSH." "OpenWrt setup applied over SSH.")"
+      fi
+    else
+      if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]]; then
+        whiptail --title " $(T "Ошибка SSH" "SSH error") " --msgbox "$(T "Автоматическое применение по SSH не удалось. Helper-скрипт сохранён на central, его можно применить позже." "Automatic SSH apply failed. The helper script is saved on central and can be applied later.")
+
+${install_helper}" 12 90 || true
+      else
+        warn "$(T "Автоматическое применение по SSH не удалось. Helper-скрипт сохранён:" "Automatic SSH apply failed. Helper script saved:") ${install_helper}"
+      fi
+    fi
+  fi
+
   rm -f "${tmp}"
 }
 
@@ -4403,7 +4514,7 @@ disable_device_event_intake() {
   ip="$(printf '%s' "${rec}" | cut -f3)"
   if [[ "${ip}" == *:* ]]; then cidr="${ip}/128"; else cidr="${ip}/32"; fi
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    whiptail --title " $(T "Отключить intake" "Disable intake") " --yes-button "$(T "Отключить" "Disable")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Отключить syslog intake для устройства?\n\nЭто удалит запись из списка intake и пересоберёт UFW. Настройку отправки логов на самом роутере нужно удалить отдельно." "Disable syslog intake for the device?\n\nThis removes the intake record and rebuilds UFW. Log forwarding on the router itself must be removed separately.")\n\n${name} [${cidr}]" 14 92 || return 0
+    whiptail --title " $(T "Отключить intake" "Disable intake") " --yes-button "$(T "Отключить" "Disable")" --no-button "$(T "Отмена" "Cancel")" --yesno "$(T "Отключить syslog intake для устройства?\n\nЭто удалит запись из списка intake и пересоберёт UFW. После этого скрипт предложит удалить forwarder на OpenWrt по SSH автоматически." "Disable syslog intake for the device?\n\nThis removes the intake record and rebuilds UFW. After this, the script will offer to remove the OpenWrt forwarder over SSH automatically.")\n\n${name} [${cidr}]" 14 92 || return 0
   fi
   disable_device_event_intake_apply() {
     if [[ -f "${SYSLOG_DEVICES_FILE}" ]]; then
@@ -5044,7 +5155,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.16-openwrt-forwarder-worker-fix"
+SCRIPT_VERSION="v0.7.17-openwrt-ssh-auto-apply-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5597,7 +5708,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.16-openwrt-forwarder-worker-fix"
+SCRIPT_VERSION="v0.7.17-openwrt-ssh-auto-apply-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -5842,7 +5953,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.16-openwrt-forwarder-worker-fix"
+SCRIPT_VERSION="v0.7.17-openwrt-ssh-auto-apply-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
