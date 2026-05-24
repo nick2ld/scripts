@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.6-first-install-manager-fix"
+SCRIPT_VERSION="v0.7.7-ufw-ssh-connection-unset-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -2015,11 +2015,21 @@ configure_ufw_full_apply() {
   ufw default allow outgoing
 
   echo "Сохранение SSH-доступа..."
-  client_ip="${SSH_CONNECTION%% *}"
+  # SSH_CONNECTION can be unset when the script is launched from a local console,
+  # VM/LXC console, cron-like wrapper, sudo without an SSH session, or some web terminals.
+  # With `set -u`, direct use of $SSH_CONNECTION breaks the firewall step.
+  local ssh_connection_value
+  ssh_connection_value="${SSH_CONNECTION:-}"
+  if [[ -n "${ssh_connection_value}" ]]; then
+    client_ip="${ssh_connection_value%% *}"
+  else
+    client_ip=""
+    echo "SSH_CONNECTION не задана: текущий SSH-клиент не определён, сохраняю доступ по SSH-портам без привязки к IP."
+  fi
   while IFS= read -r ssh_port; do
     [[ -n "${ssh_port}" ]] || continue
     ufw allow "${ssh_port}/tcp" comment "keep SSH port ${ssh_port}" || true
-    if [[ -n "${client_ip}" && "${client_ip}" != "${SSH_CONNECTION}" ]]; then
+    if [[ -n "${client_ip}" ]]; then
       ufw allow from "${client_ip}" to any port "${ssh_port}" proto tcp comment "keep current SSH client" || true
     fi
   done < <(get_sshd_ports)
@@ -4722,7 +4732,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.1-i18n-help-capi-menu"
+SCRIPT_VERSION="v0.7.7-ufw-ssh-connection-unset-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5268,7 +5278,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.5-manager-console-enroll-fix"
+SCRIPT_VERSION="v0.7.7-ufw-ssh-connection-unset-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -5513,7 +5523,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.6-manager-docker-audit-fix"
+SCRIPT_VERSION="v0.7.7-ufw-ssh-connection-unset-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
