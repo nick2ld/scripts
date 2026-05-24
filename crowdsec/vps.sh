@@ -130,7 +130,7 @@ change_language() {
 CONFIG_DIR="/root/crowdsec-vps-node"
 ENV_FILE="${CONFIG_DIR}/node.env"
 FAIL2BAN_BACKUP_DIR="${CONFIG_DIR}/fail2ban-backup"
-SCRIPT_VERSION="v0.4.3-remote-name-log-fix"
+SCRIPT_VERSION="v0.4.4-bouncer-policy-rcd-fix"
 SCRIPT_RELEASE_DATE="2026-05-22"
 LOCK_FILE="/var/lock/crowdsec-vps-node.lock"
 LOCK_FD=200
@@ -1001,6 +1001,56 @@ detect_firewall_bouncer_package() {
   save_env
 }
 
+with_policy_rcd_blocked() {
+  # Some Debian packages try to start services during post-install.
+  # For crowdsec-firewall-bouncer this can fail before we write the real
+  # central LAPI api_url/api_key config, leaving dpkg in a broken state.
+  # Temporarily block service autostart while apt/dpkg configures the package.
+  local policy="/usr/sbin/policy-rc.d"
+  local backup="" rc
+  if [[ -e "${policy}" ]]; then
+    backup="$(mktemp)"
+    cp -a "${policy}" "${backup}"
+  fi
+  cat > "${policy}" <<'EOF'
+#!/bin/sh
+exit 101
+EOF
+  chmod 755 "${policy}"
+
+  set +e
+  "$@"
+  rc=$?
+  set -e
+
+  if [[ -n "${backup}" && -e "${backup}" ]]; then
+    cp -a "${backup}" "${policy}"
+    rm -f "${backup}"
+  else
+    rm -f "${policy}"
+  fi
+  return "${rc}"
+}
+
+install_firewall_bouncer_package_safely() {
+  export DEBIAN_FRONTEND=noninteractive
+  local rc=0
+  set +e
+  with_policy_rcd_blocked apt-get install -y "${FIREWALL_BOUNCER_PACKAGE}"
+  rc=$?
+  if [[ "${rc}" -ne 0 ]]; then
+    warn "apt install вернул ошибку ${rc}. Пробую восстановить незавершённую установку bouncer через dpkg/apt."
+    with_policy_rcd_blocked dpkg --configure -a
+    rc=$?
+  fi
+  if [[ "${rc}" -ne 0 ]]; then
+    with_policy_rcd_blocked apt-get -f install -y
+    rc=$?
+  fi
+  set -e
+  return "${rc}"
+}
+
 install_firewall_bouncer() {
   load_env_if_exists
   if [[ "${INSTALL_FIREWALL_BOUNCER}" != "yes" ]]; then
@@ -1009,10 +1059,9 @@ install_firewall_bouncer() {
   fi
   detect_firewall_bouncer_package
   log "Устанавливаю CrowdSec firewall bouncer: ${FIREWALL_BOUNCER_PACKAGE}"
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get install -y "${FIREWALL_BOUNCER_PACKAGE}"
+  install_firewall_bouncer_package_safely
   [[ -f /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml ]] || fail "Не найден /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
-  cp -a /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml "/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.backup.node.$(date +%F-%H%M%S)"
+  cp -a /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml "/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.backup.node.$(date +%F-%H%M%S)" || true
   cat > /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml <<YAML
 mode: ${FIREWALL_BOUNCER_MODE}
 piddir: /var/run/
@@ -1029,7 +1078,14 @@ deny_log: false
 supported_decisions_types:
   - ban
 YAML
-  systemctl enable --now crowdsec-firewall-bouncer
+  systemctl daemon-reload || true
+  systemctl reset-failed crowdsec-firewall-bouncer || true
+  systemctl enable crowdsec-firewall-bouncer
+  if ! systemctl restart crowdsec-firewall-bouncer; then
+    systemctl status crowdsec-firewall-bouncer --no-pager -l || true
+    journalctl -u crowdsec-firewall-bouncer --no-pager -n 120 || true
+    fail "Firewall bouncer установлен, но не запустился после записи central LAPI config. Проверь api_url/api_key и доступность central LAPI."
+  fi
   ok "Firewall bouncer установлен и подключён к центральному LAPI."
 }
 
