@@ -149,11 +149,11 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.11-vps-047-version-check-fix"
+SCRIPT_VERSION="v0.7.12-remote-log-clean-vps-048-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
-REQUIRED_VPS_SCRIPT_VERSION="v0.4.7-dpkg-conffile-noninteractive-fix"
+REQUIRED_VPS_SCRIPT_VERSION="v0.4.8-register-diagnostics-log-clean-fix"
 SYSLOG_DEVICES_FILE="${CONFIG_DIR}/bouncer-syslog-devices.tsv"
 REMOTE_SYSLOG_DIR="/var/log/crowdsec-remote"
 REMOTE_SYSLOG_DIAG_DIR="/var/log/crowdsec-remote-diagnostic"
@@ -248,6 +248,16 @@ progress_clean_tail() {
   else
     printf '%s\n' "ожидание вывода команды..."
   fi
+}
+
+sanitize_remote_install_log_stream() {
+  # Keep UTF-8 text, remove ANSI escape sequences and control garbage from ssh/apt logs.
+  python3 -c 'import re, sys
+data = sys.stdin.buffer.read().decode("utf-8", "replace")
+data = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", data)
+data = data.replace("\r", "")
+data = "".join(ch for ch in data if ch in "\n\t" or ord(ch) >= 32)
+sys.stdout.write(data)'
 }
 
 run_with_live_progress() {
@@ -1006,7 +1016,15 @@ build_remote_vps_installer_script() {
 #!/usr/bin/env bash
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
-export TERM="${TERM:-xterm}"
+export APT_LISTCHANGES_FRONTEND=none
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+export UCF_FORCE_CONFFNEW=1
+export NO_COLOR=1
+export CLICOLOR=0
+export TERM=dumb
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
 export CROWDSEC_VPS_UNATTENDED=1
 
 mkdir -p /root/crowdsec-vps-node
@@ -1263,7 +1281,7 @@ create_named_vps_remote_install() {
       echo
       echo "Remote installer exit code: ${step_rc}"
       return "${step_rc}"
-    } 2>&1 | tee -a "${remote_install_log}"
+    } 2>&1 | sanitize_remote_install_log_stream | tee -a "${remote_install_log}"
     return "${PIPESTATUS[0]}"
   }
 
@@ -1279,6 +1297,10 @@ create_named_vps_remote_install() {
       echo "$(T "Последние строки лога:" "Last log lines:")"
       echo
       tail -n 160 "${remote_install_log}" 2>/dev/null || true
+      echo
+      echo "$(T "Подсказка:" "Hint:")"
+      echo "$(T "Если ошибка на этапе регистрации machine, проверь реальный исходящий IP VPS в логе и allowed_ranges central LAPI." "If the error is at machine registration, check the VPS outgoing IP in the log and central LAPI allowed_ranges.")"
+      echo "$(T "Также проверь логи контейнера central:" "Also check central container logs:") docker logs crowdsec --tail 200"
     } > "${err_tmp}"
     show_file "$(T "Ошибка удалённой установки VPS" "Remote VPS installation error")" "${err_tmp}"
     rm -f "${err_tmp}" "${runner}"
@@ -4861,7 +4883,7 @@ run_menu_action() {
 # -----------------------------------------------------------------------------
 # v0.7.1 UX help, CAPI/Console enrollment and clearer menu overrides
 # -----------------------------------------------------------------------------
-SCRIPT_VERSION="v0.7.11-vps-047-version-check-fix"
+SCRIPT_VERSION="v0.7.12-remote-log-clean-vps-048-fix"
 
 show_help_text() {
   local title="$1" text="$2"
@@ -5407,7 +5429,7 @@ manage_device_events_menu() {
 # - Ключ enrollment не хранится в Manager как настройка. Manager должен видеть результат
 #   enroll через состояние того же engine.
 
-SCRIPT_VERSION="v0.7.11-vps-047-version-check-fix"
+SCRIPT_VERSION="v0.7.12-remote-log-clean-vps-048-fix"
 
 crowdsec_engine_context() {
   if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'crowdsec'; then
@@ -5652,7 +5674,7 @@ manage_protection_menu() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.11-vps-047-version-check-fix"
+SCRIPT_VERSION="v0.7.12-remote-log-clean-vps-048-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then

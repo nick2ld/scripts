@@ -21,6 +21,18 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+# Noninteractive remote install defaults. Keep logs readable and avoid apt/dpkg prompts.
+export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+export APT_LISTCHANGES_FRONTEND="${APT_LISTCHANGES_FRONTEND:-none}"
+export NEEDRESTART_MODE="${NEEDRESTART_MODE:-a}"
+export NEEDRESTART_SUSPEND="${NEEDRESTART_SUSPEND:-1}"
+export UCF_FORCE_CONFFNEW="${UCF_FORCE_CONFFNEW:-1}"
+export NO_COLOR="${NO_COLOR:-1}"
+export CLICOLOR="${CLICOLOR:-0}"
+export TERM="${TERM:-dumb}"
+export LANG="${LANG:-C.UTF-8}"
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+
 UI_LANG="${UI_LANG:-}"
 
 T() {
@@ -130,7 +142,7 @@ change_language() {
 CONFIG_DIR="/root/crowdsec-vps-node"
 ENV_FILE="${CONFIG_DIR}/node.env"
 FAIL2BAN_BACKUP_DIR="${CONFIG_DIR}/fail2ban-backup"
-SCRIPT_VERSION="v0.4.7-dpkg-conffile-noninteractive-fix"
+SCRIPT_VERSION="v0.4.8-register-diagnostics-log-clean-fix"
 SCRIPT_RELEASE_DATE="2026-05-22"
 LOCK_FILE="/var/lock/crowdsec-vps-node.lock"
 LOCK_FD=200
@@ -985,7 +997,7 @@ preflight_lapi_access() {
 register_to_central_lapi() {
   load_env_if_exists
   normalize_lapi_url
-  local reg_log reg_rc
+  local reg_log reg_rc reg_creds outgoing_ip
   MACHINE_NAME="$(sanitize_machine_name "${MACHINE_NAME}")"
   save_env
   log "Регистрирую VPS на центральном LAPI как machine: ${MACHINE_NAME}"
@@ -995,7 +1007,7 @@ register_to_central_lapi() {
   if [[ -f /etc/crowdsec/local_api_credentials.yaml ]] \
     && grep -q "url: ${CENTRAL_LAPI_URL}" /etc/crowdsec/local_api_credentials.yaml \
     && ! grep -q 'temporary' /etc/crowdsec/local_api_credentials.yaml; then
-    if cscli lapi status >/tmp/crowdsec-lapi-status.log 2>&1; then
+    if NO_COLOR=1 CLICOLOR=0 TERM=dumb cscli lapi status >/tmp/crowdsec-lapi-status.log 2>&1; then
       ok "VPS уже зарегистрирован на central LAPI, повторная регистрация не нужна."
       return 0
     fi
@@ -1004,40 +1016,64 @@ register_to_central_lapi() {
 
   systemctl stop crowdsec || true
 
-  # Do not delete local_api_credentials.yaml before registration.
-  # Some CrowdSec versions try to read it before writing new credentials.
-  if [[ ! -f /etc/crowdsec/local_api_credentials.yaml ]]; then
-    cat > /etc/crowdsec/local_api_credentials.yaml <<'YAML'
-url: http://127.0.0.1:8080
-login: temporary
-password: temporary
-YAML
+  if [[ -f /etc/crowdsec/local_api_credentials.yaml ]]; then
+    cp -a /etc/crowdsec/local_api_credentials.yaml "/etc/crowdsec/local_api_credentials.yaml.backup.before-register.$(date +%F-%H%M%S)" || true
   fi
 
-  cp -a /etc/crowdsec/local_api_credentials.yaml "/etc/crowdsec/local_api_credentials.yaml.backup.before-register.$(date +%F-%H%M%S)" || true
-
+  # Register into a fresh credentials file first. This avoids failures caused by
+  # stale, temporary, half-written or package-generated local_api_credentials.yaml.
   reg_log="$(mktemp)"
+  reg_creds="$(mktemp)"
+  rm -f "${reg_creds}"
+
   set +e
-  cscli lapi register \
+  NO_COLOR=1 CLICOLOR=0 TERM=dumb cscli lapi register \
     --machine "${MACHINE_NAME}" \
     --url "${CENTRAL_LAPI_URL}" \
     --token "${AUTO_REG_TOKEN}" \
-    --file /etc/crowdsec/local_api_credentials.yaml >"${reg_log}" 2>&1
+    --file "${reg_creds}" >"${reg_log}" 2>&1
   reg_rc=$?
   set -e
 
   if [[ "${reg_rc}" -ne 0 ]]; then
-    cat "${reg_log}"
-    rm -f "${reg_log}"
-    fail "Не удалось зарегистрировать VPS на central LAPI для machine '${MACHINE_NAME}'. Если /health доступен, чаще всего причина: неверный AUTO_REG_TOKEN, IP VPS не добавлен в allowed_ranges на central или machine с таким именем уже существует."
+    echo "cscli lapi register failed with exit code: ${reg_rc}"
+    echo
+    cat "${reg_log}" || true
+    echo
+    echo "Diagnostics:"
+    echo "- machine: ${MACHINE_NAME}"
+    echo "- central LAPI: ${CENTRAL_LAPI_URL}"
+    echo "- health endpoint:"
+    curl -fsS "${CENTRAL_LAPI_URL}/health" 2>&1 || true
+    echo
+    echo "- outgoing public IP of this VPS, if detectable:"
+    outgoing_ip="$( (curl -fsS --connect-timeout 10 https://api.ipify.org || curl -fsS --connect-timeout 10 https://ifconfig.me || true) 2>/dev/null )"
+    if [[ -n "${outgoing_ip}" ]]; then
+      echo "${outgoing_ip}"
+    else
+      echo "not detected"
+    fi
+    echo
+    echo "- local CrowdSec version:"
+    cscli version 2>&1 || true
+    echo
+    echo "- current local_api_credentials.yaml status:"
+    if [[ -f /etc/crowdsec/local_api_credentials.yaml ]]; then
+      sed -E 's/(password: ).*/\1***hidden***/; s/(login: ).*/\1***hidden***/' /etc/crowdsec/local_api_credentials.yaml 2>/dev/null || true
+    else
+      echo "missing"
+    fi
+    rm -f "${reg_log}" "${reg_creds}"
+    fail "Не удалось зарегистрировать VPS на central LAPI для machine '${MACHINE_NAME}'. Проверь на central: AUTO_REG_TOKEN, allowed_ranges с реальным исходящим IP VPS, отсутствие старой machine с тем же именем и docker logs crowdsec."
   fi
-  cat "${reg_log}" || true
-  rm -f "${reg_log}"
 
-  [[ -f /etc/crowdsec/local_api_credentials.yaml ]] || fail "Регистрация не создала /etc/crowdsec/local_api_credentials.yaml"
+  cat "${reg_log}" || true
+  [[ -s "${reg_creds}" ]] || { cat "${reg_log}" || true; rm -f "${reg_log}" "${reg_creds}"; fail "Регистрация прошла без ошибки, но cscli не создал credentials file."; }
+  install -m 600 "${reg_creds}" /etc/crowdsec/local_api_credentials.yaml
+  rm -f "${reg_log}" "${reg_creds}"
+
   ok "VPS зарегистрирован на центральном LAPI."
 }
-
 configure_agent_as_node() {
   log "Настраиваю CrowdSec как node, который отправляет события на центральный LAPI..."
   [[ -f /etc/crowdsec/config.yaml ]] || { warn "Не найден /etc/crowdsec/config.yaml, пропускаю."; return; }
