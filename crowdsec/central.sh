@@ -149,7 +149,7 @@ DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.23-clean-vps-menu"
+SCRIPT_VERSION="v0.7.24-vps-progress-timeout-fix"
 SCRIPT_RELEASE_DATE="2026-05-23"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -260,7 +260,7 @@ sys.stdout.write(data)'
 run_with_live_progress() {
   local title="$1"
   shift
-  local log_file rc_file rc pct tail_text
+  local log_file rc_file rc pct tail_text start_ts elapsed
   log_file="$(mktemp)"
   rc_file="$(mktemp)"
 
@@ -275,11 +275,26 @@ run_with_live_progress() {
       local pid=$!
       local pct=2
       local tail_text=""
+      local start_ts elapsed
+      start_ts="$(date +%s)"
       while kill -0 "${pid}" 2>/dev/null; do
+        elapsed=$(( $(date +%s) - start_ts ))
         tail_text="$(progress_clean_tail "${log_file}")"
-        pct=$((pct + 2))
-        (( pct > 96 )) && pct=12
-        printf 'XXX\n%s\n%s\n\n%s\nXXX\n' "${pct}" "${title}" "${tail_text}"
+        # Do not loop the gauge from 96% back to the beginning. Long SSH/apt
+        # operations can sit for minutes, so keep progress monotonic and show elapsed time.
+        if (( pct < 92 )); then
+          pct=$((pct + 2))
+        else
+          pct=92
+        fi
+        printf 'XXX
+%s
+%s
+%s: %ss
+
+%s
+XXX
+' "${pct}" "${title}" "$(T "Выполняется" "Running")" "${elapsed}" "${tail_text}"
         sleep 1
       done
       wait "${pid}"
@@ -287,7 +302,13 @@ run_with_live_progress() {
       printf '%s' "${inner_rc}" >"${rc_file}"
       if [[ "${inner_rc}" -eq 0 ]]; then
         tail_text="$(progress_clean_tail "${log_file}")"
-        printf 'XXX\n100\n%s\n\n%s\nXXX\n' "${title} завершено" "${tail_text}"
+        printf 'XXX
+100
+%s
+
+%s
+XXX
+' "${title} завершено" "${tail_text}"
         sleep 0.2
       fi
       exit 0
@@ -316,14 +337,20 @@ run_with_live_progress() {
   ) >"${log_file}" 2>&1 &
   local pid=$!
   if [[ -t 1 ]]; then
-    local spin='|/-\\'
+    local spin='|/-\'
     local i=0
+    start_ts="$(date +%s)"
     while kill -0 "${pid}" 2>/dev/null; do
-      tail_text="$(tail -n 1 "${log_file}" 2>/dev/null | tr '\r' ' ' | cut -c 1-100)"
-      printf '\r[%s] %s: %s' "${spin:i++%${#spin}:1}" "${title}" "${tail_text:-выполняется}"
+      elapsed=$(( $(date +%s) - start_ts ))
+      tail_text="$(tail -n 1 "${log_file}" 2>/dev/null | tr '
+' ' ' | cut -c 1-100)"
+      printf '
+[%s] %s (%ss): %s' "${spin:i++%${#spin}:1}" "${title}" "${elapsed}" "${tail_text:-выполняется}"
       sleep 1
     done
-    printf '\r%*s\r' 120 ''
+    printf '
+%*s
+' 120 ''
   fi
   wait "${pid}"
   rc=$?
@@ -337,6 +364,7 @@ run_with_live_progress() {
   rm -f "${log_file}" "${rc_file}"
   return "${rc}"
 }
+
 
 
 run_menu_step() {
@@ -1277,8 +1305,13 @@ create_named_vps_remote_install() {
       remote_upload_runner "${runner}"
       echo
       echo "Запуск удалённой установки VPS"
+      echo "Remote install started at: $(date -Is)"
       remote_run_runner
       step_rc=$?
+      echo "Remote install finished at: $(date -Is)"
+      if [[ "${step_rc}" -eq 124 ]]; then
+        echo "ERROR: remote installer timeout after 45 minutes" >&2
+      fi
       echo
       echo "Remote installer exit code: ${step_rc}"
       return "${step_rc}"
@@ -1302,6 +1335,7 @@ create_named_vps_remote_install() {
       echo "$(T "Подсказка:" "Hint:")"
       echo "$(T "Если ошибка на этапе регистрации machine, проверь реальный исходящий IP VPS в логе и allowed_ranges central LAPI." "If the error is at machine registration, check the VPS outgoing IP in the log and central LAPI allowed_ranges.")"
       echo "$(T "Также проверь логи контейнера central:" "Also check central container logs:") docker logs crowdsec --tail 200"
+      echo "$(T "Если прогресс долго стоит на одном месте, открой лог из другого SSH-сеанса:" "If progress sits for a long time, open the log from another SSH session:") tail -f ${remote_install_log}"
     } > "${err_tmp}"
     show_file "$(T "Ошибка удалённой установки VPS" "Remote VPS installation error")" "${err_tmp}"
     rm -f "${err_tmp}" "${runner}"
@@ -4035,7 +4069,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.23-clean-vps-menu"
+SCRIPT_VERSION="v0.7.24-vps-progress-timeout-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
