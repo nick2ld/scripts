@@ -151,12 +151,13 @@ WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 DEFAULT_MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
 MANAGER_IMAGE="${MANAGER_IMAGE:-${DEFAULT_MANAGER_IMAGE}}"
 MANAGER_GITHUB_REPO="hhftechnology/crowdsec_manager"
+MANAGER_GITHUB_INDEPENDENT_REF="independent"
 MANAGER_GITHUB_TAG_OVERRIDE="${MANAGER_GITHUB_TAG:-}"
 MANAGER_IMAGE_MODE_OVERRIDE="${MANAGER_IMAGE_MODE:-}"
 MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG_OVERRIDE}"
 MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE_OVERRIDE:-image}"
 MANAGER_PULL_POLICY_LINE=""
-SCRIPT_VERSION="v0.9.8-manager-database-paths"
+SCRIPT_VERSION="v0.9.9-build-independent-manager"
 SCRIPT_RELEASE_DATE="2026-06-05"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4182,7 +4183,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.9.8-manager-database-paths"
+SCRIPT_VERSION="v0.9.9-build-independent-manager"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
@@ -4308,14 +4309,15 @@ build_crowdsec_manager_release() {
   mkdir -p "${MANAGER_COMPOSE_DIR}/build"
   rm -rf "${build_dir}" "${tarball}"
 
-  echo "$(T "Скачиваю CrowdSec Manager release" "Downloading CrowdSec Manager release") ${tag}..."
-  curl -fL "https://github.com/${MANAGER_GITHUB_REPO}/archive/refs/tags/${tag}.tar.gz" -o "${tarball}"
+  echo "$(T "Скачиваю CrowdSec Manager independent source" "Downloading CrowdSec Manager independent source") ${MANAGER_GITHUB_INDEPENDENT_REF} $(T "для версии" "for version") ${tag}..."
+  curl -fL "https://github.com/${MANAGER_GITHUB_REPO}/archive/refs/heads/${MANAGER_GITHUB_INDEPENDENT_REF}.tar.gz" -o "${tarball}"
   mkdir -p "${build_dir}"
   tar -xzf "${tarball}" --strip-components=1 -C "${build_dir}"
 
   [[ -f "${build_dir}/Dockerfile" ]] || fail "$(T "В релизе не найден Dockerfile:" "Dockerfile was not found in the release:") ${tag}"
-  echo "$(T "Собираю Docker image" "Building Docker image") ${image}..."
-  docker build --pull -t "${image}" "${build_dir}"
+  echo "$(T "Собираю independent Docker image" "Building independent Docker image") ${image}..."
+  docker image rm -f "${image}" >/dev/null 2>&1 || true
+  docker build --pull --no-cache -t "${image}" "${build_dir}"
 
   MANAGER_GITHUB_TAG="${tag}"
   MANAGER_IMAGE="${image}"
@@ -4374,13 +4376,13 @@ configure_manager_image_source() {
   safe_source_env
   local choice tag rebuild_now
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    choice="$(whiptail --title " $(T "Источник CrowdSec Manager" "CrowdSec Manager source") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Текущий режим: ${MANAGER_IMAGE_MODE}\nТекущий tag: ${MANAGER_GITHUB_TAG:-не задан}\n\nDocker image быстрее и стабильнее. GitHub release собирается локально из опубликованного релиза." "Current mode: ${MANAGER_IMAGE_MODE}\nCurrent tag: ${MANAGER_GITHUB_TAG:-not set}\n\nDocker image is faster and more stable. GitHub release is built locally from a published release.")" 18 96 3 \
+    choice="$(whiptail --title " $(T "Источник CrowdSec Manager" "CrowdSec Manager source") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Текущий режим: ${MANAGER_IMAGE_MODE}\nТекущий tag: ${MANAGER_GITHUB_TAG:-не задан}\n\nDocker image быстрее и стабильнее. GitHub latest берёт номер последнего release, но собирает standalone/independent source." "Current mode: ${MANAGER_IMAGE_MODE}\nCurrent tag: ${MANAGER_GITHUB_TAG:-not set}\n\nDocker image is faster and more stable. GitHub latest uses the latest release version but builds standalone/independent source.")" 18 96 3 \
       "image" "$(T "Официальный Docker image independent" "Official independent Docker image")" \
-      "github_latest" "$(T "Собирать последний GitHub release" "Build latest GitHub release")" \
-      "github_tag" "$(T "Собирать конкретный GitHub tag" "Build specific GitHub tag")" \
+      "github_latest" "$(T "Собирать independent с номером latest release" "Build independent with latest release version")" \
+      "github_tag" "$(T "Собирать independent с указанным номером версии" "Build independent with specific version label")" \
       3>&1 1>&2 2>&3)" || return 0
     if [[ "${choice}" == "github_tag" ]]; then
-      tag="$(whiptail --title " $(T "GitHub tag" "GitHub tag") " --inputbox "$(T "Введите release/tag, например v2.3.2:" "Enter release/tag, for example v2.3.2:")" 10 70 "${MANAGER_GITHUB_TAG:-}" 3>&1 1>&2 2>&3)" || return 0
+      tag="$(whiptail --title " $(T "Версия image" "Image version") " --inputbox "$(T "Введите номер версии для локального image, например v2.4.1:\n\nSource всё равно будет взят из independent branch upstream." "Enter version label for the local image, for example v2.4.1:\n\nSource will still be taken from the upstream independent branch.")" 12 78 "${MANAGER_GITHUB_TAG:-}" 3>&1 1>&2 2>&3)" || return 0
       manager_release_tag_valid "${tag}" || { whiptail --title " $(T "Ошибка" "Error") " --msgbox "$(T "Некорректный tag." "Invalid tag.")" 8 60; return 0; }
       MANAGER_GITHUB_TAG="${tag}"
     fi
@@ -4572,6 +4574,17 @@ copy_manager_named_volume_if_needed() {
   chmod -R a+rwX "${MANAGER_COMPOSE_DIR}/manager-data" 2>/dev/null || true
 }
 
+reset_manager_database_if_full_schema_mismatch() {
+  local db="${MANAGER_COMPOSE_DIR}/manager-data/settings.db" backup
+  [[ -f "${db}" ]] || return 0
+  if docker logs --tail 80 crowdsec-manager 2>&1 | grep -q 'no column named traefik_dynamic_config'; then
+    backup="${db}.backup-full-schema-mismatch-$(date +%Y%m%d-%H%M%S)"
+    echo "$(T "Обнаружена несовместимая база full-варианта Manager. Сохраняю backup и создаю новую independent-базу..." "Detected an incompatible full-variant Manager database. Backing it up and creating a fresh independent database...")"
+    cp -a "${db}" "${backup}" 2>/dev/null || true
+    rm -f "${db}" "${MANAGER_COMPOSE_DIR}/manager-data/history.db"
+  fi
+}
+
 verify_crowdsec_manager_independent_discovery() {
   local discovery
   discovery="$(docker exec crowdsec-manager sh -c 'cat "${COMPOSE_FILE:-/app/docker-compose.yml}" 2>/dev/null' 2>/dev/null || true)"
@@ -4611,6 +4624,9 @@ install_or_update_crowdsec_manager() {
 
   echo "Starting CrowdSec Manager stack..."
   (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d --remove-orphans)
+  sleep 3
+  reset_manager_database_if_full_schema_mismatch
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d --no-deps crowdsec-manager)
 
   echo "Waiting for CrowdSec config initialization..."
   local waited=0
@@ -4667,6 +4683,9 @@ update_crowdsec_manager_only_cmd() {
 
   echo "$(T "Перезапускаю только контейнер crowdsec-manager..." "Restarting only the crowdsec-manager container...")"
   (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d --no-deps --remove-orphans crowdsec-manager)
+  sleep 3
+  reset_manager_database_if_full_schema_mismatch
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d --no-deps crowdsec-manager)
   wait_for_crowdsec_manager_ready
   verify_crowdsec_manager_independent_discovery
   save_env
