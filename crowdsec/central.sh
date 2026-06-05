@@ -154,7 +154,7 @@ MANAGER_GITHUB_REPO="hhftechnology/crowdsec_manager"
 MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG:-}"
 MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE:-image}"
 MANAGER_PULL_POLICY_LINE=""
-SCRIPT_VERSION="v0.9.4-manager-independent-flags"
+SCRIPT_VERSION="v0.9.5-manager-discovery-compose"
 SCRIPT_RELEASE_DATE="2026-06-05"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4180,7 +4180,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.9.4-manager-independent-flags"
+SCRIPT_VERSION="v0.9.5-manager-discovery-compose"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
@@ -4427,6 +4427,13 @@ write_crowdsec_manager_compose() {
     "${MANAGER_COMPOSE_DIR}/manager-backups"
   chmod 700 "${MANAGER_COMPOSE_DIR}/crowdsec-db" "${MANAGER_COMPOSE_DIR}/crowdsec-config"
   chmod 755 "${MANAGER_COMPOSE_DIR}/manager-config" "${MANAGER_COMPOSE_DIR}/manager-config/crowdsec" "${MANAGER_COMPOSE_DIR}/manager-logs" "${MANAGER_COMPOSE_DIR}/manager-logs/app" "${MANAGER_COMPOSE_DIR}/manager-data" "${MANAGER_COMPOSE_DIR}/manager-backups"
+  cat >"${MANAGER_COMPOSE_DIR}/manager-discovery-compose.yml" <<EOF
+services:
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+EOF
+  chmod 644 "${MANAGER_COMPOSE_DIR}/manager-discovery-compose.yml"
   cat >"${MANAGER_COMPOSE_FILE}" <<EOF
 services:
   crowdsec:
@@ -4467,7 +4474,7 @@ ${MANAGER_PULL_POLICY_LINE}
       - INCLUDE_GERBIL=false
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - "${MANAGER_COMPOSE_FILE}:/app/docker-compose.yml:ro"
+      - "${MANAGER_COMPOSE_DIR}/manager-discovery-compose.yml:/app/docker-compose.yml:ro"
       - "${MANAGER_COMPOSE_DIR}/manager-data:/app/data"
       - "${MANAGER_COMPOSE_DIR}/manager-config:/app/config"
       - "${MANAGER_COMPOSE_DIR}/manager-logs/app:/app/logs"
@@ -4520,6 +4527,19 @@ wait_for_crowdsec_manager_ready() {
   done
   show_crowdsec_manager_failure_logs
   fail "$(T "CrowdSec Manager не перешёл в состояние running за 45 секунд." "CrowdSec Manager did not reach running state within 45 seconds.")"
+}
+
+verify_crowdsec_manager_independent_discovery() {
+  local discovery
+  discovery="$(docker exec crowdsec-manager sh -c 'cat "${COMPOSE_FILE:-/app/docker-compose.yml}" 2>/dev/null' 2>/dev/null || true)"
+  if ! printf '%s\n' "${discovery}" | grep -q '^[[:space:]]*crowdsec:'; then
+    show_crowdsec_manager_failure_logs
+    fail "$(T "CrowdSec Manager не видит discovery compose с сервисом crowdsec. Поэтому он будет показывать traefik/pangolin/gerbil fallback." "CrowdSec Manager cannot see discovery compose with the crowdsec service, so it will show the traefik/pangolin/gerbil fallback.")"
+  fi
+  if printf '%s\n' "${discovery}" | grep -Eq '^[[:space:]]*(traefik|pangolin|gerbil):'; then
+    show_crowdsec_manager_failure_logs
+    fail "$(T "Discovery compose ошибочно содержит traefik/pangolin/gerbil." "Discovery compose unexpectedly contains traefik/pangolin/gerbil.")"
+  fi
 }
 
 install_or_update_crowdsec_manager() {
@@ -4578,6 +4598,7 @@ install_or_update_crowdsec_manager() {
   echo "Restarting CrowdSec Manager after LAPI initialization..."
   (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec-manager)
   wait_for_crowdsec_manager_ready
+  verify_crowdsec_manager_independent_discovery
 
   WEB_UI_TYPE="manager"
   save_env
@@ -4603,6 +4624,7 @@ update_crowdsec_manager_only_cmd() {
   echo "$(T "Перезапускаю только контейнер crowdsec-manager..." "Restarting only the crowdsec-manager container...")"
   (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d --no-deps --remove-orphans crowdsec-manager)
   wait_for_crowdsec_manager_ready
+  verify_crowdsec_manager_independent_discovery
   save_env
   echo "$(T "CrowdSec Manager обновлён:" "CrowdSec Manager updated:") http://${LAN_IP}:${WEB_PORT}"
 }
