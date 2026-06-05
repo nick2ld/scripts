@@ -154,7 +154,7 @@ MANAGER_GITHUB_REPO="hhftechnology/crowdsec_manager"
 MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG:-}"
 MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE:-image}"
 MANAGER_PULL_POLICY_LINE=""
-SCRIPT_VERSION="v0.9.3-manager-runtime-fix"
+SCRIPT_VERSION="v0.9.4-manager-independent-flags"
 SCRIPT_RELEASE_DATE="2026-06-05"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4180,7 +4180,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.9.3-manager-runtime-fix"
+SCRIPT_VERSION="v0.9.4-manager-independent-flags"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
@@ -4458,12 +4458,16 @@ ${MANAGER_PULL_POLICY_LINE}
       - LOG_LEVEL=info
       - LOG_FILE=/app/logs/crowdsec-manager.log
       - DOCKER_HOST=unix:///var/run/docker.sock
+      - COMPOSE_FILE=/app/docker-compose.yml
       - DATABASE_PATH=/app/data/settings.db
       - CONFIG_DIR=/app/config
       - BACKUP_DIR=/app/backups
       - INCLUDE_CROWDSEC=true
+      - INCLUDE_PANGOLIN=false
+      - INCLUDE_GERBIL=false
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - "${MANAGER_COMPOSE_FILE}:/app/docker-compose.yml:ro"
       - "${MANAGER_COMPOSE_DIR}/manager-data:/app/data"
       - "${MANAGER_COMPOSE_DIR}/manager-config:/app/config"
       - "${MANAGER_COMPOSE_DIR}/manager-logs/app:/app/logs"
