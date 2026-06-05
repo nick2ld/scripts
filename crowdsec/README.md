@@ -121,7 +121,8 @@ MANAGER_GITHUB_TAG=v2.3.2
 - перед опасными действиями с firewall показывается предупреждение;
 - обновление меню из GitHub выполняется только после проверки и подтверждения;
 - просмотр файла с токенами сопровождается предупреждением;
-- добавлен выбор источника CrowdSec Manager: Docker image, latest GitHub release или конкретный GitHub tag.
+- добавлен выбор источника CrowdSec Manager: Docker image, latest GitHub release или конкретный GitHub tag;
+- обновление CrowdSec Manager отделено от обновления Dockerized CrowdSec engine.
 
 ### Что устанавливает vps.sh
 
@@ -391,7 +392,8 @@ The current central script includes these improvements:
 - dangerous firewall actions show a warning first;
 - menu updates from GitHub require validation and confirmation;
 - viewing the token file shows a warning;
-- CrowdSec Manager source selection: Docker image, latest GitHub release, or specific GitHub tag.
+- CrowdSec Manager source selection: Docker image, latest GitHub release, or specific GitHub tag;
+- CrowdSec Manager update is separated from Dockerized CrowdSec engine update.
 
 ### What vps.sh Installs
 

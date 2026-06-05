@@ -154,7 +154,7 @@ MANAGER_GITHUB_REPO="hhftechnology/crowdsec_manager"
 MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG:-}"
 MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE:-image}"
 MANAGER_PULL_POLICY_LINE=""
-SCRIPT_VERSION="v0.8.0-manager-github-release-build"
+SCRIPT_VERSION="v0.8.1-manager-update-split"
 SCRIPT_RELEASE_DATE="2026-06-05"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4073,6 +4073,7 @@ run_menu_action() {
     bouncer_key) regenerate_bouncer_key ;;
     firewall) show_firewall; pause ;;
     test_lapi) test_webui_lapi; pause ;;
+    manager_source) configure_manager_image_source ;;
     install_stack) install_or_repair_full_stack ;;
     restart) restart_services ;;
     update_webui) update_web_ui_only ;;
@@ -4107,7 +4108,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.8.0-manager-github-release-build"
+SCRIPT_VERSION="v0.8.1-manager-update-split"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
@@ -4265,6 +4266,28 @@ prepare_crowdsec_manager_image() {
     github_tag)
       [[ -n "${MANAGER_GITHUB_TAG:-}" ]] || fail "$(T "Для режима specific tag нужно указать MANAGER_GITHUB_TAG." "MANAGER_GITHUB_TAG is required for specific tag mode.")"
       build_crowdsec_manager_release "${MANAGER_GITHUB_TAG}"
+      ;;
+    *)
+      MANAGER_IMAGE_MODE="image"
+      MANAGER_IMAGE="${DEFAULT_MANAGER_IMAGE}"
+      ;;
+  esac
+}
+
+set_manager_compose_image_from_saved_source() {
+  safe_source_env
+  MANAGER_PULL_POLICY_LINE=""
+  case "${MANAGER_IMAGE_MODE:-image}" in
+    image)
+      MANAGER_IMAGE="${DEFAULT_MANAGER_IMAGE}"
+      ;;
+    github_latest|github_tag)
+      if [[ -n "${MANAGER_GITHUB_TAG:-}" ]]; then
+        MANAGER_IMAGE="$(manager_local_image_name "${MANAGER_GITHUB_TAG}")"
+        MANAGER_PULL_POLICY_LINE="    pull_policy: never"
+      else
+        MANAGER_IMAGE="${DEFAULT_MANAGER_IMAGE}"
+      fi
       ;;
     *)
       MANAGER_IMAGE_MODE="image"
@@ -4440,6 +4463,43 @@ install_or_update_crowdsec_manager() {
   echo "CrowdSec Manager ready: http://${LAN_IP}:${WEB_PORT}"
 }
 
+update_crowdsec_manager_only_cmd() {
+  safe_source_env
+  ensure_manager_paths
+  [[ -f "${MANAGER_COMPOSE_FILE}" ]] || fail "$(T "Compose-файл CrowdSec Manager не найден. Сначала установи stack." "CrowdSec Manager compose file was not found. Install the stack first.")"
+
+  echo "$(T "Обновляю только CrowdSec Manager..." "Updating CrowdSec Manager only...")"
+  prepare_crowdsec_manager_image
+  write_crowdsec_manager_compose
+
+  if [[ "${MANAGER_IMAGE_MODE:-image}" == "image" ]]; then
+    echo "$(T "Скачиваю свежий Docker image CrowdSec Manager..." "Pulling the latest CrowdSec Manager Docker image...")"
+    (cd "${MANAGER_COMPOSE_DIR}" && docker compose pull crowdsec-manager)
+  else
+    echo "$(T "Использую локально собранный CrowdSec Manager image:" "Using locally built CrowdSec Manager image:") ${MANAGER_IMAGE}"
+  fi
+
+  echo "$(T "Перезапускаю только контейнер crowdsec-manager..." "Restarting only the crowdsec-manager container...")"
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d --no-deps --remove-orphans crowdsec-manager)
+  save_env
+  echo "$(T "CrowdSec Manager обновлён:" "CrowdSec Manager updated:") http://${LAN_IP}:${WEB_PORT}"
+}
+
+update_dockerized_crowdsec_only_cmd() {
+  safe_source_env
+  ensure_manager_paths
+  [[ -f "${MANAGER_COMPOSE_FILE}" ]] || fail "$(T "Compose-файл CrowdSec Manager не найден. Сначала установи stack." "CrowdSec Manager compose file was not found. Install the stack first.")"
+
+  echo "$(T "Обновляю только Dockerized CrowdSec engine..." "Updating only the Dockerized CrowdSec engine...")"
+  set_manager_compose_image_from_saved_source
+  write_crowdsec_manager_compose
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose pull crowdsec)
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d --no-deps crowdsec)
+  configure_docker_crowdsec_lapi
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec)
+  echo "$(T "Dockerized CrowdSec обновлён." "Dockerized CrowdSec updated.")"
+}
+
 restart_services_cmd() {
   ensure_manager_paths
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
@@ -4464,11 +4524,11 @@ reapply_all_settings_cmd() {
 }
 
 update_crowdsec_only() {
-  run_menu_step "$(T "Обновление Dockerized CrowdSec engine" "Updating Dockerized CrowdSec engine")" install_or_update_crowdsec_manager
+  run_menu_step "$(T "Обновление Dockerized CrowdSec engine" "Updating Dockerized CrowdSec engine")" update_dockerized_crowdsec_only_cmd
 }
 
 update_web_ui_only() {
-  run_menu_step "$(T "Обновление CrowdSec Manager" "Updating CrowdSec Manager")" install_or_update_crowdsec_manager
+  run_menu_step "$(T "Обновление CrowdSec Manager" "Updating CrowdSec Manager")" update_crowdsec_manager_only_cmd
 }
 
 update_installed_stack() {
