@@ -157,7 +157,7 @@ MANAGER_IMAGE_MODE_OVERRIDE="${MANAGER_IMAGE_MODE:-}"
 MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG_OVERRIDE}"
 MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE_OVERRIDE:-image}"
 MANAGER_PULL_POLICY_LINE=""
-SCRIPT_VERSION="v0.9.9-build-independent-manager"
+SCRIPT_VERSION="v0.9.10-manager-db-migration"
 SCRIPT_RELEASE_DATE="2026-06-05"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4183,7 +4183,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.9.9-build-independent-manager"
+SCRIPT_VERSION="v0.9.10-manager-db-migration"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
@@ -4574,15 +4574,40 @@ copy_manager_named_volume_if_needed() {
   chmod -R a+rwX "${MANAGER_COMPOSE_DIR}/manager-data" 2>/dev/null || true
 }
 
-reset_manager_database_if_full_schema_mismatch() {
-  local db="${MANAGER_COMPOSE_DIR}/manager-data/settings.db" backup
-  [[ -f "${db}" ]] || return 0
-  if docker logs --tail 80 crowdsec-manager 2>&1 | grep -q 'no column named traefik_dynamic_config'; then
-    backup="${db}.backup-full-schema-mismatch-$(date +%Y%m%d-%H%M%S)"
-    echo "$(T "Обнаружена несовместимая база full-варианта Manager. Сохраняю backup и создаю новую independent-базу..." "Detected an incompatible full-variant Manager database. Backing it up and creating a fresh independent database...")"
-    cp -a "${db}" "${backup}" 2>/dev/null || true
-    rm -f "${db}" "${MANAGER_COMPOSE_DIR}/manager-data/history.db"
+sqlite_exec_on_manager_db() {
+  local db="${MANAGER_COMPOSE_DIR}/manager-data/settings.db" sql="$1"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "${db}" "${sql}"
+    return
   fi
+  docker run --rm \
+    -v "${MANAGER_COMPOSE_DIR}/manager-data:/data" \
+    alpine:3.20 \
+    sh -c 'apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/settings.db "$1"' sh "${sql}"
+}
+
+migrate_manager_database_schema() {
+  local db="${MANAGER_COMPOSE_DIR}/manager-data/settings.db" backup query
+  [[ -f "${db}" ]] || return 0
+  backup="${db}.backup-before-schema-migration-$(date +%Y%m%d-%H%M%S)"
+  cp -a "${db}" "${backup}" 2>/dev/null || true
+  echo "$(T "Проверяю и мигрирую SQLite-схему CrowdSec Manager без удаления данных..." "Checking and migrating CrowdSec Manager SQLite schema without deleting data...")"
+  for query in \
+    "ALTER TABLE settings ADD COLUMN traefik_dynamic_config TEXT NOT NULL DEFAULT '/etc/traefik/dynamic_config.yml';" \
+    "ALTER TABLE settings ADD COLUMN traefik_static_config TEXT NOT NULL DEFAULT '/etc/traefik/traefik_config.yml';" \
+    "ALTER TABLE settings ADD COLUMN traefik_access_log TEXT NOT NULL DEFAULT '/var/log/traefik/access.log';" \
+    "ALTER TABLE settings ADD COLUMN traefik_error_log TEXT NOT NULL DEFAULT '/var/log/traefik/traefik.log';" \
+    "ALTER TABLE settings ADD COLUMN crowdsec_acquis_file TEXT NOT NULL DEFAULT '/etc/crowdsec/acquis.yaml';" \
+    "ALTER TABLE settings ADD COLUMN enroll_disable_context INTEGER NOT NULL DEFAULT 0;" \
+    "ALTER TABLE settings ADD COLUMN discord_webhook_id TEXT NOT NULL DEFAULT '';" \
+    "ALTER TABLE settings ADD COLUMN discord_webhook_token TEXT NOT NULL DEFAULT '';" \
+    "ALTER TABLE settings ADD COLUMN geoapify_key TEXT NOT NULL DEFAULT '';" \
+    "ALTER TABLE settings ADD COLUMN cti_key TEXT NOT NULL DEFAULT '';" \
+    "ALTER TABLE settings ADD COLUMN log_processing_enabled INTEGER NOT NULL DEFAULT 1;"; do
+    sqlite_exec_on_manager_db "${query}" >/dev/null 2>&1 || true
+  done
+  sqlite_exec_on_manager_db "INSERT OR IGNORE INTO settings (id) VALUES (1);" >/dev/null 2>&1 || true
+  chmod a+rw "${db}" 2>/dev/null || true
 }
 
 verify_crowdsec_manager_independent_discovery() {
@@ -4612,6 +4637,7 @@ install_or_update_crowdsec_manager() {
   prepare_crowdsec_manager_image
   write_crowdsec_manager_compose
   copy_manager_named_volume_if_needed
+  migrate_manager_database_schema
 
   echo "Pulling CrowdSec image..."
   (cd "${MANAGER_COMPOSE_DIR}" && docker compose pull crowdsec)
@@ -4624,9 +4650,6 @@ install_or_update_crowdsec_manager() {
 
   echo "Starting CrowdSec Manager stack..."
   (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d --remove-orphans)
-  sleep 3
-  reset_manager_database_if_full_schema_mismatch
-  (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d --no-deps crowdsec-manager)
 
   echo "Waiting for CrowdSec config initialization..."
   local waited=0
@@ -4673,6 +4696,7 @@ update_crowdsec_manager_only_cmd() {
   echo "$(T "Обновляю только CrowdSec Manager..." "Updating CrowdSec Manager only...")"
   prepare_crowdsec_manager_image
   write_crowdsec_manager_compose
+  migrate_manager_database_schema
 
   if [[ "${MANAGER_IMAGE_MODE:-image}" == "image" ]]; then
     echo "$(T "Скачиваю свежий Docker image CrowdSec Manager..." "Pulling the latest CrowdSec Manager Docker image...")"
@@ -4683,9 +4707,6 @@ update_crowdsec_manager_only_cmd() {
 
   echo "$(T "Перезапускаю только контейнер crowdsec-manager..." "Restarting only the crowdsec-manager container...")"
   (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d --no-deps --remove-orphans crowdsec-manager)
-  sleep 3
-  reset_manager_database_if_full_schema_mismatch
-  (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d --no-deps crowdsec-manager)
   wait_for_crowdsec_manager_ready
   verify_crowdsec_manager_independent_discovery
   save_env
