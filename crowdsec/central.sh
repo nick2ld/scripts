@@ -154,7 +154,7 @@ MANAGER_GITHUB_REPO="hhftechnology/crowdsec_manager"
 MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG:-}"
 MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE:-image}"
 MANAGER_PULL_POLICY_LINE=""
-SCRIPT_VERSION="v0.8.1-manager-update-split"
+SCRIPT_VERSION="v0.9.0-central-menu-rework"
 SCRIPT_RELEASE_DATE="2026-06-05"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -2534,7 +2534,7 @@ wait_for_machine_and_validate() {
     sleep 5
     elapsed=$((elapsed + 5))
   done
-  fail "Machine '${machine_name}' не появилась за ${timeout} секунд. Позже подтверди её через меню: Подключения VPS и LAPI -> Подтвердить machine VPS."
+  fail "Machine '${machine_name}' не появилась за ${timeout} секунд. Позже подтверди её через меню: Подключения VPS -> Подтвердить ожидающую VPS."
 }
 
 machine_list_tsv() {
@@ -3044,7 +3044,7 @@ show_crowdsec_info() {
     echo "=== Баунсеры (bouncers) ==="
     $cmd bouncers list 2>&1 || true
     echo
-    echo "=== Активные решения (decisions) ==="
+    echo "=== Активные блокировки ==="
     $cmd decisions list -l 50 2>&1 || true
     echo
     echo "=== Последние алерты (alerts) ==="
@@ -3275,6 +3275,14 @@ run_menu_action() {
     *) warn "$(T "Неизвестное действие меню." "Unknown menu action.")"; pause ;;
   esac
 }
+# Menu contract:
+# - Quick start contains only first-run/recovery sequence in execution order.
+# - VPS contains only node onboarding and node access records.
+# - Protection contains CrowdSec Hub elements, manual blocks and allowlists.
+# - Network contains addresses, ports, LAPI exposure and credentials.
+# - Status contains read-only diagnostics and logs.
+# - Updates contains package/image/script lifecycle actions.
+# Keep one primary location per action; do not duplicate operational actions across sections.
 menu_loop_whiptail() {
   require_root
   tui_theme
@@ -3286,49 +3294,50 @@ menu_loop_whiptail() {
     category="$(whiptail \
       --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" \
       --title "$(T " CrowdSec Central " " CrowdSec Central ")" \
-      --cancel-button "$(T "Назад" "Back")" \
+      --cancel-button "$(T "Выход" "Exit")" \
       --ok-button "$(T "Выбрать" "Select")" \
       --notags \
       --menu "$(T "Выберите раздел:\n\n${summary}" "Choose a section:\n\n${summary}")" \
-      24 96 7 \
-      "install" "$(T "Установка и первичная настройка" "Install and initial setup")" \
-      "status" "$(T "Статус и данные" "Status and data")" \
-      "vps" "$(T "VPS nodes / machines" "VPS nodes / machines")" \
-      "protection" "$(T "Защита, правила и decisions" "Protection, rules and decisions")" \
-      "network" "$(T "Сеть, TLS и доступ к LAPI" "Network, TLS and LAPI access")" \
-      "service" "$(T "Обслуживание и диагностика" "Maintenance and diagnostics")" \
-      "menu" "$(T "Настройки меню" "Menu settings")" \
+      24 98 8 \
+      "quickstart" "$(T "Быстрый старт и восстановление" "Quick start and recovery")" \
+      "vps" "$(T "Подключения VPS" "VPS connections")" \
+      "protection" "$(T "Защита и правила CrowdSec" "CrowdSec protection and rules")" \
+      "network" "$(T "Сеть и доступ к LAPI" "Network and LAPI access")" \
+      "status" "$(T "Статус, логи и диагностика" "Status, logs and diagnostics")" \
+      "updates" "$(T "Обновления и обслуживание" "Updates and maintenance")" \
+      "menu" "$(T "Настройки интерфейса" "Interface settings")" \
       "exit" "$(T "Выход" "Exit")" \
-      3>&1 1>&2 2>&3)" || continue
+      3>&1 1>&2 2>&3)" || exit 0
     [[ "${category}" == "exit" ]] && exit 0
 
     while true; do
       case "${category}" in
-        install)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Установка и первичная настройка" "Install and initial setup") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Последовательные шаги установки и восстановления." "Sequential installation and repair steps.")" 19 96 6 \
-            "manager_source" "$(T "0. Источник/версия CrowdSec Manager" "0. CrowdSec Manager source/version")" \
-            "install_stack" "$(T "1. Установить/восстановить CrowdSec Manager + Dockerized CrowdSec" "1. Install/repair CrowdSec Manager + Dockerized CrowdSec")" \
-            "protection_baseline" "$(T "2. Применить базовую защиту" "2. Apply base protection")" \
-            "firewall" "$(T "3. Проверить firewall/UFW" "3. Check firewall/UFW")" \
-            "connect" "$(T "4. Показать адреса и данные подключения" "4. Show addresses and connection data")" \
+        quickstart)
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Быстрый старт и восстановление" "Quick start and recovery") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Иди сверху вниз при чистой установке. Для ремонта используй пункт 1." "For a clean install, go from top to bottom. Use item 1 for repair.")" 18 98 4 \
+            "install_stack" "$(T "1. Установить или восстановить central stack" "1. Install or repair central stack")" \
+            "manager_source" "$(T "2. Выбрать источник CrowdSec Manager" "2. Choose CrowdSec Manager source")" \
+            "protection_baseline" "$(T "3. Применить базовый набор защиты" "3. Apply base protection set")" \
+            "node_bouncer" "$(T "4. Создать подключение первой VPS" "4. Create first VPS connection")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         status)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Статус и данные" "Status and data") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 18 88 5 \
-            "status" "$(T "Статус сервисов и портов" "Service and port status")" \
-            "connect" "$(T "Показать созданные подключения VPS" "Show saved VPS connections")" \
-            "envfile" "$(T "Показать central.env" "Show central.env")" \
-            "crowdsec_info" "$(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")" \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Статус, логи и диагностика" "Status, logs and diagnostics") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Только просмотр и проверки. Изменений в системе эти пункты не делают." "Read-only views and checks. These items do not change the system.")" 23 96 9 \
+            "status" "$(T "Состояние сервисов и портов" "Services and ports status")" \
+            "crowdsec_info" "$(T "Сводка CrowdSec: машины, баунсеры, блокировки" "CrowdSec summary: machines, bouncers, blocks")" \
+            "connect" "$(T "Список созданных подключений VPS" "Saved VPS connection list")" \
+            "firewall" "$(T "Правила firewall/UFW" "Firewall/UFW rules")" \
+            "logs" "$(T "Логи CrowdSec Manager и CrowdSec" "CrowdSec Manager and CrowdSec logs")" \
+            "remote_logs" "$(T "Логи удалённой установки VPS" "Remote VPS install logs")" \
+            "test_lapi" "$(T "Проверить связь Manager -> LAPI" "Test Manager -> LAPI connection")" \
+            "versions" "$(T "Версии установленного ПО" "Installed software versions")" \
+            "envfile" "$(T "Показать central.env с токенами" "Show central.env with tokens")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         vps)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "VPS nodes / machines" "VPS nodes / machines") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Работа только с полноценными VPS nodes/machines." "Only full VPS nodes/machines are managed here.")" 20 96 6 \
-            "node_bouncer" "$(T "Создать подключение VPS: SSH или ручное" "Create VPS connection: SSH or manual")" \
-            "validate_machine" "$(T "Подтвердить machine VPS" "Validate VPS machine")" \
-            "connect" "$(T "Показать созданные подключения VPS" "Show saved VPS connections")" \
-            "add_range" "$(T "Добавить IP/CIDR вручную" "Add IP/CIDR manually")" \
-            "remove_range" "$(T "Удалить IP/CIDR из LAPI" "Remove IP/CIDR from LAPI")" \
-            "replace_ranges" "$(T "Заменить весь список IP/CIDR" "Replace the full IP/CIDR list")" \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Подключения VPS" "VPS connections") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Здесь создаются и подтверждаются подключения отдельных серверов к central LAPI." "Create and validate individual server connections to the central LAPI here.")" 18 96 3 \
+            "node_bouncer" "$(T "Создать подключение VPS" "Create VPS connection")" \
+            "validate_machine" "$(T "Подтвердить ожидающую VPS" "Validate pending VPS")" \
+            "connect" "$(T "Показать созданные подключения" "Show created connections")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         protection)
@@ -3336,37 +3345,35 @@ menu_loop_whiptail() {
           break
           ;;
         network)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Сеть, TLS и доступ к LAPI" "Network, TLS and LAPI access") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 22 90 8 \
-            "web_addr" "$(T "Изменить LAN IP или порт Web UI" "Change LAN IP or Web UI port")" \
-            "lapi_port" "$(T "Изменить порт LAPI" "Change LAPI port")" \
-            "public_addr" "$(T "Изменить внешний IP/DDNS для прямого HTTP" "Change public IP/DDNS for direct HTTP")" \
-            "public_lapi_url" "$(T "HTTPS LAPI через Nginx Proxy Manager" "HTTPS LAPI through Nginx Proxy Manager")" \
-            "auto_token" "$(T "Перегенерировать auto-registration token" "Regenerate auto-registration token")" \
-            "bouncer_key" "$(T "Перегенерировать shared bouncer key" "Regenerate shared bouncer key")" \
-            "firewall" "$(T "Показать firewall/UFW" "Show firewall/UFW")" \
-            "test_lapi" "$(T "Проверить доступ Manager к LAPI" "Test Manager access to LAPI")" \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Сеть и доступ к LAPI" "Network and LAPI access") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Адреса, порты, публикация LAPI и ключи доступа." "Addresses, ports, LAPI exposure and access keys.")" 22 96 8 \
+            "web_addr" "$(T "Web UI: LAN IP и порт" "Web UI: LAN IP and port")" \
+            "lapi_port" "$(T "LAPI: локальный порт" "LAPI: local port")" \
+            "public_lapi_url" "$(T "LAPI: публичный HTTPS URL через proxy" "LAPI: public HTTPS URL through proxy")" \
+            "public_addr" "$(T "LAPI: прямой внешний IP/DDNS" "LAPI: direct public IP/DDNS")" \
+            "add_range" "$(T "LAPI: разрешить IP/CIDR вручную" "LAPI: allow IP/CIDR manually")" \
+            "remove_range" "$(T "LAPI: удалить разрешённый IP/CIDR" "LAPI: remove allowed IP/CIDR")" \
+            "auto_token" "$(T "Сменить token регистрации VPS" "Rotate VPS registration token")" \
+            "bouncer_key" "$(T "Сменить общий ключ firewall bouncer" "Rotate shared firewall bouncer key")" \
             3>&1 1>&2 2>&3)" || break
           ;;
-        service)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Обслуживание и диагностика" "Maintenance and diagnostics") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 24 96 11 \
-            "restart" "$(T "Перезапустить CrowdSec, Docker и Manager" "Restart CrowdSec, Docker and Manager")" \
-            "update_webui" "$(T "Обновить CrowdSec Manager" "Update CrowdSec Manager")" \
-            "logs" "$(T "Показать логи Manager и CrowdSec" "Show Manager and CrowdSec logs")" \
-            "remote_logs" "$(T "Логи удалённой установки VPS" "Remote VPS install logs")" \
-            "reapply" "$(T "Повторно применить все настройки" "Reapply all settings")" \
-            "update_all" "$(T "Обновить весь Dockerized stack" "Update full Dockerized stack")" \
-            "update_system" "$(T "Обновить пакеты Debian" "Update Debian packages")" \
+        updates)
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Обновления и обслуживание" "Updates and maintenance") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Действия, которые меняют установленный stack или системные пакеты." "Actions that change the installed stack or system packages.")" 23 98 9 \
+            "update_webui" "$(T "Обновить только CrowdSec Manager" "Update CrowdSec Manager only")" \
+            "update_crowdsec" "$(T "Обновить только Dockerized CrowdSec" "Update Dockerized CrowdSec only")" \
+            "update_all" "$(T "Обновить весь central stack" "Update full central stack")" \
+            "manager_source" "$(T "Сменить источник CrowdSec Manager" "Change CrowdSec Manager source")" \
+            "restart" "$(T "Перезапустить контейнеры central stack" "Restart central stack containers")" \
+            "reapply" "$(T "Повторно применить сохранённые настройки" "Reapply saved settings")" \
             "update_docker" "$(T "Обновить Docker" "Update Docker")" \
-            "update_crowdsec" "$(T "Обновить Dockerized CrowdSec" "Update Dockerized CrowdSec")" \
-            "versions" "$(T "Показать версии ПО" "Show software versions")" \
+            "update_system" "$(T "Обновить пакеты Debian/Ubuntu" "Update Debian/Ubuntu packages")" \
+            "repair_menu" "$(T "Переустановить команду меню из GitHub" "Reinstall menu command from GitHub")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         menu)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Настройки меню" "Menu settings") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 18 82 5 \
-            "disable_autostart" "$(T "Отключить автозапуск меню при входе" "Disable menu autostart on login")" \
-            "enable_autostart" "$(T "Включить автозапуск меню при входе" "Enable menu autostart on login")" \
-            "repair_menu" "$(T "Восстановить команду меню" "Repair menu command")" \
-            "language" "$(T "Изменить язык интерфейса" "Change interface language")" \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Настройки интерфейса" "Interface settings") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Настройки только этого консольного меню." "Settings for this console menu only.")" 17 86 3 \
+            "language" "$(T "Язык интерфейса" "Interface language")" \
+            "enable_autostart" "$(T "Открывать меню при входе в shell" "Open menu on shell login")" \
+            "disable_autostart" "$(T "Не открывать меню при входе в shell" "Do not open menu on shell login")" \
             3>&1 1>&2 2>&3)" || break
           ;;
       esac
@@ -3386,57 +3393,57 @@ menu_loop_plain() {
     printf "| %-56s |\n" "LAPI: ${VPS_LAPI_URL}"
     echo "+----------------------------------------------------------+"
     echo
-    echo "$(T "[ УСТАНОВКА ]" "[ INSTALL ]")"
-    echo "  1) $(T "Установить/восстановить CrowdSec Manager + Dockerized CrowdSec" "Install/repair CrowdSec Manager + Dockerized CrowdSec")"
-    echo "  2) $(T "Применить базовую защиту" "Apply base protection")"
-    echo " 38) $(T "Источник/версия CrowdSec Manager" "CrowdSec Manager source/version")"
+    echo "$(T "[ БЫСТРЫЙ СТАРТ ]" "[ QUICK START ]")"
+    echo "  1) $(T "Установить или восстановить central stack" "Install or repair central stack")"
+    echo "  2) $(T "Выбрать источник CrowdSec Manager" "Choose CrowdSec Manager source")"
+    echo "  3) $(T "Применить базовый набор защиты" "Apply base protection set")"
+    echo "  4) $(T "Создать подключение первой VPS" "Create first VPS connection")"
     echo
-    echo "$(T "[ СТАТУС ]" "[ STATUS ]")"
-    echo "  3) $(T "Показать статус" "Show status")"
-    echo "  4) $(T "Показать созданные подключения VPS" "Show saved VPS connections")"
-    echo "  5) $(T "Показать central.env" "Show central.env")"
-    echo "  6) $(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")"
+    echo "$(T "[ ПОДКЛЮЧЕНИЯ VPS ]" "[ VPS CONNECTIONS ]")"
+    echo "  5) $(T "Создать подключение VPS" "Create VPS connection")"
+    echo "  6) $(T "Подтвердить ожидающую VPS" "Validate pending VPS")"
+    echo "  7) $(T "Показать созданные подключения" "Show created connections")"
     echo
-    echo "$(T "[ VPS / MACHINES ]" "[ VPS / MACHINES ]")"
-    echo "  7) $(T "Создать подключение VPS" "Create VPS connection")"
-    echo "  8) $(T "Подтвердить machine VPS" "Validate VPS machine")"
-    echo "  9) $(T "Добавить IP/CIDR вручную" "Add IP/CIDR manually")"
-    echo " 10) $(T "Удалить IP/CIDR из LAPI" "Remove IP/CIDR from LAPI")"
-    echo " 11) $(T "Заменить список IP/CIDR" "Replace IP/CIDR list")"
+    echo "$(T "[ ЗАЩИТА CROWDSEC ]" "[ CROWDSEC PROTECTION ]")"
+    echo "  8) $(T "Открыть меню защиты" "Open protection menu")"
+    echo "  9) $(T "Коллекции и правила CrowdSec Hub" "CrowdSec Hub collections and rules")"
+    echo " 10) $(T "Ручные блокировки и локальный blacklist" "Manual blocks and local blacklist")"
+    echo " 11) $(T "Allowlist: доверенные IP/CIDR" "Allowlist: trusted IP/CIDR")"
     echo
-    echo "$(T "[ ЗАЩИТА, ПРАВИЛА, DECISIONS ]" "[ PROTECTION, RULES, DECISIONS ]")"
-    echo " 12) $(T "Меню защиты" "Protection menu")"
-    echo " 13) $(T "Collections / Hub / rules" "Collections / Hub / rules")"
-    echo " 14) $(T "Manual decisions / local blacklist" "Manual decisions / local blacklist")"
-    echo " 15) $(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR")"
+    echo "$(T "[ СЕТЬ И LAPI ]" "[ NETWORK AND LAPI ]")"
+    echo " 12) $(T "Web UI: LAN IP и порт" "Web UI: LAN IP and port")"
+    echo " 13) $(T "LAPI: локальный порт" "LAPI: local port")"
+    echo " 14) $(T "LAPI: публичный HTTPS URL через proxy" "LAPI: public HTTPS URL through proxy")"
+    echo " 15) $(T "LAPI: прямой внешний IP/DDNS" "LAPI: direct public IP/DDNS")"
+    echo " 16) $(T "LAPI: разрешить IP/CIDR вручную" "LAPI: allow IP/CIDR manually")"
+    echo " 17) $(T "LAPI: удалить разрешённый IP/CIDR" "LAPI: remove allowed IP/CIDR")"
+    echo " 18) $(T "Сменить token регистрации VPS" "Rotate VPS registration token")"
+    echo " 19) $(T "Сменить общий ключ firewall bouncer" "Rotate shared firewall bouncer key")"
     echo
-    echo "$(T "[ СЕТЬ, TLS, КЛЮЧИ ]" "[ NETWORK, TLS, KEYS ]")"
-    echo " 16) $(T "Изменить LAN IP или порт Web UI" "Change LAN IP or Web UI port")"
-    echo " 17) $(T "Изменить порт LAPI" "Change LAPI port")"
-    echo " 18) $(T "Изменить внешний IP/DDNS" "Change public IP/DDNS")"
-    echo " 19) $(T "HTTPS LAPI через Nginx Proxy Manager" "HTTPS LAPI through Nginx Proxy Manager")"
-    echo " 20) $(T "Перегенерировать auto-registration token" "Regenerate auto-registration token")"
-    echo " 21) $(T "Перегенерировать shared bouncer key" "Regenerate shared bouncer key")"
-    echo " 22) $(T "Показать firewall/UFW" "Show firewall/UFW")"
-    echo " 23) $(T "Проверить Manager -> LAPI" "Test Manager -> LAPI")"
+    echo "$(T "[ СТАТУС И ЛОГИ ]" "[ STATUS AND LOGS ]")"
+    echo " 20) $(T "Состояние сервисов и портов" "Services and ports status")"
+    echo " 21) $(T "Сводка CrowdSec" "CrowdSec summary")"
+    echo " 22) $(T "Логи CrowdSec Manager и CrowdSec" "CrowdSec Manager and CrowdSec logs")"
+    echo " 23) $(T "Логи удалённой установки VPS" "Remote VPS install logs")"
+    echo " 24) $(T "Проверить связь Manager -> LAPI" "Test Manager -> LAPI connection")"
+    echo " 25) $(T "Версии установленного ПО" "Installed software versions")"
+    echo " 26) $(T "Показать central.env с токенами" "Show central.env with tokens")"
+    echo " 27) $(T "Правила firewall/UFW" "Firewall/UFW rules")"
     echo
-    echo "$(T "[ ОБСЛУЖИВАНИЕ ]" "[ MAINTENANCE ]")"
-    echo " 24) $(T "Перезапустить CrowdSec, Docker и Manager" "Restart CrowdSec, Docker and Manager")"
-    echo " 25) $(T "Обновить CrowdSec Manager" "Update CrowdSec Manager")"
-    echo " 26) $(T "Показать логи Manager и CrowdSec" "Show Manager and CrowdSec logs")"
-    echo " 27) $(T "Повторно применить все настройки" "Reapply all settings")"
-    echo " 28) $(T "Обновить весь стек" "Update full stack")"
-    echo " 29) $(T "Обновить пакеты Debian" "Update Debian packages")"
-    echo " 30) $(T "Обновить Docker" "Update Docker")"
-    echo " 31) $(T "Обновить Dockerized CrowdSec" "Update Dockerized CrowdSec")"
-    echo " 32) $(T "Показать версии ПО" "Show software versions")"
-    echo " 33) $(T "Логи удалённой установки VPS" "Remote VPS install logs")"
+    echo "$(T "[ ОБНОВЛЕНИЯ И ОБСЛУЖИВАНИЕ ]" "[ UPDATES AND MAINTENANCE ]")"
+    echo " 28) $(T "Обновить только CrowdSec Manager" "Update CrowdSec Manager only")"
+    echo " 29) $(T "Обновить только Dockerized CrowdSec" "Update Dockerized CrowdSec only")"
+    echo " 30) $(T "Обновить весь central stack" "Update full central stack")"
+    echo " 31) $(T "Перезапустить контейнеры central stack" "Restart central stack containers")"
+    echo " 32) $(T "Повторно применить сохранённые настройки" "Reapply saved settings")"
+    echo " 33) $(T "Обновить Docker" "Update Docker")"
+    echo " 34) $(T "Обновить пакеты Debian/Ubuntu" "Update Debian/Ubuntu packages")"
+    echo " 35) $(T "Переустановить команду меню из GitHub" "Reinstall menu command from GitHub")"
     echo
-    echo "$(T "[ МЕНЮ ]" "[ MENU ]")"
-    echo " 34) $(T "Восстановить команду меню" "Repair menu command")"
-    echo " 35) $(T "Изменить язык интерфейса" "Change interface language")"
-    echo " 36) $(T "Отключить автозапуск меню" "Disable menu autostart")"
-    echo " 37) $(T "Включить автозапуск меню" "Enable menu autostart")"
+    echo "$(T "[ НАСТРОЙКИ ИНТЕРФЕЙСА ]" "[ INTERFACE SETTINGS ]")"
+    echo " 36) $(T "Язык интерфейса" "Interface language")"
+    echo " 37) $(T "Открывать меню при входе в shell" "Open menu on shell login")"
+    echo " 38) $(T "Не открывать меню при входе в shell" "Do not open menu on shell login")"
     echo
     echo "  0) $(T "Выход" "Exit")"
     echo
@@ -3446,43 +3453,43 @@ menu_loop_plain() {
     fi
     case "${choice}" in
       1) install_or_repair_full_stack ;;
-      2) run_with_live_progress "$(T "Базовая защита CrowdSec" "Base CrowdSec protection")" apply_initial_protection_baseline ;;
-      3) show_status; pause ;;
-      4) show_connection_info; pause ;;
-      5) show_tokens_file; pause ;;
-      6) show_crowdsec_info; pause ;;
-      7) create_named_vps_bouncer_key ;;
-      8) validate_machine_prompt ;;
-      9) add_allowed_range ;;
-      10) remove_allowed_range ;;
-      11) replace_allowed_ranges ;;
-      12) manage_protection_menu ;;
-      13) manage_collections_menu ;;
-      14) manage_decisions_menu ;;
-      15) manage_trusted_ips_menu ;;
-      16) change_lan_ip_or_web_port ;;
-      17) change_lapi_port ;;
-      18) change_public_addr ;;
-      19) configure_public_lapi_url ;;
-      20) regenerate_auto_token ;;
-      21) regenerate_bouncer_key ;;
-      22) show_firewall; pause ;;
-      23) test_webui_lapi; pause ;;
-      24) restart_services ;;
-      25) update_web_ui_only ;;
-      26) show_logs; pause ;;
-      27) reapply_all_settings ;;
-      28) update_installed_stack ;;
-      29) update_system_only ;;
-      30) update_docker_only ;;
-      31) update_crowdsec_only ;;
-      32) show_versions; pause ;;
-      33) show_remote_install_logs ;;
-      34) repair_menu_installation ;;
-      35) change_language ;;
-      36) disable_login_menu ;;
+      2) configure_manager_image_source ;;
+      3) run_with_live_progress "$(T "Базовая защита CrowdSec" "Base CrowdSec protection")" apply_initial_protection_baseline ;;
+      4) create_named_vps_bouncer_key ;;
+      5) create_named_vps_bouncer_key ;;
+      6) validate_machine_prompt ;;
+      7) show_connection_info; pause ;;
+      8) manage_protection_menu ;;
+      9) manage_collections_menu ;;
+      10) manage_decisions_menu ;;
+      11) manage_trusted_ips_menu ;;
+      12) change_lan_ip_or_web_port ;;
+      13) change_lapi_port ;;
+      14) configure_public_lapi_url ;;
+      15) change_public_addr ;;
+      16) add_allowed_range ;;
+      17) remove_allowed_range ;;
+      18) regenerate_auto_token ;;
+      19) regenerate_bouncer_key ;;
+      20) show_status; pause ;;
+      21) show_crowdsec_info; pause ;;
+      22) show_logs; pause ;;
+      23) show_remote_install_logs ;;
+      24) test_webui_lapi; pause ;;
+      25) show_versions; pause ;;
+      26) show_tokens_file; pause ;;
+      27) show_firewall; pause ;;
+      28) update_web_ui_only ;;
+      29) update_crowdsec_only ;;
+      30) update_installed_stack ;;
+      31) restart_services ;;
+      32) reapply_all_settings ;;
+      33) update_docker_only ;;
+      34) update_system_only ;;
+      35) repair_menu_installation ;;
+      36) change_language ;;
       37) enable_login_menu ;;
-      38) configure_manager_image_source ;;
+      38) disable_login_menu ;;
       0) exit 0 ;;
       *) echo "$(T "Неизвестный пункт меню." "Unknown menu item.")"; pause ;;
     esac
@@ -3861,10 +3868,10 @@ show_active_decisions() {
   local tmp
   tmp="$(mktemp)"
   {
-    echo "=== Active decisions ==="
+    echo "=== Активные блокировки ==="
     crowdsec_cscli decisions list -a 2>&1 || crowdsec_cscli decisions list 2>&1 || true
   } >"${tmp}"
-  show_file "$(T "Активные decisions" "Active decisions")" "${tmp}"
+  show_file "$(T "Активные блокировки" "Active blocks")" "${tmp}"
   rm -f "${tmp}"
 }
 
@@ -3899,7 +3906,7 @@ add_manual_decision() {
 delete_manual_decision() {
   local target
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    target="$(whiptail --title " $(T "Удалить decision" "Delete decision") " --inputbox "$(T "IP или CIDR/range, для которого удалить decisions." "IP or CIDR/range to delete decisions for.")" 10 86 "" 3>&1 1>&2 2>&3)" || return 0
+    target="$(whiptail --title " $(T "Удалить блокировку" "Delete block") " --inputbox "$(T "IP или CIDR/range, для которого нужно удалить блокировку." "IP or CIDR/range to delete blocks for.")" 10 86 "" 3>&1 1>&2 2>&3)" || return 0
   else
     read -rp "$(T "IP или CIDR/range: " "IP or CIDR/range: ")" target || return 0
   fi
@@ -3917,7 +3924,7 @@ import_decisions_from_file() {
   local path duration reason tmp
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
     path="$(whiptail --title " $(T "Импорт локального blacklist" "Import local blacklist") " --inputbox "$(T "Путь к файлу на central.\n\nФайл должен содержать один IP/CIDR в строке. Строки с # игнорируются." "Path to a file on central.\n\nThe file must contain one IP/CIDR per line. Lines with # are ignored.")" 13 92 "" 3>&1 1>&2 2>&3)" || return 0
-    duration="$(whiptail --title " $(T "Длительность" "Duration") " --inputbox "$(T "Длительность imported decisions" "Imported decisions duration")" 10 80 "168h" 3>&1 1>&2 2>&3)" || return 0
+    duration="$(whiptail --title " $(T "Длительность" "Duration") " --inputbox "$(T "Срок действия импортированных блокировок" "Imported blocks duration")" 10 80 "168h" 3>&1 1>&2 2>&3)" || return 0
   else
     read -rp "$(T "Путь к файлу: " "File path: ")" path || return 0
     read -rp "$(T "Длительность [168h]: " "Duration [168h]: ")" duration || return 0
@@ -3967,12 +3974,12 @@ capi_console_status() {
 manage_collections_menu() {
   local choice
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    choice="$(whiptail --title " $(T "Collections и правила" "Collections and rules") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите набор для установки/обновления:" "Choose a set to install/update:")" 20 94 7 \
-      "base" "$(T "Базовые правила: linux + sshd" "Base rules: linux + sshd")" \
-      "vps" "$(T "Firewall/vps правила: base + iptables, если доступно" "Firewall/vps rules: base + iptables if available")" \
-      "web" "$(T "Web правила: nginx/apache/http-cve, если доступно" "Web rules: nginx/apache/http-cve if available")" \
-      "all" "$(T "Базовые + firewall + web" "Base + firewall + web")" \
-      "status" "$(T "Показать Hub, collections, scenarios, parsers" "Show Hub, collections, scenarios, parsers")" \
+    choice="$(whiptail --title " $(T "Коллекции и правила CrowdSec Hub" "CrowdSec Hub collections and rules") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите готовый набор правил или посмотрите, что уже установлено." "Choose a ready rule set or view what is already installed.")" 20 96 7 \
+      "base" "$(T "База для Linux и SSH" "Linux and SSH base")" \
+      "vps" "$(T "Сервер с firewall: база + iptables" "Server with firewall: base + iptables")" \
+      "web" "$(T "Веб-сервер: nginx/apache/http-cve" "Web server: nginx/apache/http-cve")" \
+      "all" "$(T "Полный набор: база + firewall + web" "Full set: base + firewall + web")" \
+      "status" "$(T "Что установлено: collections, scenarios, parsers" "Installed items: collections, scenarios, parsers")" \
       3>&1 1>&2 2>&3)" || return 0
   else
     echo "1) base  2) vps  3) web  4) all  5) status"
@@ -3988,11 +3995,11 @@ manage_collections_menu() {
 manage_decisions_menu() {
   local choice
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    choice="$(whiptail --title " $(T "Decisions и локальные blacklist" "Decisions and local blacklist") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 20 94 6 \
-      "list" "$(T "Показать active decisions" "Show active decisions")" \
-      "add" "$(T "Добавить manual ban decision" "Add manual ban decision")" \
-      "delete" "$(T "Удалить decision по IP/CIDR" "Delete decision by IP/CIDR")" \
-      "import" "$(T "Импортировать локальный blacklist из файла" "Import local blacklist from file")" \
+    choice="$(whiptail --title " $(T "Ручные блокировки" "Manual blocks") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Ручные блокировки нужны для IP/CIDR, которые надо заблокировать без ожидания сработки сценария." "Manual blocks are for IP/CIDR that must be blocked without waiting for a scenario trigger.")" 20 96 6 \
+      "list" "$(T "Показать активные блокировки" "Show active blocks")" \
+      "add" "$(T "Добавить ручную блокировку IP/CIDR" "Add manual IP/CIDR block")" \
+      "delete" "$(T "Удалить блокировку по IP/CIDR" "Delete block by IP/CIDR")" \
+      "import" "$(T "Импортировать blacklist из файла" "Import blacklist from file")" \
       3>&1 1>&2 2>&3)" || return 0
   else
     echo "1) list  2) add  3) delete  4) import"
@@ -4010,11 +4017,11 @@ manage_decisions_menu() {
 manage_trusted_ips_menu() {
   local choice
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    choice="$(whiptail --title " $(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Выберите действие:" "Choose an action:")" 19 92 5 \
-      "show" "$(T "Показать список" "Show list")" \
-      "add" "$(T "Добавить IP/CIDR" "Add IP/CIDR")" \
-      "remove" "$(T "Удалить IP/CIDR" "Remove IP/CIDR")" \
-      "clean" "$(T "Удалить active decisions для CrowdSec allowlist" "Remove active decisions for allowlist")" \
+    choice="$(whiptail --title " $(T "Доверенные IP/CIDR" "Trusted IP/CIDR") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Адреса из этого списка не должны блокироваться CrowdSec." "Addresses in this list should not be blocked by CrowdSec.")" 19 92 5 \
+      "show" "$(T "Показать доверенный список" "Show trusted list")" \
+      "add" "$(T "Добавить доверенный IP/CIDR" "Add trusted IP/CIDR")" \
+      "remove" "$(T "Удалить из доверенного списка" "Remove from trusted list")" \
+      "clean" "$(T "Снять блокировки с доверенных адресов" "Remove blocks from trusted addresses")" \
       3>&1 1>&2 2>&3)" || return 0
   else
     echo "1) show  2) add  3) remove  4) clean"
@@ -4025,23 +4032,23 @@ manage_trusted_ips_menu() {
     show) show_trusted_ip_list ;;
     add) add_trusted_ip ;;
     remove) remove_trusted_ip ;;
-    clean) run_with_live_progress "$(T "Удаление active decisions для CrowdSec allowlist" "Removing active decisions for allowlist")" remove_decisions_for_trusted_ips ;;
+    clean) run_with_live_progress "$(T "Снятие блокировок с доверенных адресов" "Removing blocks for trusted addresses")" remove_decisions_for_trusted_ips ;;
   esac
 }
 
 manage_protection_menu() {
   local choice
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    choice="$(whiptail --title " $(T "Защита, правила и decisions" "Protection, rules and decisions") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Central должен сам создавать decisions из логов central/VPS/node events и отдавать их bouncers. Платные blocklists не включаются автоматически." "Central should create decisions from central/VPS/node logs and serve them to bouncers. Paid blocklists are not enabled automatically.")" 22 100 8 \
-      "baseline" "$(T "Применить базовую бесплатную защиту" "Apply base free protection")" \
-      "collections" "$(T "Collections / rules / Hub" "Collections / rules / Hub")" \
-      "decisions" "$(T "Manual decisions / local blacklists" "Manual decisions / local blacklists")" \
-      "trusted" "$(T "CrowdSec allowlist IP/CIDR" "CrowdSec allowlist IP/CIDR")" \
-      "capi" "$(T "CAPI/Console статус (опционально)" "CAPI/Console status (optional)")" \
-      "info" "$(T "Machines, bouncers, alerts, decisions" "Machines, bouncers, alerts, decisions")" \
+    choice="$(whiptail --title " $(T "Защита CrowdSec" "CrowdSec protection") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Здесь настраиваются правила обнаружения, ручные блокировки и исключения. Платные blocklists не включаются автоматически." "Configure detection rules, manual blocks and exclusions here. Paid blocklists are not enabled automatically.")" 22 100 8 \
+      "baseline" "$(T "Применить базовый набор защиты" "Apply base protection set")" \
+      "collections" "$(T "Коллекции и правила CrowdSec Hub" "CrowdSec Hub collections and rules")" \
+      "decisions" "$(T "Ручные блокировки IP/CIDR" "Manual IP/CIDR blocks")" \
+      "trusted" "$(T "Доверенные IP/CIDR: не блокировать" "Trusted IP/CIDR: do not block")" \
+      "capi" "$(T "CrowdSec Console: статус подключения" "CrowdSec Console: connection status")" \
+      "info" "$(T "Сводка CrowdSec" "CrowdSec summary")" \
       3>&1 1>&2 2>&3)" || return 0
   else
-    echo "1) baseline  2) collections  3) decisions  4) trusted  5) capi  6) info"
+    echo "1) baseline  2) collections  3) blocks  4) trusted  5) console  6) info"
     read -rp "> " choice || return 0
     case "${choice}" in 1) choice=baseline;; 2) choice=collections;; 3) choice=decisions;; 4) choice=trusted;; 5) choice=capi;; 6) choice=info;; esac
   fi
@@ -4108,7 +4115,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.8.1-manager-update-split"
+SCRIPT_VERSION="v0.9.0-central-menu-rework"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
