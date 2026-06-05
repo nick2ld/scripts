@@ -156,7 +156,7 @@ MANAGER_IMAGE_MODE_OVERRIDE="${MANAGER_IMAGE_MODE:-}"
 MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG_OVERRIDE}"
 MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE_OVERRIDE:-image}"
 MANAGER_PULL_POLICY_LINE=""
-SCRIPT_VERSION="v0.9.10-manager-db-migration"
+SCRIPT_VERSION="v0.9.11-manager-standalone-health"
 SCRIPT_RELEASE_DATE="2026-06-05"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4182,7 +4182,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.9.10-manager-db-migration"
+SCRIPT_VERSION="v0.9.11-manager-standalone-health"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
@@ -4284,6 +4284,29 @@ manager_release_tag_valid() {
   [[ "${1:-}" =~ ^v?[0-9]+([.][0-9]+)*([._-][A-Za-z0-9]+)*$ ]]
 }
 
+patch_crowdsec_manager_source_for_standalone() {
+  local build_dir="$1" target="${build_dir}/internal/api/handlers/health_diagnostics.go"
+  [[ -f "${target}" ]] || return 0
+  python3 - "${target}" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+old = 'containerNames := []string{cfg.CrowdsecContainerName, cfg.TraefikContainerName, cfg.PangolinContainerName, cfg.GerbilContainerName}'
+new = '''containerNames := cfg.GetServices()
+\tif len(containerNames) == 0 {
+\t\tcontainerNames = []string{cfg.CrowdsecContainerName}
+\t}'''
+if old in text:
+    text = text.replace(old, new, 1)
+    path.write_text(text)
+PY
+  if grep -q 'cfg.TraefikContainerName, cfg.PangolinContainerName, cfg.GerbilContainerName' "${target}"; then
+    fail "$(T "Не удалось применить standalone patch к CrowdSec Manager health diagnostics." "Failed to apply standalone patch to CrowdSec Manager health diagnostics.")"
+  fi
+}
+
 get_latest_manager_release_tag() {
   local api_url="https://api.github.com/repos/${MANAGER_GITHUB_REPO}/releases/latest"
   if command -v jq >/dev/null 2>&1; then
@@ -4314,6 +4337,7 @@ build_crowdsec_manager_release() {
   tar -xzf "${tarball}" --strip-components=1 -C "${build_dir}"
 
   [[ -f "${build_dir}/Dockerfile" ]] || fail "$(T "В релизе не найден Dockerfile:" "Dockerfile was not found in the release:") ${tag}"
+  patch_crowdsec_manager_source_for_standalone "${build_dir}"
   echo "$(T "Собираю Docker image из GitHub" "Building Docker image from GitHub") ${image}..."
   docker image rm -f "${image}" >/dev/null 2>&1 || true
   docker build --pull --no-cache -t "${image}" "${build_dir}"
