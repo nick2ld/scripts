@@ -151,7 +151,6 @@ WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 DEFAULT_MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
 MANAGER_IMAGE="${MANAGER_IMAGE:-${DEFAULT_MANAGER_IMAGE}}"
 MANAGER_GITHUB_REPO="hhftechnology/crowdsec_manager"
-MANAGER_GITHUB_INDEPENDENT_REF="independent"
 MANAGER_GITHUB_TAG_OVERRIDE="${MANAGER_GITHUB_TAG:-}"
 MANAGER_IMAGE_MODE_OVERRIDE="${MANAGER_IMAGE_MODE:-}"
 MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG_OVERRIDE}"
@@ -4309,13 +4308,13 @@ build_crowdsec_manager_release() {
   mkdir -p "${MANAGER_COMPOSE_DIR}/build"
   rm -rf "${build_dir}" "${tarball}"
 
-  echo "$(T "Скачиваю CrowdSec Manager independent source" "Downloading CrowdSec Manager independent source") ${MANAGER_GITHUB_INDEPENDENT_REF} $(T "для версии" "for version") ${tag}..."
-  curl -fL "https://github.com/${MANAGER_GITHUB_REPO}/archive/refs/heads/${MANAGER_GITHUB_INDEPENDENT_REF}.tar.gz" -o "${tarball}"
+  echo "$(T "Скачиваю CrowdSec Manager release" "Downloading CrowdSec Manager release") ${tag}..."
+  curl -fL "https://github.com/${MANAGER_GITHUB_REPO}/archive/refs/tags/${tag}.tar.gz" -o "${tarball}"
   mkdir -p "${build_dir}"
   tar -xzf "${tarball}" --strip-components=1 -C "${build_dir}"
 
   [[ -f "${build_dir}/Dockerfile" ]] || fail "$(T "В релизе не найден Dockerfile:" "Dockerfile was not found in the release:") ${tag}"
-  echo "$(T "Собираю independent Docker image" "Building independent Docker image") ${image}..."
+  echo "$(T "Собираю Docker image из GitHub" "Building Docker image from GitHub") ${image}..."
   docker image rm -f "${image}" >/dev/null 2>&1 || true
   docker build --pull --no-cache -t "${image}" "${build_dir}"
 
@@ -4376,13 +4375,13 @@ configure_manager_image_source() {
   safe_source_env
   local choice tag rebuild_now
   if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
-    choice="$(whiptail --title " $(T "Источник CrowdSec Manager" "CrowdSec Manager source") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Текущий режим: ${MANAGER_IMAGE_MODE}\nТекущий tag: ${MANAGER_GITHUB_TAG:-не задан}\n\nDocker image быстрее и стабильнее. GitHub latest берёт номер последнего release, но собирает standalone/independent source." "Current mode: ${MANAGER_IMAGE_MODE}\nCurrent tag: ${MANAGER_GITHUB_TAG:-not set}\n\nDocker image is faster and more stable. GitHub latest uses the latest release version but builds standalone/independent source.")" 18 96 3 \
+    choice="$(whiptail --title " $(T "Источник CrowdSec Manager" "CrowdSec Manager source") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Текущий режим: ${MANAGER_IMAGE_MODE}\nТекущий tag: ${MANAGER_GITHUB_TAG:-не задан}\n\nDocker image быстрее и стабильнее. GitHub latest/tag собирается локально из выбранного GitHub release." "Current mode: ${MANAGER_IMAGE_MODE}\nCurrent tag: ${MANAGER_GITHUB_TAG:-not set}\n\nDocker image is faster and more stable. GitHub latest/tag is built locally from the selected GitHub release.")" 18 96 3 \
       "image" "$(T "Официальный Docker image independent" "Official independent Docker image")" \
-      "github_latest" "$(T "Собирать independent с номером latest release" "Build independent with latest release version")" \
-      "github_tag" "$(T "Собирать independent с указанным номером версии" "Build independent with specific version label")" \
+      "github_latest" "$(T "Собирать последний GitHub release" "Build latest GitHub release")" \
+      "github_tag" "$(T "Собирать конкретный GitHub tag" "Build specific GitHub tag")" \
       3>&1 1>&2 2>&3)" || return 0
     if [[ "${choice}" == "github_tag" ]]; then
-      tag="$(whiptail --title " $(T "Версия image" "Image version") " --inputbox "$(T "Введите номер версии для локального image, например v2.4.1:\n\nSource всё равно будет взят из independent branch upstream." "Enter version label for the local image, for example v2.4.1:\n\nSource will still be taken from the upstream independent branch.")" 12 78 "${MANAGER_GITHUB_TAG:-}" 3>&1 1>&2 2>&3)" || return 0
+      tag="$(whiptail --title " $(T "GitHub tag" "GitHub tag") " --inputbox "$(T "Введите release/tag, например v2.4.1:" "Enter release/tag, for example v2.4.1:")" 10 70 "${MANAGER_GITHUB_TAG:-}" 3>&1 1>&2 2>&3)" || return 0
       manager_release_tag_valid "${tag}" || { whiptail --title " $(T "Ошибка" "Error") " --msgbox "$(T "Некорректный tag." "Invalid tag.")" 8 60; return 0; }
       MANAGER_GITHUB_TAG="${tag}"
     fi
