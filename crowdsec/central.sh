@@ -156,7 +156,7 @@ MANAGER_IMAGE_MODE_OVERRIDE="${MANAGER_IMAGE_MODE:-}"
 MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG_OVERRIDE}"
 MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE_OVERRIDE:-image}"
 MANAGER_PULL_POLICY_LINE=""
-SCRIPT_VERSION="v0.9.7-manager-data-permissions"
+SCRIPT_VERSION="v0.9.8-manager-database-paths"
 SCRIPT_RELEASE_DATE="2026-06-05"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4182,7 +4182,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.9.7-manager-data-permissions"
+SCRIPT_VERSION="v0.9.8-manager-database-paths"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
@@ -4472,6 +4472,7 @@ ${MANAGER_PULL_POLICY_LINE}
       - DOCKER_HOST=unix:///var/run/docker.sock
       - COMPOSE_FILE=/app/docker-compose.yml
       - DATABASE_PATH=/app/data/settings.db
+      - HISTORY_DATABASE_PATH=/app/data/history.db
       - CONFIG_DIR=/app/config
       - BACKUP_DIR=/app/backups
       - INCLUDE_CROWDSEC=true
@@ -4500,6 +4501,24 @@ EOF
 }
 
 show_crowdsec_manager_failure_logs() {
+  local failure_log="${CONFIG_DIR}/manager-failure.log"
+  mkdir -p "${CONFIG_DIR}" 2>/dev/null || true
+  {
+    echo "=== $(date -Is) crowdsec-manager diagnostics ==="
+    docker ps -a --filter "name=^/crowdsec-manager$" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
+    echo
+    echo "=== docker inspect state ==="
+    docker inspect -f '{{json .State}}' crowdsec-manager 2>/dev/null || true
+    echo
+    echo "=== docker logs ==="
+    docker logs --tail 120 crowdsec-manager 2>&1 || true
+    echo
+    echo "=== manager app log ==="
+    [[ -f "${MANAGER_COMPOSE_DIR}/manager-logs/app/crowdsec-manager.log" ]] && tail -n 120 "${MANAGER_COMPOSE_DIR}/manager-logs/app/crowdsec-manager.log" 2>/dev/null || true
+    echo
+    echo "=== manager data dir ==="
+    ls -la "${MANAGER_COMPOSE_DIR}/manager-data" 2>/dev/null || true
+  } >"${failure_log}" 2>&1 || true
   echo
   echo "$(T "Диагностика crowdsec-manager:" "crowdsec-manager diagnostics:")"
   docker ps -a --filter "name=^/crowdsec-manager$" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
@@ -4511,6 +4530,8 @@ show_crowdsec_manager_failure_logs() {
     echo "$(T "Файл логов приложения:" "Application log file:") ${MANAGER_COMPOSE_DIR}/manager-logs/app/crowdsec-manager.log"
     tail -n 160 "${MANAGER_COMPOSE_DIR}/manager-logs/app/crowdsec-manager.log" 2>/dev/null || true
   fi
+  echo
+  echo "$(T "Полный лог ошибки без обрезки сохранён в:" "Full untruncated failure log was saved to:") ${failure_log}"
 }
 
 wait_for_crowdsec_manager_ready() {
