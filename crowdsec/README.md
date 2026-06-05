@@ -68,6 +68,47 @@ sudo crowdsec-central-menu
 
 После установки Web UI доступен только из локальной сети. Наружу нужно пробрасывать только LAPI-порт и только если внешние VPS должны подключаться к central-серверу.
 
+### CrowdSec Manager: Docker image или GitHub release
+
+По умолчанию central-скрипт использует Docker image:
+
+```bash
+hhftechnology/crowdsec-manager:independent
+```
+
+Если нужен последний опубликованный release из GitHub, открой меню:
+
+```bash
+sudo crowdsec-central-menu
+```
+
+Дальше выбери:
+
+```text
+Установка и первичная настройка -> Источник/версия CrowdSec Manager
+```
+
+Доступны три режима:
+
+- официальный Docker image `independent`;
+- сборка последнего GitHub release;
+- сборка конкретного GitHub tag.
+
+В режиме GitHub release скрипт получает `latest` release через GitHub API, скачивает tarball релиза, собирает локальный Docker image и прописывает его в `/opt/crowdsec-manager/docker-compose.yml`.
+
+Выбор сохраняется в:
+
+```bash
+/root/crowdsec-central/central.env
+```
+
+Ключи:
+
+```bash
+MANAGER_IMAGE_MODE=image|github_latest|github_tag
+MANAGER_GITHUB_TAG=v2.3.2
+```
+
 ### Что изменено в central.sh
 
 В текущей версии central-скрипта добавлены улучшения:
@@ -79,7 +120,8 @@ sudo crowdsec-central-menu
 - перед изменением UFW сохраняется backup правил;
 - перед опасными действиями с firewall показывается предупреждение;
 - обновление меню из GitHub выполняется только после проверки и подтверждения;
-- просмотр файла с токенами сопровождается предупреждением.
+- просмотр файла с токенами сопровождается предупреждением;
+- добавлен выбор источника CrowdSec Manager: Docker image, latest GitHub release или конкретный GitHub tag.
 
 ### Что устанавливает vps.sh
 
@@ -296,6 +338,47 @@ sudo crowdsec-central-menu
 
 After installation, the Web UI is intended for local network access only. Only the LAPI port should be forwarded from the Internet, and only when external VPS nodes need to connect.
 
+### CrowdSec Manager: Docker Image or GitHub Release
+
+By default, the central script uses this Docker image:
+
+```bash
+hhftechnology/crowdsec-manager:independent
+```
+
+To build the latest published GitHub release, open the menu:
+
+```bash
+sudo crowdsec-central-menu
+```
+
+Then select:
+
+```text
+Install and initial setup -> CrowdSec Manager source/version
+```
+
+Available modes:
+
+- official `independent` Docker image;
+- build latest GitHub release;
+- build specific GitHub tag.
+
+In GitHub release mode, the script reads the `latest` release through the GitHub API, downloads the release tarball, builds a local Docker image, and writes it to `/opt/crowdsec-manager/docker-compose.yml`.
+
+The selected source is stored in:
+
+```bash
+/root/crowdsec-central/central.env
+```
+
+Keys:
+
+```bash
+MANAGER_IMAGE_MODE=image|github_latest|github_tag
+MANAGER_GITHUB_TAG=v2.3.2
+```
+
 ### What Changed in central.sh
 
 The current central script includes these improvements:
@@ -307,7 +390,8 @@ The current central script includes these improvements:
 - UFW rules are backed up before changes;
 - dangerous firewall actions show a warning first;
 - menu updates from GitHub require validation and confirmation;
-- viewing the token file shows a warning.
+- viewing the token file shows a warning;
+- CrowdSec Manager source selection: Docker image, latest GitHub release, or specific GitHub tag.
 
 ### What vps.sh Installs
 

@@ -148,9 +148,14 @@ DEFAULT_WEB_PORT="3000"
 DEFAULT_LAPI_PORT="8080"
 LOCAL_LAPI_ALLOWED_RANGES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
-MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
-SCRIPT_VERSION="v0.7.24-vps-progress-timeout-fix"
-SCRIPT_RELEASE_DATE="2026-05-23"
+DEFAULT_MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
+MANAGER_IMAGE="${MANAGER_IMAGE:-${DEFAULT_MANAGER_IMAGE}}"
+MANAGER_GITHUB_REPO="hhftechnology/crowdsec_manager"
+MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG:-}"
+MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE:-image}"
+MANAGER_PULL_POLICY_LINE=""
+SCRIPT_VERSION="v0.8.0-manager-github-release-build"
+SCRIPT_RELEASE_DATE="2026-06-05"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
 REQUIRED_VPS_SCRIPT_VERSION="v0.4.9-direct-machine-credentials-fix"
@@ -534,7 +539,7 @@ safe_source_env() {
   # Безопасно читаем central.env как данные, а не как shell-код.
   # Старый вариант `source central.env` мог выполнить произвольную команду от root,
   # если файл был повреждён или изменён злоумышленником.
-  local env_lan env_web env_lapi env_public env_ranges env_token env_bouncer env_pass env_type env_public_lapi_url env_public_lapi_mode env_npm_cidr env_ui_lang
+  local env_lan env_web env_lapi env_public env_ranges env_token env_bouncer env_pass env_type env_public_lapi_url env_public_lapi_mode env_npm_cidr env_ui_lang env_manager_image_mode env_manager_github_tag
   env_lan="$(read_env_key LAN_IP)"
   env_web="$(read_env_key WEB_PORT)"
   env_lapi="$(read_env_key LAPI_PORT)"
@@ -548,6 +553,8 @@ safe_source_env() {
   env_public_lapi_mode="$(read_env_key PUBLIC_LAPI_MODE)"
   env_npm_cidr="$(read_env_key NPM_ALLOWED_CIDR)"
   env_ui_lang="$(read_env_key UI_LANG)"
+  env_manager_image_mode="$(read_env_key MANAGER_IMAGE_MODE)"
+  env_manager_github_tag="$(read_env_key MANAGER_GITHUB_TAG)"
 
   LAN_IP="${LAN_IP:-${env_lan:-$(get_lan_ip)}}"
   WEB_PORT="${WEB_PORT:-${env_web:-${DEFAULT_WEB_PORT}}}"
@@ -562,6 +569,8 @@ safe_source_env() {
   PUBLIC_LAPI_MODE="${PUBLIC_LAPI_MODE:-${env_public_lapi_mode:-direct}}"
   NPM_ALLOWED_CIDR="${NPM_ALLOWED_CIDR:-${env_npm_cidr:-}}"
   UI_LANG="${UI_LANG:-${env_ui_lang:-ru}}"
+  MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE:-${env_manager_image_mode:-image}}"
+  MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG:-${env_manager_github_tag:-}}"
 
   LAN_IP="$(sanitize_plain_value "${LAN_IP}")"
   PUBLIC_ADDR="$(sanitize_plain_value "${PUBLIC_ADDR}")"
@@ -573,6 +582,17 @@ safe_source_env() {
   SHARED_BOUNCER_KEY="$(sanitize_token_value "${SHARED_BOUNCER_KEY}")"
   WEBUI_PASSWORD="$(sanitize_token_value "${WEBUI_PASSWORD}")"
   WEB_UI_TYPE="$(sanitize_plain_value "${WEB_UI_TYPE}")"
+  MANAGER_IMAGE_MODE="$(sanitize_plain_value "${MANAGER_IMAGE_MODE}")"
+  MANAGER_GITHUB_TAG="$(sanitize_token_value "${MANAGER_GITHUB_TAG}")"
+  case "${MANAGER_IMAGE_MODE}" in
+    image|github_latest|github_tag) ;;
+    *) MANAGER_IMAGE_MODE="image" ;;
+  esac
+  if [[ "${MANAGER_IMAGE_MODE}" == "image" ]]; then
+    MANAGER_IMAGE="${DEFAULT_MANAGER_IMAGE}"
+  elif [[ -n "${MANAGER_GITHUB_TAG:-}" ]]; then
+    MANAGER_IMAGE="$(manager_local_image_name "${MANAGER_GITHUB_TAG}")"
+  fi
 
   if ! is_valid_port "${WEB_PORT}"; then
     WEB_PORT="${DEFAULT_WEB_PORT}"
@@ -611,6 +631,8 @@ save_env() {
   PUBLIC_LAPI_MODE="${PUBLIC_LAPI_MODE:-direct}"
   NPM_ALLOWED_CIDR="${NPM_ALLOWED_CIDR:-}"
   UI_LANG="${UI_LANG:-ru}"
+  MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE:-image}"
+  MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG:-}"
 
   mkdir -p "${CONFIG_DIR}"
   chmod 700 "${CONFIG_DIR}"
@@ -624,6 +646,12 @@ save_env() {
   PUBLIC_LAPI_URL="$(sanitize_token_value "${PUBLIC_LAPI_URL}")"
   PUBLIC_LAPI_MODE="$(sanitize_plain_value "${PUBLIC_LAPI_MODE}")"
   NPM_ALLOWED_CIDR="$(printf '%s' "${NPM_ALLOWED_CIDR}" | tr -cd '0-9A-Fa-f:.\/')"
+  MANAGER_IMAGE_MODE="$(sanitize_plain_value "${MANAGER_IMAGE_MODE}")"
+  MANAGER_GITHUB_TAG="$(sanitize_token_value "${MANAGER_GITHUB_TAG}")"
+  case "${MANAGER_IMAGE_MODE}" in
+    image|github_latest|github_tag) ;;
+    *) MANAGER_IMAGE_MODE="image" ;;
+  esac
 
   LOCAL_WEB_UI="http://${LAN_IP}:${WEB_PORT}"
   LOCAL_LAPI_URL="http://${LAN_IP}:${LAPI_PORT}"
@@ -652,6 +680,8 @@ PUBLIC_LAPI_MODE=${PUBLIC_LAPI_MODE}
 PUBLIC_LAPI_URL=${PUBLIC_LAPI_URL}
 NPM_ALLOWED_CIDR=${NPM_ALLOWED_CIDR}
 UI_LANG=${UI_LANG}
+MANAGER_IMAGE_MODE=${MANAGER_IMAGE_MODE}
+MANAGER_GITHUB_TAG=${MANAGER_GITHUB_TAG}
 ENV
   chmod 600 "${ENV_FILE}"
 }
@@ -3033,6 +3063,7 @@ show_versions() {
   tmp="$(mktemp)"
   {
     print_header
+    safe_source_env
     echo "Debian/Ubuntu:"
     [[ -f /etc/os-release ]] && grep PRETTY_NAME /etc/os-release | cut -d= -f2- | tr -d '"' || true
     echo
@@ -3047,6 +3078,9 @@ show_versions() {
     fi
     echo
     echo "CrowdSec Manager image:"
+    echo "source mode: ${MANAGER_IMAGE_MODE:-image}"
+    echo "github tag:  ${MANAGER_GITHUB_TAG:-not set}"
+    echo "image:       ${MANAGER_IMAGE}"
     command -v docker >/dev/null 2>&1 && docker images "${MANAGER_IMAGE}" || true
     echo
     echo "Host cscli:"
@@ -3214,6 +3248,7 @@ run_menu_action() {
     bouncer_key) regenerate_bouncer_key ;;
     firewall) show_firewall; pause ;;
     test_lapi) test_webui_lapi; pause ;;
+    manager_source) configure_manager_image_source ;;
     install_stack) install_or_repair_full_stack ;;
     restart) restart_services ;;
     update_webui) update_web_ui_only ;;
@@ -3270,7 +3305,8 @@ menu_loop_whiptail() {
     while true; do
       case "${category}" in
         install)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Установка и первичная настройка" "Install and initial setup") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Последовательные шаги установки и восстановления." "Sequential installation and repair steps.")" 18 96 5 \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Установка и первичная настройка" "Install and initial setup") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Последовательные шаги установки и восстановления." "Sequential installation and repair steps.")" 19 96 6 \
+            "manager_source" "$(T "0. Источник/версия CrowdSec Manager" "0. CrowdSec Manager source/version")" \
             "install_stack" "$(T "1. Установить/восстановить CrowdSec Manager + Dockerized CrowdSec" "1. Install/repair CrowdSec Manager + Dockerized CrowdSec")" \
             "protection_baseline" "$(T "2. Применить базовую защиту" "2. Apply base protection")" \
             "firewall" "$(T "3. Проверить firewall/UFW" "3. Check firewall/UFW")" \
@@ -3353,6 +3389,7 @@ menu_loop_plain() {
     echo "$(T "[ УСТАНОВКА ]" "[ INSTALL ]")"
     echo "  1) $(T "Установить/восстановить CrowdSec Manager + Dockerized CrowdSec" "Install/repair CrowdSec Manager + Dockerized CrowdSec")"
     echo "  2) $(T "Применить базовую защиту" "Apply base protection")"
+    echo " 38) $(T "Источник/версия CrowdSec Manager" "CrowdSec Manager source/version")"
     echo
     echo "$(T "[ СТАТУС ]" "[ STATUS ]")"
     echo "  3) $(T "Показать статус" "Show status")"
@@ -3403,7 +3440,7 @@ menu_loop_plain() {
     echo
     echo "  0) $(T "Выход" "Exit")"
     echo
-    if ! read -rp "$(T "Выбери действие [0-37]: " "Choose action [0-37]: ")" choice; then
+    if ! read -rp "$(T "Выбери действие [0-38]: " "Choose action [0-38]: ")" choice; then
       echo
       continue
     fi
@@ -3445,6 +3482,7 @@ menu_loop_plain() {
       35) change_language ;;
       36) disable_login_menu ;;
       37) enable_login_menu ;;
+      38) configure_manager_image_source ;;
       0) exit 0 ;;
       *) echo "$(T "Неизвестный пункт меню." "Unknown menu item.")"; pause ;;
     esac
@@ -4069,7 +4107,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.7.24-vps-progress-timeout-fix"
+SCRIPT_VERSION="v0.8.0-manager-github-release-build"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
@@ -4159,6 +4197,128 @@ with open(path, "w") as f:
 PY
 }
 
+manager_local_image_name() {
+  local tag="${1:-local}"
+  tag="${tag#v}"
+  tag="$(printf '%s' "${tag}" | tr -cd 'A-Za-z0-9_.-')"
+  [[ -n "${tag}" ]] || tag="local"
+  printf 'local/crowdsec-manager:%s' "${tag}"
+}
+
+manager_release_tag_valid() {
+  [[ "${1:-}" =~ ^v?[0-9]+([.][0-9]+)*([._-][A-Za-z0-9]+)*$ ]]
+}
+
+get_latest_manager_release_tag() {
+  local api_url="https://api.github.com/repos/${MANAGER_GITHUB_REPO}/releases/latest"
+  if command -v jq >/dev/null 2>&1; then
+    curl -fsSL "${api_url}" | jq -r '.tag_name // empty'
+  elif command -v python3 >/dev/null 2>&1; then
+    curl -fsSL "${api_url}" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("tag_name") or "").strip())'
+  else
+    fail "$(T "Нужен jq или python3 для чтения latest release GitHub." "jq or python3 is required to read the latest GitHub release.")"
+  fi
+}
+
+build_crowdsec_manager_release() {
+  local tag="${1:-}" tarball build_dir image
+  [[ -n "${tag}" ]] || fail "$(T "Не указан GitHub release/tag CrowdSec Manager." "CrowdSec Manager GitHub release/tag is not set.")"
+  manager_release_tag_valid "${tag}" || fail "$(T "Некорректный GitHub tag CrowdSec Manager:" "Invalid CrowdSec Manager GitHub tag:") ${tag}"
+
+  ensure_manager_paths
+  build_dir="${MANAGER_COMPOSE_DIR}/build/crowdsec-manager-${tag}"
+  tarball="${MANAGER_COMPOSE_DIR}/build/crowdsec-manager-${tag}.tar.gz"
+  image="$(manager_local_image_name "${tag}")"
+
+  mkdir -p "${MANAGER_COMPOSE_DIR}/build"
+  rm -rf "${build_dir}" "${tarball}"
+
+  echo "$(T "Скачиваю CrowdSec Manager release" "Downloading CrowdSec Manager release") ${tag}..."
+  curl -fL "https://github.com/${MANAGER_GITHUB_REPO}/archive/refs/tags/${tag}.tar.gz" -o "${tarball}"
+  mkdir -p "${build_dir}"
+  tar -xzf "${tarball}" --strip-components=1 -C "${build_dir}"
+
+  [[ -f "${build_dir}/Dockerfile" ]] || fail "$(T "В релизе не найден Dockerfile:" "Dockerfile was not found in the release:") ${tag}"
+  echo "$(T "Собираю Docker image" "Building Docker image") ${image}..."
+  docker build --pull -t "${image}" "${build_dir}"
+
+  MANAGER_GITHUB_TAG="${tag}"
+  MANAGER_IMAGE="${image}"
+  MANAGER_PULL_POLICY_LINE="    pull_policy: never"
+  echo "$(T "Локальный image CrowdSec Manager готов:" "Local CrowdSec Manager image is ready:") ${MANAGER_IMAGE}"
+}
+
+prepare_crowdsec_manager_image() {
+  safe_source_env
+  MANAGER_PULL_POLICY_LINE=""
+  case "${MANAGER_IMAGE_MODE:-image}" in
+    image)
+      MANAGER_IMAGE="${DEFAULT_MANAGER_IMAGE}"
+      ;;
+    github_latest)
+      local latest_tag
+      echo "$(T "Получаю последний release CrowdSec Manager с GitHub..." "Reading latest CrowdSec Manager release from GitHub...")"
+      latest_tag="$(get_latest_manager_release_tag)"
+      [[ -n "${latest_tag}" ]] || fail "$(T "GitHub не вернул latest release для CrowdSec Manager." "GitHub did not return a latest CrowdSec Manager release.")"
+      build_crowdsec_manager_release "${latest_tag}"
+      ;;
+    github_tag)
+      [[ -n "${MANAGER_GITHUB_TAG:-}" ]] || fail "$(T "Для режима specific tag нужно указать MANAGER_GITHUB_TAG." "MANAGER_GITHUB_TAG is required for specific tag mode.")"
+      build_crowdsec_manager_release "${MANAGER_GITHUB_TAG}"
+      ;;
+    *)
+      MANAGER_IMAGE_MODE="image"
+      MANAGER_IMAGE="${DEFAULT_MANAGER_IMAGE}"
+      ;;
+  esac
+}
+
+configure_manager_image_source() {
+  safe_source_env
+  local choice tag rebuild_now
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" && "${CROWDSEC_PROGRESS_ACTIVE:-0}" != "1" ]]; then
+    choice="$(whiptail --title " $(T "Источник CrowdSec Manager" "CrowdSec Manager source") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Текущий режим: ${MANAGER_IMAGE_MODE}\nТекущий tag: ${MANAGER_GITHUB_TAG:-не задан}\n\nDocker image быстрее и стабильнее. GitHub release собирается локально из опубликованного релиза." "Current mode: ${MANAGER_IMAGE_MODE}\nCurrent tag: ${MANAGER_GITHUB_TAG:-not set}\n\nDocker image is faster and more stable. GitHub release is built locally from a published release.")" 18 96 3 \
+      "image" "$(T "Официальный Docker image independent" "Official independent Docker image")" \
+      "github_latest" "$(T "Собирать последний GitHub release" "Build latest GitHub release")" \
+      "github_tag" "$(T "Собирать конкретный GitHub tag" "Build specific GitHub tag")" \
+      3>&1 1>&2 2>&3)" || return 0
+    if [[ "${choice}" == "github_tag" ]]; then
+      tag="$(whiptail --title " $(T "GitHub tag" "GitHub tag") " --inputbox "$(T "Введите release/tag, например v2.3.2:" "Enter release/tag, for example v2.3.2:")" 10 70 "${MANAGER_GITHUB_TAG:-}" 3>&1 1>&2 2>&3)" || return 0
+      manager_release_tag_valid "${tag}" || { whiptail --title " $(T "Ошибка" "Error") " --msgbox "$(T "Некорректный tag." "Invalid tag.")" 8 60; return 0; }
+      MANAGER_GITHUB_TAG="${tag}"
+    fi
+    MANAGER_IMAGE_MODE="${choice}"
+    case "${MANAGER_IMAGE_MODE}" in
+      image|github_latest) MANAGER_GITHUB_TAG="" ;;
+    esac
+    save_env
+    if tui_yesno "$(T "Применить сейчас" "Apply now")" "$(T "Источник сохранён. Пересобрать/переустановить CrowdSec Manager сейчас?" "Source saved. Rebuild/reinstall CrowdSec Manager now?")"; then
+      run_menu_step "$(T "Установка CrowdSec Manager" "Installing CrowdSec Manager")" install_or_update_crowdsec_manager
+    fi
+  else
+    echo "1) $(T "Docker image independent" "Independent Docker image")"
+    echo "2) $(T "Latest GitHub release" "Latest GitHub release")"
+    echo "3) $(T "Specific GitHub tag" "Specific GitHub tag")"
+    read -rp "> " choice || return 0
+    case "${choice}" in
+      1) MANAGER_IMAGE_MODE="image"; MANAGER_GITHUB_TAG="" ;;
+      2) MANAGER_IMAGE_MODE="github_latest"; MANAGER_GITHUB_TAG="" ;;
+      3)
+        read -rp "$(T "GitHub tag: " "GitHub tag: ")" tag || return 0
+        manager_release_tag_valid "${tag}" || fail "$(T "Некорректный tag." "Invalid tag.")"
+        MANAGER_IMAGE_MODE="github_tag"
+        MANAGER_GITHUB_TAG="${tag}"
+        ;;
+      *) return 0 ;;
+    esac
+    save_env
+    read -rp "$(T "Применить сейчас? [y/N]: " "Apply now? [y/N]: ")" rebuild_now || rebuild_now="n"
+    case "${rebuild_now}" in
+      y|Y|yes|YES|д|Д|да|ДА) install_or_update_crowdsec_manager ;;
+    esac
+  fi
+}
+
 write_crowdsec_manager_compose() {
   ensure_manager_paths
   mkdir -p "${MANAGER_COMPOSE_DIR}"
@@ -4185,6 +4345,7 @@ services:
 
   crowdsec-manager:
     image: ${MANAGER_IMAGE}
+${MANAGER_PULL_POLICY_LINE}
     container_name: crowdsec-manager
     restart: unless-stopped
     ports:
@@ -4232,10 +4393,17 @@ install_or_update_crowdsec_manager() {
   backup_and_remove_apt_crowdsec || true
   docker rm -f crowdsec-web-ui >/dev/null 2>&1 || true
 
+  prepare_crowdsec_manager_image
   write_crowdsec_manager_compose
 
-  echo "Pulling CrowdSec and CrowdSec Manager images..."
-  (cd "${MANAGER_COMPOSE_DIR}" && docker compose pull)
+  echo "Pulling CrowdSec image..."
+  (cd "${MANAGER_COMPOSE_DIR}" && docker compose pull crowdsec)
+  if [[ "${MANAGER_IMAGE_MODE:-image}" == "image" ]]; then
+    echo "Pulling CrowdSec Manager image..."
+    (cd "${MANAGER_COMPOSE_DIR}" && docker compose pull crowdsec-manager)
+  else
+    echo "Using locally built CrowdSec Manager image: ${MANAGER_IMAGE}"
+  fi
 
   echo "Starting CrowdSec Manager stack..."
   (cd "${MANAGER_COMPOSE_DIR}" && docker compose up -d --remove-orphans)
