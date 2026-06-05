@@ -19,3 +19,7 @@ Thumbs.db
 
 # Shellcheck cache
 .shellcheckrc.local
+
+# Local Codex/SSH diagnostics
+.tmp-paramiko/
+.tmp_ssh_*.py
