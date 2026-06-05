@@ -154,7 +154,7 @@ MANAGER_GITHUB_REPO="hhftechnology/crowdsec_manager"
 MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG:-}"
 MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE:-image}"
 MANAGER_PULL_POLICY_LINE=""
-SCRIPT_VERSION="v0.9.1-compact-menu-ui"
+SCRIPT_VERSION="v0.9.2-menu-help-and-version-check"
 SCRIPT_RELEASE_DATE="2026-06-05"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -3056,7 +3056,39 @@ show_crowdsec_info() {
 
 disable_login_menu() { print_header; rm -f "${PROFILE_FILE}"; ok "Автозапуск меню отключён."; pause; }
 enable_login_menu() { print_header; install_menu_files; ok "Автозапуск меню включён."; pause; }
-repair_menu_installation() { print_header; update_menu_from_github; ok "$(T "Скрипт обновлён из GitHub и установлен в систему: sudo crowdsec-central-menu" "Script updated from GitHub and installed into the system: sudo crowdsec-central-menu")"; pause; }
+repair_menu_installation() {
+  local remote text
+  remote="$(fetch_remote_central_script_version 2>/dev/null || true)"
+  text="$(T "Установленная версия: ${SCRIPT_VERSION}\nВерсия на GitHub: ${remote:-не удалось проверить}\n\nОбновить установленный /usr/local/sbin/crowdsec-central-menu из GitHub?" "Installed version: ${SCRIPT_VERSION}\nGitHub version: ${remote:-check failed}\n\nUpdate installed /usr/local/sbin/crowdsec-central-menu from GitHub?")"
+
+  if [[ -n "${remote}" && "${remote}" == "${SCRIPT_VERSION}" ]]; then
+    if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]] && tui_available; then
+      whiptail --title " $(T "Скрипт меню" "Menu script") " --msgbox "$(T "Скрипт уже актуален.\n\nВерсия: ${SCRIPT_VERSION}" "The script is already current.\n\nVersion: ${SCRIPT_VERSION}")" 9 70 || true
+    else
+      print_header
+      ok "$(T "Скрипт уже актуален: ${SCRIPT_VERSION}" "Script is already current: ${SCRIPT_VERSION}")"
+      pause
+    fi
+    return 0
+  fi
+
+  if [[ "${CROWDSEC_TUI_MODE:-}" == "whiptail" ]] && tui_available; then
+    tui_yesno "$(T "Проверить/обновить скрипт" "Check/update script")" "${text}" || return 0
+    CROWDSEC_ASSUME_YES=1 update_menu_from_github
+    whiptail --title " $(T "Готово" "Done") " --msgbox "$(T "Скрипт обновлён. Перезапусти меню командой:\n\nsudo crowdsec-central-menu" "Script updated. Restart the menu with:\n\nsudo crowdsec-central-menu")" 11 74 || true
+  else
+    print_header
+    printf '%b\n' "${text}"
+    read -rp "$(T "Обновить? [y/N]: " "Update? [y/N]: ")" ans || ans="n"
+    case "${ans}" in
+      y|Y|yes|YES|д|Д|да|ДА)
+        update_menu_from_github
+        ok "$(T "Скрипт обновлён. Перезапусти: sudo crowdsec-central-menu" "Script updated. Restart: sudo crowdsec-central-menu")"
+        ;;
+    esac
+    pause
+  fi
+}
 
 show_versions() {
   local tmp
@@ -3121,11 +3153,11 @@ dialog_color = (WHITE,BLUE,OFF)
 title_color = (WHITE,BLUE,ON)
 border_color = (CYAN,BLUE,ON)
 border2_color = (CYAN,BLUE,ON)
-button_active_color = (BLACK,CYAN,ON)
+button_active_color = (BLACK,WHITE,ON)
 button_inactive_color = (WHITE,BLUE,OFF)
-button_key_active_color = (BLACK,CYAN,ON)
+button_key_active_color = (BLACK,WHITE,ON)
 button_key_inactive_color = (WHITE,BLUE,ON)
-button_label_active_color = (BLACK,CYAN,ON)
+button_label_active_color = (BLACK,WHITE,ON)
 button_label_inactive_color = (WHITE,BLUE,OFF)
 inputbox_color = (WHITE,BLUE,OFF)
 inputbox_border_color = (CYAN,BLUE,ON)
@@ -3139,15 +3171,15 @@ menubox_color = (WHITE,BLUE,OFF)
 menubox_border_color = (CYAN,BLUE,ON)
 menubox_border2_color = (CYAN,BLUE,ON)
 item_color = (WHITE,BLUE,OFF)
-item_selected_color = (BLACK,CYAN,ON)
+item_selected_color = (BLACK,WHITE,ON)
 tag_color = (WHITE,BLUE,OFF)
-tag_selected_color = (BLACK,CYAN,ON)
+tag_selected_color = (BLACK,WHITE,ON)
 tag_key_color = (WHITE,BLUE,OFF)
-tag_key_selected_color = (BLACK,CYAN,ON)
+tag_key_selected_color = (BLACK,WHITE,ON)
 check_color = (WHITE,BLUE,OFF)
-check_selected_color = (BLACK,CYAN,ON)
+check_selected_color = (BLACK,WHITE,ON)
 itemhelp_color = (WHITE,BLUE,OFF)
-form_active_text_color = (BLACK,CYAN,ON)
+form_active_text_color = (BLACK,WHITE,ON)
 form_text_color = (WHITE,BLUE,OFF)
 form_item_readonly_color = (CYAN,BLUE,ON)
 gauge_color = (WHITE,BLUE,ON)
@@ -3162,13 +3194,13 @@ window=white,blue
 shadow=blue,blue
 title=white,blue
 button=white,blue
-actbutton=black,cyan
+actbutton=black,white
 checkbox=white,blue
-actcheckbox=black,cyan
+actcheckbox=black,white
 entry=white,blue
 label=white,blue
 listbox=white,blue
-actlistbox=black,cyan
+actlistbox=black,white
 textbox=white,blue
 '
 }
@@ -3184,11 +3216,43 @@ ensure_tui_tools() {
   tui_available
 }
 
+fetch_remote_central_script_version() {
+  command -v curl >/dev/null 2>&1 || return 1
+  curl -fsSL --connect-timeout 3 --max-time 7 -H "Cache-Control: no-cache" "${SCRIPT_RAW_URL}?$(date +%s)" \
+    | sed -n 's/^SCRIPT_VERSION=["'\'']\([^"'\'']*\)["'\''].*/\1/p' \
+    | head -n1
+}
+
+get_remote_central_script_version_cached() {
+  local now
+  now="$(date +%s)"
+  if [[ -n "${CENTRAL_REMOTE_VERSION_CACHE:-}" && -n "${CENTRAL_REMOTE_VERSION_TS:-}" ]] && (( now - CENTRAL_REMOTE_VERSION_TS < 300 )); then
+    printf '%s' "${CENTRAL_REMOTE_VERSION_CACHE}"
+    return 0
+  fi
+  CENTRAL_REMOTE_VERSION_CACHE="$(fetch_remote_central_script_version 2>/dev/null || true)"
+  CENTRAL_REMOTE_VERSION_TS="${now}"
+  printf '%s' "${CENTRAL_REMOTE_VERSION_CACHE}"
+}
+
+central_script_version_status_line() {
+  local remote
+  remote="$(get_remote_central_script_version_cached)"
+  if [[ -z "${remote}" ]]; then
+    printf '%s\n' "$(T "Скрипт: ${SCRIPT_VERSION} (GitHub недоступен)" "Script: ${SCRIPT_VERSION} (GitHub unavailable)")"
+  elif [[ "${remote}" != "${SCRIPT_VERSION}" ]]; then
+    printf '%s\n' "$(T "Скрипт: ${SCRIPT_VERSION} -> ${remote}  НУЖНО ОБНОВИТЬ" "Script: ${SCRIPT_VERSION} -> ${remote}  UPDATE REQUIRED")"
+  else
+    printf '%s\n' "$(T "Скрипт: ${SCRIPT_VERSION} (актуален)" "Script: ${SCRIPT_VERSION} (current)")"
+  fi
+}
+
 tui_summary() {
   safe_source_env
   cat <<EOF
 Web UI: ${LOCAL_WEB_UI}
 LAPI:   ${VPS_LAPI_URL}
+$(central_script_version_status_line)
 EOF
 }
 
@@ -3297,47 +3361,48 @@ menu_loop_whiptail() {
       --cancel-button "$(T "Выход" "Exit")" \
       --ok-button "$(T "Выбрать" "Select")" \
       --notags \
+      --item-help \
       --menu "$(T "Выберите раздел:\n\n${summary}" "Choose a section:\n\n${summary}")" \
-      19 78 8 \
-      "quickstart" "$(T "Быстрый старт и восстановление" "Quick start and recovery")" \
-      "vps" "$(T "Подключения VPS" "VPS connections")" \
-      "protection" "$(T "Защита и правила CrowdSec" "CrowdSec protection and rules")" \
-      "network" "$(T "Сеть и доступ к LAPI" "Network and LAPI access")" \
-      "status" "$(T "Статус, логи и диагностика" "Status, logs and diagnostics")" \
-      "updates" "$(T "Обновления и обслуживание" "Updates and maintenance")" \
-      "menu" "$(T "Настройки интерфейса" "Interface settings")" \
-      "exit" "$(T "Выход" "Exit")" \
+      20 86 8 \
+      "quickstart" "$(T "Быстрый старт" "Quick start")" "$(T "Чистая установка или восстановление central stack по шагам." "Clean install or central stack repair, step by step.")" \
+      "vps" "$(T "Подключения VPS" "VPS connections")" "$(T "Создать, подтвердить и посмотреть подключения серверов к LAPI." "Create, validate and view server connections to LAPI.")" \
+      "protection" "$(T "Защита CrowdSec" "CrowdSec protection")" "$(T "Коллекции Hub, ручные блокировки, allowlist и Console/CAPI." "Hub collections, manual blocks, allowlist and Console/CAPI.")" \
+      "network" "$(T "Сеть и LAPI" "Network and LAPI")" "$(T "Порты, публичный адрес LAPI, разрешённые IP и ключи доступа." "Ports, public LAPI address, allowed IPs and access keys.")" \
+      "status" "$(T "Статус и логи" "Status and logs")" "$(T "Просмотр состояния, логов, firewall, версий и токенов." "View status, logs, firewall, versions and tokens.")" \
+      "updates" "$(T "Обновления" "Updates")" "$(T "Обновить Manager, CrowdSec, Docker, пакеты ОС или сам скрипт меню." "Update Manager, CrowdSec, Docker, OS packages or the menu script itself.")" \
+      "menu" "$(T "Интерфейс" "Interface")" "$(T "Язык меню и автозапуск при входе в shell." "Menu language and shell-login autostart.")" \
+      "exit" "$(T "Выход" "Exit")" "$(T "Закрыть меню." "Close the menu.")" \
       3>&1 1>&2 2>&3)" || exit 0
     [[ "${category}" == "exit" ]] && exit 0
 
     while true; do
       case "${category}" in
         quickstart)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Быстрый старт" "Quick start") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Чистая установка: выполняй сверху вниз." "Clean install: run from top to bottom.")" 15 74 4 \
-            "install_stack" "$(T "1. Установить или восстановить" "1. Install or repair")" \
-            "manager_source" "$(T "2. Источник Manager" "2. Manager source")" \
-            "protection_baseline" "$(T "3. Базовая защита" "3. Base protection")" \
-            "node_bouncer" "$(T "4. Подключить первую VPS" "4. Connect first VPS")" \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Быстрый старт" "Quick start") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Чистая установка: выполняй сверху вниз." "Clean install: run from top to bottom.")" 17 84 4 \
+            "install_stack" "$(T "1. Установить или восстановить" "1. Install or repair")" "$(T "Ставит Dockerized CrowdSec, Manager, LAPI, firewall и команду меню." "Installs Dockerized CrowdSec, Manager, LAPI, firewall and menu command.")" \
+            "manager_source" "$(T "2. Источник Manager" "2. Manager source")" "$(T "Выбор версии Manager: Docker image, GitHub latest или tag." "Choose Manager version: Docker image, GitHub latest or tag.")" \
+            "protection_baseline" "$(T "3. Базовая защита" "3. Base protection")" "$(T "Устанавливает базовые бесплатные collections для Linux/SSH." "Installs base free collections for Linux/SSH.")" \
+            "node_bouncer" "$(T "4. Подключить первую VPS" "4. Connect first VPS")" "$(T "Создаёт данные подключения и может установить VPS по SSH." "Creates connection data and can install the VPS over SSH.")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         status)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Статус и логи" "Status and logs") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Просмотр и проверки без изменения настроек." "Read-only views and checks.")" 19 74 9 \
-            "status" "$(T "Сервисы и порты" "Services and ports")" \
-            "crowdsec_info" "$(T "Сводка CrowdSec" "CrowdSec summary")" \
-            "connect" "$(T "Подключения VPS" "VPS connections")" \
-            "firewall" "$(T "Firewall/UFW" "Firewall/UFW")" \
-            "logs" "$(T "Логи central stack" "Central stack logs")" \
-            "remote_logs" "$(T "Логи установки VPS" "VPS install logs")" \
-            "test_lapi" "$(T "Проверка Manager -> LAPI" "Manager -> LAPI test")" \
-            "versions" "$(T "Версии ПО" "Software versions")" \
-            "envfile" "$(T "central.env и токены" "central.env and tokens")" \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Статус и логи" "Status and logs") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Просмотр и проверки без изменения настроек." "Read-only views and checks.")" 21 86 9 \
+            "status" "$(T "Сервисы и порты" "Services and ports")" "$(T "Показывает контейнеры, systemd, Web UI, LAPI и listen-порты." "Shows containers, systemd, Web UI, LAPI and listen ports.")" \
+            "crowdsec_info" "$(T "Сводка CrowdSec" "CrowdSec summary")" "$(T "Machines, bouncers, alerts, active blocks." "Machines, bouncers, alerts, active blocks.")" \
+            "connect" "$(T "Подключения VPS" "VPS connections")" "$(T "Список созданных подключений и данные для повторного копирования." "Created connections and data for copying again.")" \
+            "firewall" "$(T "Firewall/UFW" "Firewall/UFW")" "$(T "Показывает текущие firewall/UFW правила." "Shows current firewall/UFW rules.")" \
+            "logs" "$(T "Логи central stack" "Central stack logs")" "$(T "Логи контейнеров crowdsec и crowdsec-manager." "Logs for crowdsec and crowdsec-manager containers.")" \
+            "remote_logs" "$(T "Логи установки VPS" "VPS install logs")" "$(T "Логи автоматической установки VPS по SSH." "Logs from automatic VPS installation over SSH.")" \
+            "test_lapi" "$(T "Проверка Manager -> LAPI" "Manager -> LAPI test")" "$(T "Проверяет, что Manager видит central LAPI." "Checks that Manager can reach central LAPI.")" \
+            "versions" "$(T "Версии ПО" "Software versions")" "$(T "Docker, CrowdSec, Manager image и host cscli." "Docker, CrowdSec, Manager image and host cscli.")" \
+            "envfile" "$(T "central.env и токены" "central.env and tokens")" "$(T "Показывает файл настроек с секретами. Не публиковать." "Shows settings file with secrets. Do not publish.")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         vps)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Подключения VPS" "VPS connections") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Создание и подтверждение VPS nodes." "Create and validate VPS nodes.")" 14 70 3 \
-            "node_bouncer" "$(T "Создать подключение" "Create connection")" \
-            "validate_machine" "$(T "Подтвердить VPS" "Validate VPS")" \
-            "connect" "$(T "Список подключений" "Connection list")" \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Подключения VPS" "VPS connections") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Создание и подтверждение VPS nodes." "Create and validate VPS nodes.")" 16 82 3 \
+            "node_bouncer" "$(T "Создать подключение" "Create connection")" "$(T "Мастер создаёт machine/bouncer, разрешает IP и даёт команду для VPS." "Wizard creates machine/bouncer, allows IP and provides VPS command.")" \
+            "validate_machine" "$(T "Подтвердить VPS" "Validate VPS")" "$(T "Подтвердить ожидающую machine после регистрации VPS." "Validate a pending machine after VPS registration.")" \
+            "connect" "$(T "Список подключений" "Connection list")" "$(T "Показать уже созданные подключения и токены." "Show already created connections and tokens.")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         protection)
@@ -3345,28 +3410,28 @@ menu_loop_whiptail() {
           break
           ;;
         network)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Сеть и LAPI" "Network and LAPI") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Адреса, порты и ключи доступа." "Addresses, ports and access keys.")" 18 76 8 \
-            "web_addr" "$(T "Web UI адрес" "Web UI address")" \
-            "lapi_port" "$(T "LAPI порт" "LAPI port")" \
-            "public_lapi_url" "$(T "Публичный HTTPS LAPI" "Public HTTPS LAPI")" \
-            "public_addr" "$(T "Прямой IP/DDNS LAPI" "Direct LAPI IP/DDNS")" \
-            "add_range" "$(T "Разрешить IP/CIDR" "Allow IP/CIDR")" \
-            "remove_range" "$(T "Удалить IP/CIDR" "Remove IP/CIDR")" \
-            "auto_token" "$(T "Token регистрации VPS" "VPS registration token")" \
-            "bouncer_key" "$(T "Ключ firewall bouncer" "Firewall bouncer key")" \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Сеть и LAPI" "Network and LAPI") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Адреса, порты и ключи доступа." "Addresses, ports and access keys.")" 20 86 8 \
+            "web_addr" "$(T "Web UI адрес" "Web UI address")" "$(T "LAN IP и порт, на которых доступен Manager внутри локалки." "LAN IP and port where Manager is available locally.")" \
+            "lapi_port" "$(T "LAPI порт" "LAPI port")" "$(T "Локальный порт central LAPI для VPS nodes и Manager." "Local central LAPI port for VPS nodes and Manager.")" \
+            "public_lapi_url" "$(T "Публичный HTTPS LAPI" "Public HTTPS LAPI")" "$(T "URL через Nginx Proxy Manager или другой reverse proxy." "URL through Nginx Proxy Manager or another reverse proxy.")" \
+            "public_addr" "$(T "Прямой IP/DDNS LAPI" "Direct LAPI IP/DDNS")" "$(T "Прямой внешний адрес, если LAPI опубликован без HTTPS proxy." "Direct public address if LAPI is exposed without HTTPS proxy.")" \
+            "add_range" "$(T "Разрешить IP/CIDR" "Allow IP/CIDR")" "$(T "Ручное разрешение адреса к LAPI. Обычно мастер VPS делает это сам." "Manually allow address to LAPI. VPS wizard usually does this.")" \
+            "remove_range" "$(T "Удалить IP/CIDR" "Remove IP/CIDR")" "$(T "Удалить ранее разрешённый адрес из LAPI/firewall." "Remove previously allowed address from LAPI/firewall.")" \
+            "auto_token" "$(T "Token регистрации VPS" "VPS registration token")" "$(T "Сменить токен auto-registration для новых VPS machines." "Rotate auto-registration token for new VPS machines.")" \
+            "bouncer_key" "$(T "Ключ firewall bouncer" "Firewall bouncer key")" "$(T "Сменить общий ключ bouncer. Уже подключённые VPS надо перенастроить." "Rotate shared bouncer key. Existing VPS nodes must be reconfigured.")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         updates)
-          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Обновления" "Updates") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --menu "$(T "Обновление компонентов и обслуживание." "Component updates and maintenance.")" 18 68 9 \
-            "update_webui" "Manager" \
-            "update_crowdsec" "CrowdSec" \
-            "update_all" "$(T "Весь stack" "Full stack")" \
-            "manager_source" "$(T "Источник Manager" "Manager source")" \
-            "restart" "$(T "Перезапуск" "Restart")" \
-            "reapply" "$(T "Применить настройки" "Reapply settings")" \
-            "update_docker" "Docker" \
-            "update_system" "$(T "Пакеты ОС" "OS packages")" \
-            "repair_menu" "$(T "Команда меню" "Menu command")" \
+          choice="$(whiptail --backtitle "$(T "Панель управления CrowdSec Central | ${SCRIPT_VERSION} от ${SCRIPT_RELEASE_DATE}" "CrowdSec Central Control Panel | ${SCRIPT_VERSION} from ${SCRIPT_RELEASE_DATE}")" --title " $(T "Обновления" "Updates") " --cancel-button "$(T "Назад" "Back")" --ok-button "$(T "Выбрать" "Select")" --notags --item-help --menu "$(T "Выберите, что именно обновить или обслужить." "Choose exactly what to update or maintain.")" 20 88 9 \
+            "update_webui" "$(T "Обновить CrowdSec Manager" "Update CrowdSec Manager")" "$(T "Обновляет только веб-интерфейс Manager. CrowdSec engine не трогается." "Updates only the Manager web UI. CrowdSec engine is not touched.")" \
+            "update_crowdsec" "$(T "Обновить CrowdSec engine" "Update CrowdSec engine")" "$(T "Обновляет только контейнер crowdsec и повторно применяет LAPI config." "Updates only the crowdsec container and reapplies LAPI config.")" \
+            "update_all" "$(T "Обновить весь central stack" "Update full central stack")" "$(T "Docker, CrowdSec, Manager и firewall-настройки." "Docker, CrowdSec, Manager and firewall settings.")" \
+            "manager_source" "$(T "Источник версии Manager" "Manager version source")" "$(T "Docker image, latest GitHub release или конкретный GitHub tag." "Docker image, latest GitHub release or specific GitHub tag.")" \
+            "restart" "$(T "Перезапустить central stack" "Restart central stack")" "$(T "Перезапускает контейнеры crowdsec и crowdsec-manager." "Restarts crowdsec and crowdsec-manager containers.")" \
+            "reapply" "$(T "Повторно применить конфигурацию" "Reapply configuration")" "$(T "Пересобирает compose/config из сохранённого central.env и применяет firewall." "Rebuilds compose/config from saved central.env and applies firewall.")" \
+            "update_docker" "$(T "Обновить Docker" "Update Docker")" "$(T "Переустанавливает/обновляет Docker CE и Compose plugin." "Installs/updates Docker CE and Compose plugin.")" \
+            "update_system" "$(T "Обновить пакеты ОС" "Update OS packages")" "$(T "apt update, upgrade, autoremove, autoclean." "apt update, upgrade, autoremove, autoclean.")" \
+            "repair_menu" "$(T "Проверить/обновить этот скрипт" "Check/update this script")" "$(T "Сверяет SCRIPT_VERSION с GitHub и обновляет /usr/local/sbin/crowdsec-central-menu." "Compares SCRIPT_VERSION with GitHub and updates /usr/local/sbin/crowdsec-central-menu.")" \
             3>&1 1>&2 2>&3)" || break
           ;;
         menu)
@@ -4115,7 +4180,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.9.1-compact-menu-ui"
+SCRIPT_VERSION="v0.9.2-menu-help-and-version-check"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then

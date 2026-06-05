@@ -123,7 +123,8 @@ MANAGER_GITHUB_TAG=v2.3.2
 - просмотр файла с токенами сопровождается предупреждением;
 - добавлен выбор источника CrowdSec Manager: Docker image, latest GitHub release или конкретный GitHub tag;
 - обновление CrowdSec Manager отделено от обновления Dockerized CrowdSec engine;
-- меню central-сервера закреплено в понятной иерархии: быстрый старт, VPS, защита, сеть, статус, обновления, настройки интерфейса.
+- меню central-сервера закреплено в понятной иерархии: быстрый старт, VPS, защита, сеть, статус, обновления, настройки интерфейса;
+- главное меню сверяет версию установленного `central.sh` с GitHub и показывает, если нужно обновить скрипт.
 
 ### Структура меню central-сервера
 
@@ -134,7 +135,7 @@ MANAGER_GITHUB_TAG=v2.3.2
 - `Защита и правила CrowdSec` - базовая защита, CrowdSec Hub, ручные блокировки, доверенные IP/CIDR, CrowdSec Console.
 - `Сеть и доступ к LAPI` - Web UI, порт LAPI, публичный HTTPS URL, прямой внешний адрес, разрешённые IP/CIDR, ключи.
 - `Статус, логи и диагностика` - сервисы, порты, логи, firewall/UFW, версии, central.env.
-- `Обновления и обслуживание` - обновление Manager, CrowdSec engine, всего stack, Docker, системных пакетов, переустановка команды меню.
+- `Обновления` - обновление Manager, CrowdSec engine, всего stack, Docker, системных пакетов, проверка и обновление самого скрипта меню.
 - `Настройки интерфейса` - язык и автозапуск меню при входе в shell.
 
 ### Что устанавливает vps.sh
@@ -407,7 +408,8 @@ The current central script includes these improvements:
 - viewing the token file shows a warning;
 - CrowdSec Manager source selection: Docker image, latest GitHub release, or specific GitHub tag;
 - CrowdSec Manager update is separated from Dockerized CrowdSec engine update;
-- the central server menu is fixed into a clear hierarchy: quick start, VPS, protection, network, status, updates, interface settings.
+- the central server menu is fixed into a clear hierarchy: quick start, VPS, protection, network, status, updates, interface settings;
+- the main menu checks the installed `central.sh` version against GitHub and shows when the script itself should be updated.
 
 ### Central Server Menu Structure
 
@@ -418,7 +420,7 @@ The main `sudo crowdsec-central-menu` menu is organized by task:
 - `CrowdSec protection and rules` - base protection, CrowdSec Hub, manual blocks, trusted IP/CIDR, CrowdSec Console.
 - `Network and LAPI access` - Web UI, LAPI port, public HTTPS URL, direct public address, allowed IP/CIDR, keys.
 - `Status, logs and diagnostics` - services, ports, logs, firewall/UFW, versions, central.env.
-- `Updates and maintenance` - update Manager, CrowdSec engine, full stack, Docker, system packages, reinstall the menu command.
+- `Updates` - update Manager, CrowdSec engine, full stack, Docker, system packages, check and update the menu script itself.
 - `Interface settings` - language and menu autostart on shell login.
 
 ### What vps.sh Installs
