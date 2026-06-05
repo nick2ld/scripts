@@ -151,10 +151,12 @@ WEBUI_IMAGE="ghcr.io/theduffman85/crowdsec-web-ui:latest"
 DEFAULT_MANAGER_IMAGE="hhftechnology/crowdsec-manager:independent"
 MANAGER_IMAGE="${MANAGER_IMAGE:-${DEFAULT_MANAGER_IMAGE}}"
 MANAGER_GITHUB_REPO="hhftechnology/crowdsec_manager"
-MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG:-}"
-MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE:-image}"
+MANAGER_GITHUB_TAG_OVERRIDE="${MANAGER_GITHUB_TAG:-}"
+MANAGER_IMAGE_MODE_OVERRIDE="${MANAGER_IMAGE_MODE:-}"
+MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG_OVERRIDE}"
+MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE_OVERRIDE:-image}"
 MANAGER_PULL_POLICY_LINE=""
-SCRIPT_VERSION="v0.9.5-manager-discovery-compose"
+SCRIPT_VERSION="v0.9.6-preserve-manager-source"
 SCRIPT_RELEASE_DATE="2026-06-05"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -569,8 +571,8 @@ safe_source_env() {
   PUBLIC_LAPI_MODE="${PUBLIC_LAPI_MODE:-${env_public_lapi_mode:-direct}}"
   NPM_ALLOWED_CIDR="${NPM_ALLOWED_CIDR:-${env_npm_cidr:-}}"
   UI_LANG="${UI_LANG:-${env_ui_lang:-ru}}"
-  MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE:-${env_manager_image_mode:-image}}"
-  MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG:-${env_manager_github_tag:-}}"
+  MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE_OVERRIDE:-${env_manager_image_mode:-${MANAGER_IMAGE_MODE:-image}}}"
+  MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG_OVERRIDE:-${env_manager_github_tag:-${MANAGER_GITHUB_TAG:-}}}"
 
   LAN_IP="$(sanitize_plain_value "${LAN_IP}")"
   PUBLIC_ADDR="$(sanitize_plain_value "${PUBLIC_ADDR}")"
@@ -4180,7 +4182,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.9.5-manager-discovery-compose"
+SCRIPT_VERSION="v0.9.6-preserve-manager-source"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
