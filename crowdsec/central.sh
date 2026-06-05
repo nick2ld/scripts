@@ -156,7 +156,7 @@ MANAGER_IMAGE_MODE_OVERRIDE="${MANAGER_IMAGE_MODE:-}"
 MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG_OVERRIDE}"
 MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE_OVERRIDE:-image}"
 MANAGER_PULL_POLICY_LINE=""
-SCRIPT_VERSION="v0.9.11-manager-standalone-health"
+SCRIPT_VERSION="v0.9.12-manager-standalone-ui-sync"
 SCRIPT_RELEASE_DATE="2026-06-05"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4182,7 +4182,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.9.11-manager-standalone-health"
+SCRIPT_VERSION="v0.9.12-manager-standalone-ui-sync"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
@@ -4285,25 +4285,316 @@ manager_release_tag_valid() {
 }
 
 patch_crowdsec_manager_source_for_standalone() {
-  local build_dir="$1" target="${build_dir}/internal/api/handlers/health_diagnostics.go"
-  [[ -f "${target}" ]] || return 0
-  python3 - "${target}" <<'PY'
+  local build_dir="$1"
+  python3 - "${build_dir}" <<'PY'
 import pathlib
+import re
 import sys
 
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-old = 'containerNames := []string{cfg.CrowdsecContainerName, cfg.TraefikContainerName, cfg.PangolinContainerName, cfg.GerbilContainerName}'
-new = '''containerNames := cfg.GetServices()
+root = pathlib.Path(sys.argv[1])
+
+def replace(path, old, new, count=1):
+    if not path.exists():
+        return False
+    text = path.read_text()
+    if old not in text:
+        return False
+    path.write_text(text.replace(old, new, count))
+    return True
+
+def regex_replace(path, pattern, repl, count=1, flags=0):
+    if not path.exists():
+        return False
+    text = path.read_text()
+    new_text, n = re.subn(pattern, repl, text, count=count, flags=flags)
+    if n:
+        path.write_text(new_text)
+        return True
+    return False
+
+# The upstream full release hardcodes Traefik/Pangolin/Gerbil in several places.
+# This installer runs CrowdSec Manager as a standalone CrowdSec UI, so patch the
+# downloaded release before building the local image while keeping release/tag semantics.
+health = root / "internal/api/handlers/health_diagnostics.go"
+replace(health,
+'''containerNames := []string{cfg.CrowdsecContainerName, cfg.TraefikContainerName, cfg.PangolinContainerName, cfg.GerbilContainerName}''',
+'''containerNames := cfg.GetServices()
 \tif len(containerNames) == 0 {
 \t\tcontainerNames = []string{cfg.CrowdsecContainerName}
-\t}'''
-if old in text:
-    text = text.replace(old, new, 1)
-    path.write_text(text)
+ \t}''')
+
+updates = root / "internal/api/handlers/updates.go"
+replace(updates,
+'''\t\tservices := map[string]serviceInfo{
+\t\t\t"traefik":  {cfg.TraefikContainerName, "traefik"},
+\t\t\t"crowdsec": {cfg.CrowdsecContainerName, "crowdsecurity/crowdsec"},
+\t\t}''',
+'''\t\tservices := map[string]serviceInfo{
+\t\t\t"crowdsec": {cfg.CrowdsecContainerName, "crowdsecurity/crowdsec"},
+\t\t}''')
+replace(updates,
+'''\t\tserviceUpdates := map[string]serviceUpdateInfo{
+\t\t\t"traefik":  {"traefik", req.TraefikTag},
+\t\t\t"crowdsec": {"crowdsecurity/crowdsec", req.CrowdSecTag},
+\t\t}''',
+'''\t\tserviceUpdates := map[string]serviceUpdateInfo{
+\t\t\t"crowdsec": {"crowdsecurity/crowdsec", req.CrowdSecTag},
+\t\t}''')
+replace(updates,
+'''\t\tserviceToContainer := map[string]string{
+\t\t\t"traefik":  cfg.TraefikContainerName,
+\t\t\t"crowdsec": cfg.CrowdsecContainerName,
+\t\t}''',
+'''\t\tserviceToContainer := map[string]string{
+\t\t\t"crowdsec": cfg.CrowdsecContainerName,
+\t\t}''')
+replace(updates, '''\t\tservices := []string{"traefik", "crowdsec"}''', '''\t\tservices := []string{"crowdsec"}''')
+
+updates_ops = root / "internal/api/handlers/updates_ops.go"
+replace(updates_ops,
+'''\t\tserviceUpdates := map[string]serviceUpdateInfo{
+\t\t\t"traefik": {"traefik", req.TraefikTag},
+\t\t}''',
+'''\t\tserviceUpdates := map[string]serviceUpdateInfo{}''')
+replace(updates_ops,
+'''\t\tserviceToContainer := map[string]string{
+\t\t\t"traefik": cfg.TraefikContainerName,
+\t\t}''',
+'''\t\tserviceToContainer := map[string]string{}''')
+replace(updates_ops, '''\t\tservices := []string{"traefik"}''', '''\t\tservices := []string{}''')
+
+update_page = root / "web/src/pages/Update.tsx"
+if update_page.exists():
+    update_page.write_text('''import { useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
+import api, { UpdateRequest } from '@/lib/api'
+import { ErrorContexts, getErrorMessage } from '@/lib/api/errors'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
+import { Badge } from '@/components/ui/badge'
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog'
+import { RefreshCw, AlertTriangle, Info, Package, AlertCircle, ArrowUpCircle } from 'lucide-react'
+import { PageHeader, QueryError } from '@/components/common'
+
+export default function Update() {
+  const queryClient = useQueryClient()
+  const [crowdsecTag, setCrowdsecTag] = useState('')
+
+  const { data: updateStatus, isLoading, isError, error, refetch } = useQuery({
+    queryKey: ['update-check'],
+    queryFn: async () => {
+      const response = await api.update.checkForUpdates()
+      return response.data.data
+    },
+  })
+
+  const updateMutation = useMutation({
+    mutationFn: (data: UpdateRequest) => api.update.updateWithCrowdSec(data),
+    onSuccess: () => {
+      toast.success('CrowdSec updated successfully')
+      queryClient.invalidateQueries({ queryKey: ['update-check'] })
+      setCrowdsecTag('')
+    },
+    onError: (error) => {
+      toast.error(getErrorMessage(error, 'Failed to update CrowdSec', ErrorContexts.UpdateWithCrowdSec))
+    },
+  })
+
+  const handleUpdate = () => {
+    updateMutation.mutate({
+      crowdsec_tag: crowdsecTag || undefined,
+      include_crowdsec: true,
+    })
+  }
+
+  const crowdsecStatus = updateStatus?.crowdsec
+
+  return (
+    <div className="space-y-6">
+      <PageHeader title="System Update" description="Update the standalone CrowdSec engine container" />
+
+      {isError && <QueryError error={error} onRetry={refetch} />}
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Package className="h-5 w-5" />
+            Current Image Tag
+          </CardTitle>
+          <CardDescription>Currently deployed CrowdSec Docker image version</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="h-16 bg-muted animate-pulse rounded" />
+          ) : crowdsecStatus ? (
+            <div className="p-4 border rounded-lg">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-sm font-medium">CrowdSec</p>
+                <div className="flex gap-2">
+                  {crowdsecStatus.update_available && (
+                    <Badge variant="success">
+                      <ArrowUpCircle className="w-3 h-3 mr-1" />
+                      Update Available
+                    </Badge>
+                  )}
+                  <Badge variant="secondary">Current</Badge>
+                </div>
+              </div>
+              <div className="flex items-center justify-between">
+                <p className="font-mono text-sm">{crowdsecStatus.current_tag || 'N/A'}</p>
+                {crowdsecStatus.latest_warning && (
+                  <div className="flex items-center text-orange-500 text-xs" title="Using 'latest' tag is not recommended for production">
+                    <AlertCircle className="w-3 h-3 mr-1" />
+                    'latest' tag warning
+                  </div>
+                )}
+              </div>
+              {crowdsecStatus.error && (
+                <p className="text-xs text-destructive mt-2">{crowdsecStatus.error}</p>
+              )}
+            </div>
+          ) : (
+            <p className="text-center text-muted-foreground py-8">Unable to fetch the CrowdSec image tag</p>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Update CrowdSec Image Tag</CardTitle>
+          <CardDescription>Leave blank to keep the current Docker image tag</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="crowdsec-tag">CrowdSec Tag</Label>
+            <Input
+              id="crowdsec-tag"
+              type="text"
+              placeholder="e.g., latest, v1.6.0, stable"
+              value={crowdsecTag}
+              onChange={(e) => setCrowdsecTag(e.target.value)}
+              disabled={updateMutation.isPending}
+            />
+          </div>
+
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button className="w-full" disabled={updateMutation.isPending}>
+                <RefreshCw className="h-4 w-4" />
+                Update CrowdSec
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle className="flex items-center gap-2">
+                  <AlertTriangle className="h-5 w-5 text-orange-500" />
+                  Update CrowdSec?
+                </AlertDialogTitle>
+                <AlertDialogDescription>
+                  This updates only the standalone CrowdSec engine container and may briefly interrupt the LAPI.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={handleUpdate} className="bg-orange-500 text-white hover:bg-orange-600">
+                  Update CrowdSec
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Info className="h-5 w-5" />
+            Update Information
+          </CardTitle>
+          <CardDescription>Standalone installation notes</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm text-muted-foreground">
+          <p>This installation does not manage Traefik, Pangolin or Gerbil containers.</p>
+          <p>Use the server menu to update the CrowdSec Manager web interface itself.</p>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+''')
+
+config_page = root / "web/src/pages/Configuration.tsx"
+if config_page.exists():
+    config_page.write_text('''import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Settings, ShieldCheck } from 'lucide-react'
+import { PageHeader } from '@/components/common'
+
+export default function Configuration() {
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        title="Configuration"
+        description="Standalone CrowdSec Manager configuration"
+      />
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <ShieldCheck className="h-5 w-5" />
+            Standalone CrowdSec Mode
+          </CardTitle>
+          <CardDescription>
+            This installation manages CrowdSec only.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2 text-sm text-muted-foreground">
+          <p>Traefik, Pangolin and Gerbil integration is disabled by the installer.</p>
+          <p>Use Hub pages, Allowlists, Whitelists, Profiles and IP Management for CrowdSec configuration.</p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Settings className="h-5 w-5" />
+            File Paths
+          </CardTitle>
+          <CardDescription>
+            CrowdSec configuration paths used by this standalone stack
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2 text-sm">
+          <p><span className="font-medium">acquis:</span> <code>/etc/crowdsec/acquis.yaml</code></p>
+          <p><span className="font-medium">profiles:</span> <code>/etc/crowdsec/profiles.yaml</code></p>
+          <p><span className="font-medium">hub:</span> <code>/etc/crowdsec/hub</code></p>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+''')
+
+health_page = root / "web/src/pages/Health.tsx"
+replace(health_page, '''import { CheckCircle2, XCircle, Activity, Shield, Globe, Container } from 'lucide-react' ''',
+                  '''import { CheckCircle2, XCircle, Activity, Shield, Container } from 'lucide-react' ''')
+replace(health_page, '''import { CheckCircle2, XCircle, Activity, Shield, Globe, Container } from 'lucide-react'\n''',
+                  '''import { CheckCircle2, XCircle, Activity, Shield, Container } from 'lucide-react'\n''')
+regex_replace(health_page, r'\n\s*<TabsTrigger value="traefik">Traefik Integration</TabsTrigger>\n', '\n')
+regex_replace(
+    health_page,
+    r'\n\s*\{/\* Traefik Integration Tab \*/\}\n\s*<TabsContent value="traefik">.*?\n\s*</TabsContent>',
+    '',
+    flags=re.S,
+)
 PY
-  if grep -q 'cfg.TraefikContainerName, cfg.PangolinContainerName, cfg.GerbilContainerName' "${target}"; then
+  if grep -R -q 'cfg.TraefikContainerName, cfg.PangolinContainerName, cfg.GerbilContainerName' "${build_dir}/internal/api/handlers" 2>/dev/null; then
     fail "$(T "Не удалось применить standalone patch к CrowdSec Manager health diagnostics." "Failed to apply standalone patch to CrowdSec Manager health diagnostics.")"
+  fi
+  if grep -R -q 'Traefik Dynamic Configuration Path\|Traefik Tag\|Traefik Integration' "${build_dir}/web/src/pages" 2>/dev/null; then
+    fail "$(T "Не удалось убрать Traefik UI из standalone сборки CrowdSec Manager." "Failed to remove Traefik UI from the standalone CrowdSec Manager build.")"
   fi
 }
 
@@ -4701,6 +4992,9 @@ install_or_update_crowdsec_manager() {
   docker exec crowdsec cscli bouncers delete shared-firewall-bouncer >/dev/null 2>&1 || true
   docker exec crowdsec cscli bouncers add shared-firewall-bouncer --key "${SHARED_BOUNCER_KEY}" >/dev/null || true
 
+  echo "Synchronizing saved CrowdSec allowlist with LAPI..."
+  apply_crowdsec_allowlist || warn "$(T "Не удалось синхронизировать allowlist. Проверь раздел Allowlists вручную." "Failed to synchronize the allowlist. Check the Allowlists page manually.")"
+
   echo "Restarting CrowdSec Manager after LAPI initialization..."
   (cd "${MANAGER_COMPOSE_DIR}" && docker compose restart crowdsec-manager)
   wait_for_crowdsec_manager_ready
@@ -4769,6 +5063,7 @@ reapply_all_settings_cmd() {
   ensure_manager_paths
   configure_docker_crowdsec_lapi
   create_or_update_shared_bouncer_key
+  apply_crowdsec_allowlist || true
   restart_crowdsec_runtime || true
   configure_ufw_full
   install_menu_files
