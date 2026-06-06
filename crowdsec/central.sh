@@ -156,7 +156,7 @@ MANAGER_IMAGE_MODE_OVERRIDE="${MANAGER_IMAGE_MODE:-}"
 MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG_OVERRIDE}"
 MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE_OVERRIDE:-image}"
 MANAGER_PULL_POLICY_LINE=""
-SCRIPT_VERSION="v0.9.12-manager-standalone-ui-sync"
+SCRIPT_VERSION="v0.9.13-lock-diagnostics"
 SCRIPT_RELEASE_DATE="2026-06-05"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -424,18 +424,55 @@ require_root() {
 }
 
 
+describe_lock_holder() {
+  local pids pid info=""
+  if command -v fuser >/dev/null 2>&1; then
+    pids="$(fuser "${LOCK_FILE}" 2>/dev/null | tr '\n' ' ' | xargs 2>/dev/null || true)"
+    for pid in ${pids:-}; do
+      [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+      if ps -p "${pid}" >/dev/null 2>&1; then
+        info="${info}
+$(ps -p "${pid}" -o pid=,ppid=,etime=,cmd= 2>/dev/null || true)"
+      fi
+    done
+  fi
+  if [[ -n "${info}" ]]; then
+    printf '%s\n%s' "$(T "Lock держит процесс:" "Lock is held by process:")" "${info}"
+  else
+    printf '%s' "$(T "PID владельца lock определить не удалось." "Could not detect the lock owner PID.")"
+  fi
+}
+
 acquire_script_lock() {
   exec 9>"${LOCK_FILE}"
   if command -v flock >/dev/null 2>&1; then
     if ! flock -n 9 2>/dev/null; then
-      fail "Уже запущен другой экземпляр CrowdSec Central menu. Если это ошибка, проверь: ${LOCK_FILE}"
+      fail "$(T "Уже запущен другой экземпляр CrowdSec Central menu." "Another CrowdSec Central menu instance is already running.")
+
+$(describe_lock_holder)
+
+$(T "Если это зависшая старая сессия, закрой её или заверши найденный PID: kill <PID>. Сам файл ${LOCK_FILE} при flock удалять бессмысленно, пока процесс жив." "If this is a stale old session, close it or terminate the shown PID: kill <PID>. Removing ${LOCK_FILE} is useless with flock while the process is alive.")"
     fi
+    printf 'pid=%s\nstarted=%s\nscript=%s\n' "$$" "$(date -Is 2>/dev/null || date)" "$0" >&9 || true
     return 0
   fi
   # Fallback для минимальных контейнеров без flock.
   if ! mkdir "${LOCK_FILE}.dir" 2>/dev/null; then
-    fail "Уже запущен другой экземпляр CrowdSec Central menu. Если это ошибка, удали: ${LOCK_FILE}.dir"
+    if [[ -f "${LOCK_FILE}.dir/pid" ]]; then
+      local old_pid
+      old_pid="$(cat "${LOCK_FILE}.dir/pid" 2>/dev/null || true)"
+      if [[ "${old_pid}" =~ ^[0-9]+$ ]] && ! ps -p "${old_pid}" >/dev/null 2>&1; then
+        rm -rf "${LOCK_FILE}.dir"
+        mkdir "${LOCK_FILE}.dir" 2>/dev/null || fail "$(T "Не удалось создать lock." "Failed to create lock.")"
+      else
+        fail "$(T "Уже запущен другой экземпляр CrowdSec Central menu." "Another CrowdSec Central menu instance is already running.") PID: ${old_pid:-unknown}"
+      fi
+    else
+      rm -rf "${LOCK_FILE}.dir"
+      mkdir "${LOCK_FILE}.dir" 2>/dev/null || fail "$(T "Уже запущен другой экземпляр CrowdSec Central menu. Если это ошибка, удали: ${LOCK_FILE}.dir" "Another CrowdSec Central menu instance is already running. If this is wrong, remove: ${LOCK_FILE}.dir")"
+    fi
   fi
+  printf '%s\n' "$$" >"${LOCK_FILE}.dir/pid" 2>/dev/null || true
   trap 'rm -rf "${LOCK_FILE}.dir"; cleanup_runtime_files' EXIT
 }
 
@@ -4182,7 +4219,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.9.12-manager-standalone-ui-sync"
+SCRIPT_VERSION="v0.9.13-lock-diagnostics"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
