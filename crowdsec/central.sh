@@ -156,7 +156,7 @@ MANAGER_IMAGE_MODE_OVERRIDE="${MANAGER_IMAGE_MODE:-}"
 MANAGER_GITHUB_TAG="${MANAGER_GITHUB_TAG_OVERRIDE}"
 MANAGER_IMAGE_MODE="${MANAGER_IMAGE_MODE_OVERRIDE:-image}"
 MANAGER_PULL_POLICY_LINE=""
-SCRIPT_VERSION="v0.9.13-lock-diagnostics"
+SCRIPT_VERSION="v0.9.14-docker-dns-fix"
 SCRIPT_RELEASE_DATE="2026-06-05"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/nick2ld/scripts/refs/heads/main/crowdsec/central.sh"
 VPS_SCRIPT_RAW_URL="https://github.com/nick2ld/scripts/raw/refs/heads/main/crowdsec/vps.sh"
@@ -4219,7 +4219,7 @@ run_menu_action() {
 # used by CrowdSec Manager: the Docker container named "crowdsec".
 # Host crowdsec/cscli is intentionally not used.
 
-SCRIPT_VERSION="v0.9.13-lock-diagnostics"
+SCRIPT_VERSION="v0.9.14-docker-dns-fix"
 
 ensure_manager_paths() {
   if [[ -f "${MANAGER_COMPOSE_FILE}" ]]; then
@@ -4798,6 +4798,9 @@ services:
     image: crowdsecurity/crowdsec:latest
     container_name: crowdsec
     restart: unless-stopped
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     environment:
       - COLLECTIONS=crowdsecurity/linux crowdsecurity/sshd
       - GID=1000
@@ -4815,6 +4818,9 @@ services:
 ${MANAGER_PULL_POLICY_LINE}
     container_name: crowdsec-manager
     restart: unless-stopped
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     ports:
       - "${LAN_IP}:${WEB_PORT}:8080"
     environment:
